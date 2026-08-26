@@ -370,7 +370,7 @@ git_cache:
 ## Autoscaling
 
 ```yaml
-provisioning: pool       # pool | autoscale
+provisioning: pool       # pool | autoscale | scaleset
 ```
 
 - **`pool`** (default) — keep N runners warm per pool. Zero inbound; works behind
@@ -381,6 +381,60 @@ provisioning: pool       # pool | autoscale
   - **Webhook** (low-latency) — set `webhook.listen` to receive `workflow_job`
     events (needs a reachable URL; use a tunnel like smee.io / cloudflared).
     Signatures verified with `webhook.secret`.
+- **`scaleset`** — let GitHub decide. A [runner scale set][scaleset] holds a
+  long-poll session open and reports the desired runner count, which is the same
+  mechanism actions-runner-controller uses.
+
+### Runner scale sets
+
+In the other two modes multirunner decides when to launch. In `scaleset` mode it
+does not: GitHub reports how many runners the scale set should have and
+multirunner provisions to that number. That buys three things:
+
+- Assignments arrive in seconds, with no poll interval to tune.
+- No inbound endpoint, so it stays NAT-safe like `pool`.
+- Demand is the queue depth GitHub computes for the scale set, rather than one
+  inferred from job events. The host also advertises real capacity, so GitHub
+  knows when it is saturated instead of having requests dropped.
+
+Runners still come from the same backends, because the session hands back the
+same JIT config `generate-jitconfig` returns. docker, containerd, podman and
+QEMU all work unchanged.
+
+```yaml
+provisioning: scaleset
+
+github:
+  scope: repo          # repo | org | enterprise (a scale set binds to one target)
+  owner: my-org
+  repo: my-repo
+
+pools:
+  - name: linux-pool
+    os: linux
+    size: 4            # also the maximum capacity advertised to GitHub
+    scale_set: multirunner-linux
+    labels: [self-hosted, linux, x64]
+
+  - name: windows-pool
+    os: windows
+    size: 2
+    scale_set: multirunner-windows
+    labels: [self-hosted, windows, x64]
+```
+
+Each pool needs its own `scale_set`, because a scale set carries one label set
+and therefore one runner OS. Names are reused across restarts, so restarting
+multirunner does not churn registrations or strand queued jobs. Target a scale
+set from a workflow the same way as any other runner:
+
+```yaml
+jobs:
+  build:
+    runs-on: [self-hosted, linux, x64]   # or: runs-on: multirunner-linux
+```
+
+[scaleset]: https://github.com/actions/scaleset
 
 ---
 

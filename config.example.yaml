@@ -19,9 +19,14 @@ auth:
   # installation_id: 78901234
   # private_key_path: "C:/path/app.pem"
 
-provisioning: "pool"             # pool | autoscale  (webhook = alias for autoscale)
+provisioning: "pool"             # pool | autoscale | scaleset  (webhook = alias for autoscale)
 #   pool      : keep N runners idle (zero inbound; works behind NAT) — default
 #   autoscale : launch runners on demand (poll queued jobs + optional webhook)
+#   scaleset  : let GitHub drive capacity through a runner scale set. A long-poll
+#               session reports the desired runner count, so assignments arrive in
+#               seconds with no poll interval to tune and no inbound endpoint.
+#               This is the same mechanism actions-runner-controller uses.
+#               Needs scope repo, org or enterprise, and a `scale_set` per pool.
 
 # Autoscale tuning (provisioning: autoscale). Polling is outbound-only (NAT-safe)
 # and works for scope=repo; the optional webhook needs GitHub to reach `listen`
@@ -76,6 +81,12 @@ pools:
     labels: [self-hosted, linux, x64]
     work_folder: _work
     name_prefix: multirunner
+    # Required when provisioning: scaleset. Each pool needs its own scale set,
+    # because a scale set carries one label set and therefore one runner OS.
+    # The name is reused across restarts, so restarting does not churn
+    # registrations or strand jobs already queued against it.
+    # scale_set: "multirunner-linux"
+    # runner_group: "Default"
     docker:
       # WSL2 Docker Engine over TCP, OR Podman/Docker-Desktop docker-compat pipe:
       #   npipe:////./pipe/docker_engine

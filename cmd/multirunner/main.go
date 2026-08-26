@@ -15,6 +15,7 @@ import (
 
 	"github.com/kardianos/service"
 	"github.com/spf13/cobra"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/GerardSmit/multirunner/internal/autoscale"
 	"github.com/GerardSmit/multirunner/internal/backend"
@@ -23,6 +24,7 @@ import (
 	"github.com/GerardSmit/multirunner/internal/github"
 	"github.com/GerardSmit/multirunner/internal/metrics"
 	"github.com/GerardSmit/multirunner/internal/pool"
+	scalesetmode "github.com/GerardSmit/multirunner/internal/scaleset"
 	"github.com/GerardSmit/multirunner/internal/vmview"
 	"github.com/GerardSmit/multirunner/internal/webhook"
 	"github.com/GerardSmit/multirunner/internal/winsetup"
@@ -493,6 +495,7 @@ func runOrchestrator(ctx context.Context, configPath string, interactive, instal
 
 	var launchers []*pool.Launcher
 	var backends []backend.Backend
+	var scaleSetPools []scaleSetPool
 	for _, pc := range cfg.Pools {
 		be, err := preparePool(ctx, pc, interactive, installDeps, logger)
 		if err != nil {
@@ -506,6 +509,7 @@ func runOrchestrator(ctx context.Context, configPath string, interactive, instal
 		env, mounts := poolEnvAndMounts(cfg, pc, sharedEnv, gitMgr, logger)
 		image := pc.ImageRef()
 		launchers = append(launchers, pool.NewLauncher(pc, image, be, ghProvider, env, mounts, logger, hooks))
+		scaleSetPools = append(scaleSetPools, scaleSetPool{cfg: pc, be: be, image: image, env: env, mounts: mounts})
 		logger.Info("pool ready", "name", pc.Name, "os", pc.OS, "size", pc.Size, "image", image,
 			"dind", pc.Docker.EnableDinD, "tool_cache", pc.ToolCache.Mode, "mounts", len(mounts))
 	}
@@ -520,9 +524,12 @@ func runOrchestrator(ctx context.Context, configPath string, interactive, instal
 	}
 
 	logger.Info("orchestrator running", "mode", cfg.Provisioning)
-	if cfg.Provisioning.IsAutoscale() {
+	switch {
+	case cfg.Provisioning.IsScaleset():
+		err = runScaleset(ctx, cfg, scaleSetPools, logger)
+	case cfg.Provisioning.IsAutoscale():
 		err = runAutoscale(ctx, cfg, ghProvider, launchers, logger)
-	} else {
+	default:
 		pools := make([]*pool.Pool, len(launchers))
 		for i, l := range launchers {
 			pools[i] = pool.NewPool(l, logger)
@@ -534,6 +541,59 @@ func runOrchestrator(ctx context.Context, configPath string, interactive, instal
 	}
 	logger.Info("shutdown complete")
 	return nil
+}
+
+// scaleSetPool is everything the scaleset mode needs to launch runners for one
+// pool. It deliberately skips pool.Launcher, because in this mode the JIT
+// config comes from the scale set session rather than from generate-jitconfig.
+type scaleSetPool struct {
+	cfg    config.Pool
+	be     backend.Backend
+	image  string
+	env    map[string]string
+	mounts []backend.Mount
+}
+
+// runScaleset holds one long-poll session per pool and provisions runners as
+// GitHub reports demand. Each pool has its own scale set, because a scale set
+// carries one label set and therefore one runner OS.
+func runScaleset(ctx context.Context, cfg *config.Config, pools []scaleSetPool, logger *slog.Logger) error {
+	target, err := scalesetmode.TargetURL(cfg.GitHub.URL, string(cfg.GitHub.Scope), cfg.GitHub.Owner, cfg.GitHub.Repo)
+	if err != nil {
+		return err
+	}
+
+	client, err := scalesetmode.NewClient(scalesetmode.ClientOptions{
+		TargetURL:      target,
+		PAT:            cfg.Auth.PAT,
+		AppID:          cfg.Auth.AppID,
+		InstallationID: cfg.Auth.InstallationID,
+		PrivateKeyPath: cfg.Auth.PrivateKeyPath,
+	})
+	if err != nil {
+		return err
+	}
+
+	g, gctx := errgroup.WithContext(ctx)
+	for _, p := range pools {
+		p := p
+		g.Go(func() error {
+			return scalesetmode.Run(gctx, client, p.be, scalesetmode.SessionOptions{
+				Name:        p.cfg.ScaleSet,
+				RunnerGroup: p.cfg.RunnerGroup,
+				Labels:      p.cfg.Labels,
+				Launch: scalesetmode.Options{
+					Image:      p.image,
+					WorkFolder: p.cfg.WorkFolder,
+					Labels:     p.cfg.Labels,
+					Env:        p.env,
+					Mounts:     p.mounts,
+					MaxRunners: p.cfg.Size,
+				},
+			}, logger.With("pool", p.cfg.Name))
+		})
+	}
+	return g.Wait()
 }
 
 func runQEMUHousekeeping(ctx context.Context, cfg *config.Config, logger *slog.Logger) error {
