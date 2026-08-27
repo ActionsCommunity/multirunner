@@ -9,7 +9,7 @@
 ARG BASE=mcr.microsoft.com/windows/servercore:ltsc2025
 
 FROM ${BASE}
-ARG RUNNER_VERSION=2.335.0
+ARG RUNNER_VERSION=2.337.0
 ARG GIT_VERSION=2.47.1
 
 SHELL ["powershell", "-NoProfile", "-Command", "$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue';"]
