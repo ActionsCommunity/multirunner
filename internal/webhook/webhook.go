@@ -76,14 +76,21 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		WorkflowJob struct {
 			Labels []string `json:"labels"`
 		} `json:"workflow_job"`
+		// Repository identifies where the job is queued. A repo-scoped runner
+		// binds to one repo, so the scaler needs this to register the runner
+		// somewhere it can actually pick the job up.
+		Repository struct {
+			FullName string `json:"full_name"`
+		} `json:"repository"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
 		http.Error(w, "bad payload", http.StatusBadRequest)
 		return
 	}
 	if payload.Action == "queued" {
-		s.logger.Info("workflow_job queued", "labels", payload.WorkflowJob.Labels)
-		s.scaler.OnQueued(payload.WorkflowJob.Labels)
+		s.logger.Info("workflow_job queued",
+			"repo", payload.Repository.FullName, "labels", payload.WorkflowJob.Labels)
+		s.scaler.OnQueued(payload.Repository.FullName, payload.WorkflowJob.Labels)
 	}
 	w.WriteHeader(http.StatusOK)
 }

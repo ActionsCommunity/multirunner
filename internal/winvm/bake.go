@@ -20,6 +20,17 @@ import (
 	"github.com/GerardSmit/multirunner/internal/vmview"
 )
 
+// DefaultRunnerVersion is the actions/runner baked into golden VMs. It is a
+// single constant because the value is a hard dependency: GitHub rejects
+// runners that are too old, and a rejected runner registers, idles briefly,
+// then exits without claiming a job, which reads as a scheduling fault rather
+// than a version one. Two copies of this literal previously drifted apart, so
+// the CLI default and the option default must resolve to the same place.
+//
+// Keep this in step with RUNNER_VERSION in images/linux/Dockerfile and
+// images/windows/Dockerfile.
+const DefaultRunnerVersion = "2.337.0"
+
 // minGitURL is the portable Git for Windows build staged into the golden so
 // actions/checkout uses real git (incremental fetch + dotgit-cache bundle) and
 // `run:`/job-hook steps can run git. Kept in sync with install-golden.ps1.
@@ -105,7 +116,7 @@ func (o *BakeOptions) defaults() {
 		o.CPUs = 2
 	}
 	if o.RunnerVersion == "" {
-		o.RunnerVersion = "2.335.0"
+		o.RunnerVersion = DefaultRunnerVersion
 	}
 	if o.AdminPassword == "" {
 		o.AdminPassword = "Multirunner!1"

@@ -36,6 +36,11 @@ func main() {
 
 const version = "0.1.0-dev"
 
+// remoteCheckTimeout bounds doctor's GitHub API phase. Sized for the workflow
+// scan, which is the only check that scales with repo count times workflow count
+// rather than repo count alone.
+const remoteCheckTimeout = 90 * time.Second
+
 func rootCmd() *cobra.Command {
 	var cfgPath string
 	var installDeps bool
@@ -128,6 +133,7 @@ for a repo-scoped App.`,
 	connectC.Flags().IntVar(&connPort, "port", 0, "local callback port (0 = auto)")
 	connectC.Flags().StringVar(&connKeyOut, "key-out", "", "path to write the App private key")
 
+	var winDataRoot string
 	winDaemon := &cobra.Command{
 		Use:   "install-windows-daemon",
 		Short: "Install the standalone Windows-container dockerd (elevates)",
@@ -138,20 +144,22 @@ registers the daemon on its own named pipe (npipe:////./pipe/docker_engine_windo
 so it coexists with Podman/Docker Desktop and the WSL Linux daemon. Windows only.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return winsetup.Install()
+			return winsetup.Install(winsetup.InstallOptions{DataRoot: winDataRoot})
 		},
 	}
+	winDaemon.Flags().StringVar(&winDataRoot, "data-root", "",
+		"where the daemon stores images and containers "+
+			"(default %ProgramData%\\multirunner\\docker\\data); "+
+			"point at an existing store to keep its images")
 
 	installContainerd := &cobra.Command{
 		Use:   "install-containerd",
 		Short: "Install containerd + runhcs + nerdctl for Windows containers (elevates)",
 		Long: `Install containerd, the runhcs shim, nerdctl, and the Windows CNI plugins as
 a service so multirunner can run Windows-container runners (pool backend:
-containerd). This is the supported Windows-container runtime — standalone Moby
-dockerd cannot create Windows containers on client editions. Triggers a UAC
-prompt, enables the Containers + Hyper-V features (may require a reboot), and
-registers containerd on \\.\pipe\containerd-containerd. Process isolation is used
-on Windows Server, Hyper-V isolation on client. Windows only.`,
+containerd). Triggers a UAC prompt, enables the Containers + Hyper-V features
+(may require a reboot), and registers containerd on \\.\pipe\containerd-containerd.
+Process isolation is used on Windows Server, Hyper-V isolation on client. Windows only.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return winsetup.InstallContainerd()
@@ -276,7 +284,7 @@ command without running it (for manual/observed installs).`,
 	c.Flags().IntVar(&memMB, "mem-mb", 4096, "install VM memory (MB)")
 	c.Flags().IntVar(&cpus, "cpus", 2, "install VM vCPUs")
 	c.Flags().StringVar(&accel, "accel", "", "QEMU accel: kvm|whpx|hvf|tcg ('' = auto)")
-	c.Flags().StringVar(&runnerVer, "runner-version", "2.335.0", "actions/runner version to bake in")
+	c.Flags().StringVar(&runnerVer, "runner-version", winvm.DefaultRunnerVersion, "actions/runner version to bake in")
 	c.Flags().StringSliceVar(&tools, "tools", nil, "toolchains to bake into the golden: dotnet,node,go,buildtools")
 	c.Flags().BoolVar(&licensed, "licensed", false, "a real Windows key/KMS is configured (skip eval housekeeping)")
 	c.Flags().StringVar(&vncWeb, "vnc-web", "127.0.0.1:8090", "serve a browser VNC viewer at host:port to watch the install (empty to disable)")
@@ -406,13 +414,40 @@ func runOrchestrator(ctx context.Context, configPath string, interactive, instal
 		logger.Warn(warn)
 	}
 
-	ghClient, err := github.New(ctx, cfg.GitHub, cfg.Auth)
-	if err != nil {
-		return fmt.Errorf("github client: %w", err)
+	// Build the GitHub client provider. For scope=repos, create a per-repo
+	// client for each listed repo and wrap them in a round-robin RepoSet.
+	var ghProvider github.ClientProvider
+	if cfg.GitHub.Scope == config.ScopeRepos {
+		refs := cfg.GitHub.ResolvedRepos()
+		clients := make([]*github.Client, len(refs))
+		repoLabels := make([]string, len(refs))
+		for i, ref := range refs {
+			repoGH := cfg.GitHub
+			repoGH.Scope = config.ScopeRepo
+			repoGH.Owner = ref.Owner
+			repoGH.Repo = ref.Repo
+			c, err := github.New(ctx, repoGH, cfg.Auth)
+			if err != nil {
+				return fmt.Errorf("github client for %s/%s: %w", ref.Owner, ref.Repo, err)
+			}
+			clients[i] = c
+			repoLabels[i] = ref.Owner + "/" + ref.Repo
+		}
+		ghProvider = github.NewRepoSet(clients, repoLabels)
+		logger.Info("starting",
+			"scope", cfg.GitHub.Scope,
+			"repos", repoLabels,
+			"provisioning", cfg.Provisioning, "pools", len(cfg.Pools))
+	} else {
+		ghClient, err := github.New(ctx, cfg.GitHub, cfg.Auth)
+		if err != nil {
+			return fmt.Errorf("github client: %w", err)
+		}
+		ghProvider = ghClient
+		logger.Info("starting",
+			"scope", cfg.GitHub.Scope, "owner", cfg.GitHub.Owner,
+			"provisioning", cfg.Provisioning, "pools", len(cfg.Pools))
 	}
-	logger.Info("starting",
-		"scope", cfg.GitHub.Scope, "owner", cfg.GitHub.Owner,
-		"provisioning", cfg.Provisioning, "pools", len(cfg.Pools))
 
 	runQEMUHousekeeping(ctx, cfg, logger)
 
@@ -459,7 +494,7 @@ func runOrchestrator(ctx context.Context, configPath string, interactive, instal
 
 		env, mounts := poolEnvAndMounts(cfg, pc, sharedEnv, gitMgr, logger)
 		image := pc.ImageRef()
-		launchers = append(launchers, pool.NewLauncher(pc, image, be, ghClient, env, mounts, logger, hooks))
+		launchers = append(launchers, pool.NewLauncher(pc, image, be, ghProvider, env, mounts, logger, hooks))
 		logger.Info("pool ready", "name", pc.Name, "os", pc.OS, "size", pc.Size, "image", image,
 			"dind", pc.Docker.EnableDinD, "tool_cache", pc.ToolCache.Mode, "mounts", len(mounts))
 	}
@@ -475,7 +510,7 @@ func runOrchestrator(ctx context.Context, configPath string, interactive, instal
 
 	logger.Info("orchestrator running", "mode", cfg.Provisioning)
 	if cfg.Provisioning.IsAutoscale() {
-		err = runAutoscale(ctx, cfg, ghClient, launchers, logger)
+		err = runAutoscale(ctx, cfg, ghProvider, launchers, logger)
 	} else {
 		pools := make([]*pool.Pool, len(launchers))
 		for i, l := range launchers {
@@ -516,8 +551,8 @@ func runQEMUHousekeeping(ctx context.Context, cfg *config.Config, logger *slog.L
 
 // runAutoscale runs the on-demand scaler (polling) plus an optional webhook
 // receiver (when webhook.listen is set and reachable from GitHub).
-func runAutoscale(ctx context.Context, cfg *config.Config, ghClient *github.Client, launchers []*pool.Launcher, logger *slog.Logger) error {
-	scaler := autoscale.New(launchers, ghClient, cfg.GitHub.Scope, cfg.Webhook.PollIntervalSec, logger)
+func runAutoscale(ctx context.Context, cfg *config.Config, ghProvider github.ClientProvider, launchers []*pool.Launcher, logger *slog.Logger) error {
+	scaler := autoscale.New(launchers, ghProvider, cfg.GitHub.Scope, cfg.Webhook.PollIntervalSec, logger)
 	if cfg.Webhook.Listen != "" {
 		if cfg.Webhook.Secret == "" {
 			logger.Warn("webhook listener has no secret; signatures will not be verified")
@@ -528,7 +563,7 @@ func runAutoscale(ctx context.Context, cfg *config.Config, ghClient *github.Clie
 				logger.Error("webhook server error", "err", err)
 			}
 		}()
-	} else if cfg.GitHub.Scope != config.ScopeRepo {
+	} else if cfg.GitHub.Scope != config.ScopeRepo && cfg.GitHub.Scope != config.ScopeRepos {
 		logger.Warn("autoscale without a webhook on non-repo scope cannot poll queued jobs; set webhook.listen (behind NAT use a tunnel) or use provisioning: pool")
 	}
 	return scaler.Run(ctx)
@@ -602,7 +637,7 @@ func maybeInstallWindowsDaemon(pc config.Pool, interactive, installDeps bool, lo
 		}
 	}
 	logger.Info("installing windows container daemon (elevation prompt may appear)")
-	if err := winsetup.Install(); err != nil {
+	if err := winsetup.Install(winsetup.InstallOptions{}); err != nil {
 		return fmt.Errorf("install windows daemon: %w", err)
 	}
 	return nil
@@ -656,11 +691,162 @@ func doctor(configPath string) error {
 		be.Close()
 		fmt.Printf("[%s] os=%s host=%s image=%s -> %s\n", pc.Name, pc.OS, pc.Docker.Host, pc.ImageRef(), status)
 	}
+	warnStarvedRepos(cfg)
+	// The remote checks get a budget of their own. They share nothing with the
+	// pool pings above, and a single hung daemon eating the 20s would otherwise
+	// starve them into reporting "could not check" for every repo, which reads
+	// as a GitHub problem when it is a local one.
+	apiCtx, apiCancel := context.WithTimeout(context.WithoutCancel(ctx), remoteCheckTimeout)
+	defer apiCancel()
+	if err := checkActionsEnabled(apiCtx, cfg); err != nil {
+		allOK = false
+	}
+	warnNoSelfHostedWorkflows(apiCtx, cfg)
 	if !allOK {
 		return fmt.Errorf("preflight found problems")
 	}
 	fmt.Println("\nall pools ready")
 	return nil
+}
+
+// checkActionsEnabled flags configured repos that have GitHub Actions switched
+// off. Such a repo never queues a job, so multirunner polls it every interval
+// forever and the operator sees nothing: no error, no runner, no work. It looks
+// identical to a repo that is merely idle, which is what makes it worth calling
+// out here. Returns an error if any repo is off, so doctor exits non-zero.
+//
+// Only meaningful for scope=repos; org and enterprise scopes have no per-repo
+// list to check. Repos that fail the lookup (deleted, renamed, token missing the
+// scope) are reported but do not fail the run, because that is a token or
+// inventory problem rather than the silent misconfiguration this guards against.
+func checkActionsEnabled(ctx context.Context, cfg *config.Config) error {
+	if cfg.GitHub.Scope != config.ScopeRepos {
+		return nil
+	}
+	var disabled []string
+	for _, ref := range cfg.GitHub.ResolvedRepos() {
+		repoGH := cfg.GitHub
+		repoGH.Scope = config.ScopeRepo
+		repoGH.Owner = ref.Owner
+		repoGH.Repo = ref.Repo
+		name := ref.Owner + "/" + ref.Repo
+
+		c, err := github.New(ctx, repoGH, cfg.Auth)
+		if err != nil {
+			fmt.Printf("\n[%s] could not check Actions: %v\n", name, err)
+			continue
+		}
+		on, err := c.ActionsEnabled(ctx)
+		if err != nil {
+			fmt.Printf("\n[%s] could not check Actions: %v\n", name, err)
+			continue
+		}
+		if !on {
+			disabled = append(disabled, name)
+		}
+	}
+	if len(disabled) == 0 {
+		return nil
+	}
+	fmt.Printf("\nWARNING: Actions is disabled on %d of %d configured repo(s): %s\n"+
+		"        These repos can never queue a job, so multirunner polls them for nothing.\n"+
+		"        fix: enable Actions under Settings > Actions > General, or drop them from github.repos.\n",
+		len(disabled), len(cfg.GitHub.ResolvedRepos()), strings.Join(disabled, ", "))
+	return fmt.Errorf("actions disabled on %d repo(s)", len(disabled))
+}
+
+// warnNoSelfHostedWorkflows flags configured repos where no workflow targets a
+// self-hosted runner. Listing a repo here tells multirunner to poll it every
+// interval forever, but a repo whose workflows all run on GitHub-hosted runners
+// can never hand it a job. The pools just look idle, which is indistinguishable
+// from a quiet day.
+//
+// Detection is a literal search for "self-hosted" under .github/workflows.
+// runs-on can legally name custom labels only (runs-on: [Windows, X64]) and
+// matrix or expression forms cannot be resolved without evaluating the workflow,
+// so a miss here is possible. That is why this only ever advises and never fails
+// doctor: a false alarm on a working repo would be worse than staying quiet.
+func warnNoSelfHostedWorkflows(ctx context.Context, cfg *config.Config) {
+	if cfg.GitHub.Scope != config.ScopeRepos {
+		return
+	}
+	var unused []string
+	for _, ref := range cfg.GitHub.ResolvedRepos() {
+		repoGH := cfg.GitHub
+		repoGH.Scope = config.ScopeRepo
+		repoGH.Owner = ref.Owner
+		repoGH.Repo = ref.Repo
+		name := ref.Owner + "/" + ref.Repo
+
+		c, err := github.New(ctx, repoGH, cfg.Auth)
+		if err != nil {
+			fmt.Printf("\n[%s] could not scan workflows: %v\n", name, err)
+			continue
+		}
+		found, err := repoTargetsSelfHosted(ctx, c)
+		if err != nil {
+			fmt.Printf("\n[%s] could not scan workflows: %v\n", name, err)
+			continue
+		}
+		if !found {
+			unused = append(unused, name)
+		}
+	}
+	if len(unused) == 0 {
+		return
+	}
+	fmt.Printf("\nNOTE: no workflow targets a self-hosted runner in %d of %d configured repo(s): %s\n"+
+		"        multirunner polls these every interval but they can never send it a job.\n"+
+		"        fix: point a workflow at `runs-on: [self-hosted, ...]`, or drop them from github.repos.\n"+
+		"        (custom-label and matrix runs-on forms are not detected, so verify before removing)\n",
+		len(unused), len(cfg.GitHub.ResolvedRepos()), strings.Join(unused, ", "))
+}
+
+// repoTargetsSelfHosted reports whether any workflow file mentions the
+// self-hosted label. Stops at the first hit so a repo that uses multirunner
+// costs one extra call rather than one per workflow.
+func repoTargetsSelfHosted(ctx context.Context, c *github.Client) (bool, error) {
+	paths, err := c.RepoFilePaths(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, p := range paths {
+		if !strings.HasPrefix(p, ".github/workflows/") {
+			continue
+		}
+		if ext := strings.ToLower(filepath.Ext(p)); ext != ".yml" && ext != ".yaml" {
+			continue
+		}
+		body, err := c.RepoFile(ctx, p)
+		if err != nil {
+			return false, err
+		}
+		if strings.Contains(string(body), "self-hosted") {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// warnStarvedRepos flags the one config shape that silently strands work: pool
+// provisioning across more repos than a pool has slots. A repo-scoped runner
+// binds to exactly one repo, and a pool slot only re-registers after its runner
+// finishes a job, so idle slots never rotate. Repos that never win a slot get no
+// runner at all and their jobs queue forever. Autoscale does not have this
+// problem because it places runners on the repo that queued the work.
+func warnStarvedRepos(cfg *config.Config) {
+	if cfg.GitHub.Scope != config.ScopeRepos || cfg.Provisioning.IsAutoscale() {
+		return
+	}
+	repos := len(cfg.GitHub.Repos)
+	for _, pc := range cfg.Pools {
+		if pc.Size >= repos {
+			continue
+		}
+		fmt.Printf("\n[%s] WARNING: size=%d but repos=%d. At least %d repo(s) will have no %s runner and their jobs will stay queued.\n"+
+			"        fix: raise size to %d, or set provisioning: autoscale so runners are placed on the repo that queued the job.\n",
+			pc.Name, pc.Size, repos, repos-pc.Size, pc.OS, repos)
+	}
 }
 
 func newLogger(l config.Log) *slog.Logger {

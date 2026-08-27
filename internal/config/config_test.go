@@ -77,6 +77,14 @@ auth: {pat: x}
 pools:
   - {name: p, os: linux, docker: {host: h}}
   - {name: p, os: windows, docker: {host: h2}}`,
+		"repos without repos list": `
+github: {scope: repos, owner: o}
+auth: {pat: x}
+pools: [{name: p, os: linux, docker: {host: h}}]`,
+		"repos without owner": `
+github: {scope: repos, repos: [a, b]}
+auth: {pat: x}
+pools: [{name: p, os: linux, docker: {host: h}}]`,
 	}
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -119,9 +127,12 @@ func TestImageRef(t *testing.T) {
 		{"linux", "native-build", "", "gerardsmit/multirunner-runner-linux:native-build"},
 		{"linux", "rust", "", "gerardsmit/multirunner-runner-linux:rust"},
 		{"linux", "go", "", "gerardsmit/multirunner-runner-linux:go"},
+		{"windows", "node", "", "gerardsmit/multirunner-runner-windows:node"},
+		{"windows", "dotnet", "", "gerardsmit/multirunner-runner-windows:dotnet"},
 		{"windows", "buildtools", "", "gerardsmit/multirunner-runner-windows:buildtools"},
 		{"linux", "custom", "", "multirunner/runner-linux-custom:dev"},
 		{"windows", "minimal", "", "gerardsmit/multirunner-runner-windows:latest"},
+		{"windows", "rust", "", "multirunner/runner-windows-rust:dev"},
 		{"linux", "minimal", "ghcr.io/me/x:1", "ghcr.io/me/x:1"},
 	}
 	for _, c := range cases {
@@ -236,5 +247,199 @@ pools: [{name: p, os: linux, docker: {host: h}}]`)
 	}
 	if !c.Auth.IsApp() {
 		t.Error("IsApp = false, want true")
+	}
+}
+
+func TestScopeReposValid(t *testing.T) {
+	p := writeConfig(t, `
+github:
+  scope: repos
+  owner: octocat
+  repos: [repo-a, repo-b, repo-c]
+auth:
+  pat: ghp_x
+pools:
+  - name: linux-pool
+    os: linux
+    docker:
+      host: tcp://127.0.0.1:2375
+`)
+	c, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.GitHub.Scope != ScopeRepos {
+		t.Errorf("scope = %q, want repos", c.GitHub.Scope)
+	}
+	if c.GitHub.Owner != "octocat" {
+		t.Errorf("owner = %q", c.GitHub.Owner)
+	}
+	if len(c.GitHub.Repos) != 3 {
+		t.Fatalf("repos = %v, want 3 entries", c.GitHub.Repos)
+	}
+	if c.GitHub.Repos[0] != "repo-a" || c.GitHub.Repos[2] != "repo-c" {
+		t.Errorf("repos = %v", c.GitHub.Repos)
+	}
+}
+
+func TestScopeReposWarnsOnRepoField(t *testing.T) {
+	p := writeConfig(t, `
+github:
+  scope: repos
+  owner: o
+  repo: stale
+  repos: [a, b]
+auth:
+  pat: ghp_x
+pools:
+  - name: p
+    os: linux
+    docker:
+      host: h
+`)
+	c, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	w := c.Warnings()
+	found := false
+	for _, msg := range w {
+		if strings.Contains(msg, "github.repo is ignored") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected warning about github.repo being ignored, got %v", w)
+	}
+}
+
+func TestScopeReposMixedOwners(t *testing.T) {
+	p := writeConfig(t, `
+github:
+  scope: repos
+  owner: octocat
+  repos:
+    - repo-a
+    - repo-b
+    - otheruser/repo-c
+auth:
+  pat: ghp_x
+pools:
+  - name: linux-pool
+    os: linux
+    docker:
+      host: tcp://127.0.0.1:2375
+`)
+	c, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	refs := c.GitHub.ResolvedRepos()
+	if len(refs) != 3 {
+		t.Fatalf("ResolvedRepos = %v, want 3 entries", refs)
+	}
+	if refs[0].Owner != "octocat" || refs[0].Repo != "repo-a" {
+		t.Errorf("refs[0] = %+v, want octocat/repo-a", refs[0])
+	}
+	if refs[1].Owner != "octocat" || refs[1].Repo != "repo-b" {
+		t.Errorf("refs[1] = %+v, want octocat/repo-b", refs[1])
+	}
+	if refs[2].Owner != "otheruser" || refs[2].Repo != "repo-c" {
+		t.Errorf("refs[2] = %+v, want otheruser/repo-c", refs[2])
+	}
+}
+
+func TestScopeReposNoOwnerWithFullPaths(t *testing.T) {
+	p := writeConfig(t, `
+github:
+  scope: repos
+  repos:
+    - alice/repo-x
+    - bob/repo-y
+auth:
+  pat: ghp_x
+pools:
+  - name: p
+    os: linux
+    docker:
+      host: h
+`)
+	c, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v (full paths should not require owner)", err)
+	}
+	refs := c.GitHub.ResolvedRepos()
+	if refs[0].Owner != "alice" || refs[0].Repo != "repo-x" {
+		t.Errorf("refs[0] = %+v", refs[0])
+	}
+	if refs[1].Owner != "bob" || refs[1].Repo != "repo-y" {
+		t.Errorf("refs[1] = %+v", refs[1])
+	}
+}
+
+func TestParseRepoRef(t *testing.T) {
+	cases := []struct {
+		entry, defaultOwner string
+		wantOwner, wantRepo string
+	}{
+		{"my-repo", "octocat", "octocat", "my-repo"},
+		{"other/their-repo", "octocat", "other", "their-repo"},
+		{"other/their-repo", "", "other", "their-repo"},
+		{"bare-name", "", "", "bare-name"},
+	}
+	for _, tc := range cases {
+		ref := ParseRepoRef(tc.entry, tc.defaultOwner)
+		if ref.Owner != tc.wantOwner || ref.Repo != tc.wantRepo {
+			t.Errorf("ParseRepoRef(%q, %q) = %+v, want %s/%s",
+				tc.entry, tc.defaultOwner, ref, tc.wantOwner, tc.wantRepo)
+		}
+	}
+}
+
+func TestWindowsIsolationNotPinnedByDefaults(t *testing.T) {
+	p := writeConfig(t, `
+github:
+  scope: org
+  owner: myorg
+auth:
+  pat: ghp_x
+pools:
+  - name: windows-pool
+    os: windows
+    docker:
+      host: npipe:////./pipe/docker_engine_windows
+`)
+	c, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	// Defaults must leave isolation empty so the backend can resolve it via
+	// autoIsolation(). Pinning "process" here broke Windows client editions,
+	// where process isolation needs an exact host/container build match.
+	if got := c.Pools[0].Docker.Isolation; got != "" {
+		t.Errorf("windows pool isolation = %q, want empty (backend resolves it)", got)
+	}
+}
+
+func TestWindowsIsolationExplicitPreserved(t *testing.T) {
+	p := writeConfig(t, `
+github:
+  scope: org
+  owner: myorg
+auth:
+  pat: ghp_x
+pools:
+  - name: windows-pool
+    os: windows
+    docker:
+      host: npipe:////./pipe/docker_engine_windows
+      isolation: process
+`)
+	c, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := c.Pools[0].Docker.Isolation; got != "process" {
+		t.Errorf("windows pool isolation = %q, want process", got)
 	}
 }

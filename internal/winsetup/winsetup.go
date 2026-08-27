@@ -92,13 +92,24 @@ func DaemonHint() string {
 	return "no Windows-container daemon; run: multirunner install-windows-daemon"
 }
 
+// wrapScript prepares a script for -EncodedCommand. -EncodedCommand cannot take
+// arguments, so when args are supplied the script is wrapped in a script block
+// and invoked with them; its param() block binds them normally. Scripts called
+// without args are passed through unchanged.
+func wrapScript(body string, args ...string) string {
+	if len(args) == 0 {
+		return body
+	}
+	return "& {\n" + body + "\n} " + strings.Join(args, " ")
+}
+
 // runElevated runs an embedded setup script elevated (UAC) and returns the
 // status recorded in the status file plus any process error. The script is
 // passed in-memory via -EncodedCommand so nothing is written to disk.
-func runElevated(scriptBody string) (status string, runErr error) {
+func runElevated(scriptBody string, args ...string) (status string, runErr error) {
 	statusFile, logFile := statusPaths()
 	_ = os.Remove(statusFile)
-	enc := encodePowerShell(scriptBody)
+	enc := encodePowerShell(wrapScript(scriptBody, args...))
 	psCmd := fmt.Sprintf(
 		"Start-Process -FilePath powershell -Verb RunAs -Wait -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-EncodedCommand','%s')",
 		enc)
@@ -108,6 +119,12 @@ func runElevated(scriptBody string) (status string, runErr error) {
 	status, _ = LastStatus()
 	printLogTail(logFile)
 	return status, runErr
+}
+
+// psQuote renders s as a PowerShell single-quoted literal. Only the single
+// quote is special inside such a literal, and it is escaped by doubling.
+func psQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
 
 // InstallContainerd installs containerd + runhcs + nerdctl + CNI elevated, the
@@ -134,14 +151,32 @@ func InstallContainerd() error {
 	}
 }
 
+// InstallOptions configures the Windows daemon install.
+type InstallOptions struct {
+	// DataRoot overrides where the daemon stores images and containers. Empty
+	// uses the script default (%ProgramData%\multirunner\docker\data). Set this
+	// to keep the image store off the system volume, or to adopt an existing
+	// store so images survive replacing a previous daemon.
+	DataRoot string
+}
+
+// installArgs renders opts as PowerShell named arguments for the setup script.
+func (o InstallOptions) installArgs() []string {
+	var args []string
+	if o.DataRoot != "" {
+		args = append(args, "-DataRoot", psQuote(o.DataRoot))
+	}
+	return args
+}
+
 // Install extracts the embedded setup script, runs it elevated (UAC), and reports
 // the result read back from the status file. Windows only.
-func Install() error {
+func Install(opts InstallOptions) error {
 	if runtime.GOOS != "windows" {
 		return fmt.Errorf("install-windows-daemon is only supported on Windows")
 	}
 	_, logFile := statusPaths()
-	status, runErr := runElevated(script)
+	status, runErr := runElevated(script, opts.installArgs()...)
 
 	switch {
 	case strings.HasPrefix(status, "reboot-required"):

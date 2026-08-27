@@ -59,9 +59,15 @@ try {
     [Environment]::SetEnvironmentVariable('Path', 'C:\mingit\cmd;' + $machinePath, 'Machine')
     Mark 'mingit installed'
 
-    # Cache-redirect patch: rename ACTIONS_RESULTS_URL / ACTIONS_CACHE_URL UTF-16
-    # literals (last char L->X) so the runner stops overriding them for `uses:` actions.
+    # Cache-redirect patch, kept as a SIDECAR rather than applied in place.
+    # Renaming the ACTIONS_RESULTS_URL / ACTIONS_CACHE_URL UTF-16 literals
+    # (last char L->X) stops the runner overriding them for `uses:` actions, which
+    # is only correct when multirunner injects replacements (cache.enabled).
+    # Patching the live DLL leaves ACTIONS_RESULTS_URL unset whenever the cache is
+    # off and breaks actions/upload-artifact, so startup.ps1 swaps this copy in
+    # only when a redirect is actually present.
     $dll = 'C:\actions-runner\bin\Runner.Worker.dll'
+    $patched = $dll + '.mrpatched'
     $bytes = [IO.File]::ReadAllBytes($dll)
     function Set-LastCharX([byte[]]$b, [string]$s) {
         $p = [Text.Encoding]::Unicode.GetBytes($s)
@@ -73,8 +79,8 @@ try {
     }
     Set-LastCharX $bytes 'ACTIONS_RESULTS_URL'
     Set-LastCharX $bytes 'ACTIONS_CACHE_URL'
-    [IO.File]::WriteAllBytes($dll, $bytes)
-    Mark 'cache patch applied'
+    [IO.File]::WriteAllBytes($patched, $bytes)
+    Mark 'cache patch staged'
 
     [Environment]::SetEnvironmentVariable('RUNNER_DISABLE_AUTOUPDATE', '1', 'Machine')
 

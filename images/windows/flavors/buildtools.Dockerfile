@@ -30,4 +30,6 @@ RUN Invoke-WebRequest -Uri https://aka.ms/vs/17/release/vs_buildtools.exe -OutFi
 # the fixed path C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe,
 # so microsoft/setup-msbuild and ilammy/msvc-dev-cmd locate the toolchain here.
 # Jobs run `VsDevCmd.bat` from VSBUILDTOOLS or resolve MSVC/MSBuild via vswhere.
-ENV VSBUILDTOOLS=C:\BuildTools
+# Backslash is doubled because Docker's default escape character is `\`; a bare
+# `C:\BuildTools` is stored as the drive-relative `C:BuildTools`.
+ENV VSBUILDTOOLS=C:\\BuildTools

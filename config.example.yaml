@@ -2,9 +2,13 @@
 
 github:
   url: "https://github.com"      # change for GHES
-  scope: "org"                   # repo | org | enterprise
-  owner: "myorg"                 # org name (org) | repo owner (repo) | enterprise slug (enterprise)
+  scope: "org"                   # repo | repos | org | enterprise
+  owner: "myorg"                 # org name (org) | repo owner (repo/repos) | enterprise slug (enterprise)
   repo: "myrepo"                 # only for scope=repo
+  # repos:                       # only for scope=repos (multiple repos, one instance)
+  #   - repo-one                 # uses owner above
+  #   - repo-two                 # uses owner above
+  #   - otheruser/repo-three     # explicit owner (cross-account)
 
 auth:
   pat: "${GITHUB_PAT}"           # ${ENV} refs are resolved from the environment (keeps secrets off disk)
@@ -115,11 +119,16 @@ pools:
     os: windows
     size: 2
     runner_group_id: 1
+    # Windows image_tier options (pulled automatically):
+    #   minimal (default) | node | dotnet | buildtools
+    # dotnet layers on node, so it already bundles Node. buildtools layers on
+    # minimal and adds the MSVC toolchain for native C/C++.
+    image_tier: minimal
     labels: [self-hosted, windows, x64]
     work_folder: _work
     docker:
       host: "npipe:////./pipe/docker_engine_windows"
-      isolation: process
+      isolation: auto            # auto (default): process on Server, hyperv on client
       windows_dind: "off"        # off | host-pipe | hyperv
     max_consecutive_failures: 5
 

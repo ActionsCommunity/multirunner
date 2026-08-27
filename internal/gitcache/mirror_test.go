@@ -116,9 +116,151 @@ func TestContainerPath(t *testing.T) {
 	}
 }
 
+// forceExplicitBareRepository makes git refuse bare repositories discovered from
+// the working directory, so tests exercise the same hardening control an org or
+// CI sandbox may set. Only paths named via --git-dir/GIT_DIR stay usable.
+func forceExplicitBareRepository(t *testing.T) {
+	t.Helper()
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "safe.bareRepository")
+	t.Setenv("GIT_CONFIG_VALUE_0", "explicit")
+}
+
+// resolveEnv collapses an environment slice into a map using the last-wins
+// duplicate semantics that os/exec applies.
+func resolveEnv(env []string) map[string]string {
+	out := map[string]string{}
+	for _, kv := range env {
+		if i := strings.IndexByte(kv, '='); i > 0 {
+			out[kv[:i]] = kv[i+1:]
+		}
+	}
+	return out
+}
+
+// Mirrors are bare, so every git call must name them explicitly. Discovering
+// them from the working directory fails under safe.bareRepository=explicit.
+func TestMirrorOpsUnderExplicitBareRepository(t *testing.T) {
+	forceExplicitBareRepository(t)
+
+	base := setupSourceRepo(t)
+	repoDir := filepath.FromSlash(base + "/repo.git")
+	m, err := New(t.TempDir(), base, "", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	path, err := m.EnsureMirror(ctx, "repo")
+	if err != nil {
+		t.Fatalf("EnsureMirror clone: %v", err)
+	}
+
+	mustGit(t, repoDir, "commit", "--allow-empty", "-m", "second")
+
+	// The fetch path is the one that regressed: it reuses an existing bare mirror.
+	if _, err := m.EnsureMirror(ctx, "repo"); err != nil {
+		t.Fatalf("EnsureMirror fetch: %v", err)
+	}
+	if n := commitCount(t, path); n != 2 {
+		t.Fatalf("mirror commit count after fetch = %d, want 2", n)
+	}
+	if err := m.Bundle(ctx, "repo", io.Discard); err != nil {
+		t.Fatalf("Bundle: %v", err)
+	}
+}
+
+// A token must not cost the operator their own env-based git config. This is
+// the combined case: the auth header is injected while safe.bareRepository is
+// still in force, so both the header indexing and --git-dir have to be right.
+func TestMirrorOpsWithTokenUnderExplicitBareRepository(t *testing.T) {
+	forceExplicitBareRepository(t)
+
+	base := setupSourceRepo(t)
+	m, err := New(t.TempDir(), base, "test-token", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	if _, err := m.EnsureMirror(ctx, "repo"); err != nil {
+		t.Fatalf("EnsureMirror clone: %v", err)
+	}
+	if _, err := m.EnsureMirror(ctx, "repo"); err != nil {
+		t.Fatalf("EnsureMirror fetch: %v", err)
+	}
+	if err := m.Bundle(ctx, "repo", io.Discard); err != nil {
+		t.Fatalf("Bundle: %v", err)
+	}
+}
+
+func TestGitEnvAppendsHeaderAfterInheritedConfig(t *testing.T) {
+	t.Setenv("GIT_CONFIG_COUNT", "2")
+	t.Setenv("GIT_CONFIG_KEY_0", "safe.bareRepository")
+	t.Setenv("GIT_CONFIG_VALUE_0", "explicit")
+	t.Setenv("GIT_CONFIG_KEY_1", "credential.interactive")
+	t.Setenv("GIT_CONFIG_VALUE_1", "never")
+
+	m := &Manager{token: "test-token", logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	env := resolveEnv(m.gitEnv())
+
+	if got := env["GIT_CONFIG_COUNT"]; got != "3" {
+		t.Errorf("GIT_CONFIG_COUNT = %q, want 3", got)
+	}
+	if got := env["GIT_CONFIG_KEY_2"]; got != "http.extraHeader" {
+		t.Errorf("GIT_CONFIG_KEY_2 = %q, want http.extraHeader", got)
+	}
+	if got := env["GIT_CONFIG_VALUE_2"]; !strings.HasPrefix(got, "AUTHORIZATION: basic ") {
+		t.Errorf("GIT_CONFIG_VALUE_2 = %q, want an authorization header", got)
+	}
+	// The inherited entries must survive untouched.
+	if got := env["GIT_CONFIG_KEY_0"]; got != "safe.bareRepository" {
+		t.Errorf("GIT_CONFIG_KEY_0 = %q, want safe.bareRepository", got)
+	}
+	if got := env["GIT_CONFIG_KEY_1"]; got != "credential.interactive" {
+		t.Errorf("GIT_CONFIG_KEY_1 = %q, want credential.interactive", got)
+	}
+}
+
+func TestGitEnvWithoutTokenLeavesConfigAlone(t *testing.T) {
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "safe.bareRepository")
+	t.Setenv("GIT_CONFIG_VALUE_0", "explicit")
+
+	m := &Manager{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	env := resolveEnv(m.gitEnv())
+
+	if got := env["GIT_CONFIG_COUNT"]; got != "1" {
+		t.Errorf("GIT_CONFIG_COUNT = %q, want 1 (unchanged)", got)
+	}
+	if got := env["GIT_CONFIG_KEY_0"]; got != "safe.bareRepository" {
+		t.Errorf("GIT_CONFIG_KEY_0 = %q, want safe.bareRepository", got)
+	}
+	if got := env["GIT_TERMINAL_PROMPT"]; got != "0" {
+		t.Errorf("GIT_TERMINAL_PROMPT = %q, want 0", got)
+	}
+}
+
+func TestGitEnvIgnoresBogusCount(t *testing.T) {
+	t.Setenv("GIT_CONFIG_COUNT", "not-a-number")
+
+	m := &Manager{token: "test-token", logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	env := resolveEnv(m.gitEnv())
+
+	// Git rejects a bogus count, so fall back to a fresh single-entry list.
+	if got := env["GIT_CONFIG_COUNT"]; got != "1" {
+		t.Errorf("GIT_CONFIG_COUNT = %q, want 1", got)
+	}
+	if got := env["GIT_CONFIG_KEY_0"]; got != "http.extraHeader" {
+		t.Errorf("GIT_CONFIG_KEY_0 = %q, want http.extraHeader", got)
+	}
+}
+
 func commitCount(t *testing.T, mirrorPath string) int {
 	t.Helper()
-	out := mustGit(t, mirrorPath, "rev-list", "--count", "main")
+	// --git-dir, not cmd.Dir: the mirror is bare, and git refuses to discover a
+	// bare repo from the working directory under safe.bareRepository=explicit.
+	out := mustGit(t, "", "--git-dir="+mirrorPath, "rev-list", "--count", "main")
 	n := 0
 	for _, c := range out {
 		if c < '0' || c > '9' {

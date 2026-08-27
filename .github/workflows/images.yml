@@ -152,7 +152,7 @@ jobs:
           cache-to: type=gha,mode=max
 
   # Windows runner images (amd64 only; Server 2025 / ltsc2025 process isolation).
-  # minimal first, then the buildtools flavor layered on it.
+  # minimal first, then node -> dotnet chained on it, plus buildtools on minimal.
   windows:
     runs-on: windows-2025
     steps:
@@ -183,6 +183,20 @@ jobs:
             docker tag "$IMG:minimal" "$IMG:$SUFFIX"
           fi
           docker push --all-tags "$IMG"
+
+          # node flavor (layers on minimal just pushed)
+          docker build -f images/windows/flavors/node.Dockerfile \
+            --build-arg "PARENT=$IMG:minimal" \
+            -t "$IMG:node" -t "$IMG:node-$SUFFIX" .
+          docker push "$IMG:node"
+          docker push "$IMG:node-$SUFFIX"
+
+          # dotnet flavor (layers on node, mirroring the linux chain)
+          docker build -f images/windows/flavors/dotnet.Dockerfile \
+            --build-arg "PARENT=$IMG:node" \
+            -t "$IMG:dotnet" -t "$IMG:dotnet-$SUFFIX" .
+          docker push "$IMG:dotnet"
+          docker push "$IMG:dotnet-$SUFFIX"
 
           # buildtools flavor (layers on minimal just pushed)
           docker build -f images/windows/flavors/buildtools.Dockerfile \

@@ -6,6 +6,7 @@ package runner
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -65,18 +66,21 @@ func RunOnce(ctx context.Context, gh *github.Client, be backend.Backend, spec Sp
 	code, waitErr := handle.Wait(ctx)
 	cancelLogs()
 
+	// GitHub removes an ephemeral runner once it finishes its single job, but a
+	// runner that exits without taking one (host reboot, bad image, a kill on
+	// shutdown) leaves its registration behind permanently. Those pile up as
+	// offline runners on the repo and count against its runner limit. The
+	// container has exited by the time Wait returns, so cleanup is safe here
+	// regardless of why it exited, and in the common case GitHub has already
+	// done it for us.
+	defer deregister(ctx, gh, jit.Runner.ID, spec.Name, logger)
+
 	if ctx.Err() != nil {
-		// Shutdown: terminate the in-flight runner and deregister it from GitHub
-		// with a detached, bounded context (the job ctx is already cancelled).
-		detached, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		// Shutdown: terminate the in-flight runner with a detached, bounded
+		// context (the job ctx is already cancelled).
+		detached, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
 		defer cancel()
 		_ = handle.Kill(detached)
-		if jit.Runner.ID != 0 {
-			if err := gh.DeleteRunner(detached, jit.Runner.ID); err != nil {
-				logger.Warn("deregister runner on shutdown failed",
-					"name", spec.Name, "runner_id", jit.Runner.ID, "err", err)
-			}
-		}
 		return code, ctx.Err()
 	}
 	if waitErr != nil {
@@ -84,6 +88,30 @@ func RunOnce(ctx context.Context, gh *github.Client, be backend.Backend, spec Sp
 	}
 	logger.Info("runner exited", "name", spec.Name, "exit_code", code)
 	return code, nil
+}
+
+// cleanupTimeout bounds the detached cleanup calls made once the job context is
+// already cancelled.
+const cleanupTimeout = 10 * time.Second
+
+// deregister removes a runner registration best-effort. A registration that is
+// already gone is the expected outcome for a runner that completed its job, so
+// that case is not worth a warning.
+func deregister(ctx context.Context, gh *github.Client, runnerID int64, name string, logger *slog.Logger) {
+	if runnerID == 0 {
+		return
+	}
+	detached, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
+	defer cancel()
+
+	err := gh.DeleteRunner(detached, runnerID)
+	switch {
+	case err == nil:
+		logger.Debug("reclaimed unused runner registration", "name", name, "runner_id", runnerID)
+	case errors.Is(err, github.ErrRunnerNotFound):
+	default:
+		logger.Warn("deregister runner failed", "name", name, "runner_id", runnerID, "err", err)
+	}
 }
 
 func streamLogs(ctx context.Context, handle backend.RunnerHandle, logger *slog.Logger) {

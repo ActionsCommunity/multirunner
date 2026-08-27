@@ -38,18 +38,104 @@ jobs:
           docker run --rm --entrypoint bash $B:rust          -lc 'rustc --version && cargo --version'
           docker run --rm --entrypoint bash $B:go            -lc 'go version'
 
+      # The cache-redirect patch must live ONLY in the sidecar. If it leaks into
+      # the live DLL, ACTIONS_RESULTS_URL is unset whenever cache.enabled is false
+      # and actions/upload-artifact fails with "Unable to get the
+      # ACTIONS_RESULTS_URL env variable".
+      - name: Verify cache patch is sidecar-only
+        run: |
+          set -euo pipefail
+          B=mr-check-linux
+          docker run --rm --entrypoint bash $B:minimal -lc '
+            set -eu
+            grep -qa "A.C.T.I.O.N.S._.R.E.S.U.L.T.S._.U.R.L" bin/Runner.Worker.dll
+            grep -qa "A.C.T.I.O.N.S._.R.E.S.U.L.T.S._.U.R.X" bin/Runner.Worker.dll.mrpatched
+            ! grep -qa "A.C.T.I.O.N.S._.R.E.S.U.L.T.S._.U.R.X" bin/Runner.Worker.dll
+          '
+
   windows:
     runs-on: windows-2025
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build minimal + buildtools (no push)
+      # Windows images are large (roughly ten GB each), so building the whole
+      # graph before testing any of it exhausts the hosted runner's disk on the
+      # buildtools layer. Build one branch, assert it, then delete its derived
+      # tags and reclaim the space before starting the next. `minimal` is kept
+      # throughout because both branches build on it.
+      - name: Build minimal
         shell: bash
         run: |
           set -euo pipefail
           B=mr-check-windows
           docker build -f images/windows/Dockerfile -t $B:minimal .
+          df -h / || true
+
+      - name: Build and assert node + dotnet, then reclaim
+        shell: bash
+        run: |
+          set -euo pipefail
+          B=mr-check-windows
+          docker build -f images/windows/flavors/node.Dockerfile   --build-arg "PARENT=$B:minimal" -t $B:node .
+          docker build -f images/windows/flavors/dotnet.Dockerfile --build-arg "PARENT=$B:node"    -t $B:dotnet .
+
+          # `where` also proves the machine PATH edits survived into a fresh
+          # container, which is what jobs calling node/dotnet directly rely on.
+          docker run --rm --entrypoint cmd $B:node   /c "where node && where npm && node --version"
+          docker run --rm --entrypoint cmd $B:dotnet /c "where dotnet && dotnet --list-sdks && node --version"
+
+          # Docker's default escape character is `\`, so an unescaped
+          # `ENV X=C:\foo` silently becomes `C:foo`. Assert the real values.
+          docker run --rm --entrypoint cmd $B:dotnet /c \
+            "if not \"%RUNNER_TOOL_CACHE%\"==\"C:\\hostedtoolcache\\windows\" exit 1"
+          docker run --rm --entrypoint cmd $B:dotnet /c \
+            "if not \"%DOTNET_ROOT%\"==\"C:\\dotnet\" exit 1"
+
+          # Free this branch before building the next one. `minimal` survives
+          # because buildtools layers on it.
+          docker rmi -f $B:dotnet $B:node
+          docker image prune -f
+          df -h / || true
+
+      - name: Build and assert buildtools
+        shell: bash
+        run: |
+          set -euo pipefail
+          B=mr-check-windows
           docker build -f images/windows/flavors/buildtools.Dockerfile --build-arg "PARENT=$B:minimal" -t $B:buildtools .
+
+      # The cache-redirect patch must live ONLY in the sidecar. If it leaks into
+      # the live DLL, ACTIONS_RESULTS_URL is unset whenever cache.enabled is false
+      # and actions/upload-artifact fails with "Unable to get the
+      # ACTIONS_RESULTS_URL env variable".
+      # The cache-redirect patch must live ONLY in the sidecar. If it leaks into
+      # the live DLL, ACTIONS_RESULTS_URL is unset whenever cache.enabled is false
+      # and actions/upload-artifact fails with "Unable to get the
+      # ACTIONS_RESULTS_URL env variable".
+      #
+      # Scan bytes, not decoded text: the UTF-16LE literal sits at an odd file
+      # offset, so reading the DLL as UTF-16 from byte 0 never finds it.
+      - name: Verify cache patch is sidecar-only
+        shell: pwsh
+        run: |
+          $script = @'
+          function Test-Lit([string]$Path, [string]$S) {
+              $b = [IO.File]::ReadAllBytes($Path)
+              $q = [Text.Encoding]::Unicode.GetBytes($S)
+              for ($i = 0; $i -le $b.Length - $q.Length; $i++) {
+                  $m = $true
+                  for ($j = 0; $j -lt $q.Length; $j++) { if ($b[$i+$j] -ne $q[$j]) { $m = $false; break } }
+                  if ($m) { return $true }
+              }
+              return $false
+          }
+          $dll = 'C:\actions-runner\bin\Runner.Worker.dll'
+          if (-not (Test-Lit $dll 'ACTIONS_RESULTS_URL')) { throw 'stock DLL was patched' }
+          if (Test-Lit $dll 'ACTIONS_RESULTS_URX') { throw 'stock DLL was patched' }
+          if (-not (Test-Lit ($dll + '.mrpatched') 'ACTIONS_RESULTS_URX')) { throw 'sidecar not patched' }
+          'sidecar-only OK'
+          '@
+          docker run --rm --entrypoint pwsh mr-check-windows:minimal -NoProfile -Command $script
 
       - name: Smoke-test VS Build Tools
         shell: bash
@@ -58,3 +144,13 @@ jobs:
           B=mr-check-windows
           docker run --rm --entrypoint powershell $B:buildtools -NoProfile -Command \
             "& 'C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe' -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath"
+
+      - name: Smoke-test shells on PATH
+        shell: bash
+        run: |
+          set -euo pipefail
+          B=mr-check-windows
+          # pwsh is the default shell for `run:` steps on Windows in GitHub
+          # Actions, so it must resolve on PATH or `shell: pwsh` steps fail.
+          docker run --rm --entrypoint cmd $B:minimal /c "where pwsh && where git"
+          docker run --rm --entrypoint pwsh $B:minimal -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'

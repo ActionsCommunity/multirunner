@@ -5,6 +5,7 @@ package github
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -147,9 +148,15 @@ func (c *Client) CreateRegistrationToken(ctx context.Context) (string, error) {
 	return out.Token, nil
 }
 
+// ErrRunnerNotFound reports that a runner registration is already gone. GitHub
+// removes an ephemeral runner itself once it finishes its single job, so any
+// best-effort cleanup races with that and should treat this as success.
+var ErrRunnerNotFound = errors.New("runner registration not found")
+
 // DeleteRunner removes a runner registration from GitHub by ID. Ephemeral
-// runners self-remove after their one job; this is the explicit cleanup path
-// for runners terminated mid-job on shutdown.
+// runners self-remove after their one job, so this is the cleanup path for
+// runners that exited without consuming their registration. Returns
+// ErrRunnerNotFound if GitHub already removed it.
 func (c *Client) DeleteRunner(ctx context.Context, runnerID int64) error {
 	path, err := c.runnersPath(strconv.FormatInt(runnerID, 10))
 	if err != nil {
@@ -159,7 +166,11 @@ func (c *Client) DeleteRunner(ctx context.Context, runnerID int64) error {
 	if err != nil {
 		return fmt.Errorf("build delete-runner request: %w", err)
 	}
-	if _, err := c.gh.Do(ctx, req, nil); err != nil {
+	resp, err := c.gh.Do(ctx, req, nil)
+	if err != nil {
+		if resp != nil && resp.StatusCode == http.StatusNotFound {
+			return fmt.Errorf("delete-runner %d: %w", runnerID, ErrRunnerNotFound)
+		}
 		return fmt.Errorf("delete-runner %d (%s): %w", runnerID, c.scope, err)
 	}
 	return nil
@@ -224,6 +235,21 @@ func (c *Client) queuedJobsForRun(ctx context.Context, runID int64) ([][]string,
 
 // Scope reports the configured scope.
 func (c *Client) Scope() config.Scope { return c.scope }
+
+// ActionsEnabled reports whether GitHub Actions is enabled on the repo. A repo
+// with Actions switched off accepts runner registrations and reports no queued
+// jobs, exactly like an idle repo, so it is otherwise indistinguishable from one
+// that simply has no work. Requires a repo-scoped client.
+func (c *Client) ActionsEnabled(ctx context.Context) (bool, error) {
+	if c.repo == "" {
+		return false, fmt.Errorf("ActionsEnabled requires a repo-scoped client")
+	}
+	perms, _, err := c.gh.Repositories.GetActionsPermissions(ctx, c.owner, c.repo)
+	if err != nil {
+		return false, fmt.Errorf("get actions permissions %s/%s: %w", c.owner, c.repo, err)
+	}
+	return perms.GetEnabled(), nil
+}
 
 // RepoFilePaths returns every blob path in the repo's default-branch tree. Used
 // by `multirunner detect --repo` to find language markers without a checkout.
