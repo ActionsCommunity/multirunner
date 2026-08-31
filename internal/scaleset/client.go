@@ -52,8 +52,8 @@ type ClientOptions struct {
 	PrivateKeyPath string
 }
 
-// NewClient builds a scale set client, preferring a GitHub App when one is
-// configured because org-level scale sets generally require it.
+// NewClient builds a scale set client, using a PAT when supplied and otherwise
+// using the configured GitHub App.
 func NewClient(opts ClientOptions) (*scaleset.Client, error) {
 	if opts.PAT == "" && opts.AppID == 0 {
 		return nil, fmt.Errorf("provisioning: scaleset needs auth.pat or GitHub App credentials")

@@ -479,8 +479,8 @@ func (c *Config) Validate() error {
 		}
 	}
 
-	if c.Provisioning != ProvisioningPool && !c.Provisioning.IsAutoscale() {
-		return fmt.Errorf("provisioning must be pool|autoscale|webhook, got %q", c.Provisioning)
+	if c.Provisioning != ProvisioningPool && !c.Provisioning.IsAutoscale() && !c.Provisioning.IsScaleset() {
+		return fmt.Errorf("provisioning must be pool|autoscale|webhook|scaleset, got %q", c.Provisioning)
 	}
 
 	if len(c.Pools) == 0 {

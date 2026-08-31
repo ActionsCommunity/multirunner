@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,9 +17,13 @@ import (
 
 // fakeJIT hands out predictable JIT blobs and records the names it was asked for.
 type fakeJIT struct {
-	mu    sync.Mutex
-	names []string
-	err   error
+	mu               sync.Mutex
+	removeMu         sync.Mutex
+	settings         []scaleset.RunnerScaleSetJitRunnerSetting
+	removeAttempts   []int64
+	removed          []int64
+	blockFirstRemove bool
+	err              error
 }
 
 func (f *fakeJIT) GenerateJitRunnerConfig(
@@ -31,16 +36,42 @@ func (f *fakeJIT) GenerateJitRunnerConfig(
 	if f.err != nil {
 		return nil, f.err
 	}
-	f.names = append(f.names, setting.Name)
+	f.settings = append(f.settings, *setting)
 	return &scaleset.RunnerScaleSetJitRunnerConfig{
 		EncodedJITConfig: "jit-for-" + setting.Name,
+		Runner:           &scaleset.RunnerReference{ID: len(f.settings)},
 	}, nil
+}
+
+func (f *fakeJIT) RemoveRunner(ctx context.Context, runnerID int64) error {
+	f.removeMu.Lock()
+	defer f.removeMu.Unlock()
+
+	f.mu.Lock()
+	first := len(f.removeAttempts) == 0
+	f.removeAttempts = append(f.removeAttempts, runnerID)
+	f.mu.Unlock()
+
+	if first && f.blockFirstRemove {
+		<-ctx.Done()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.removed = append(f.removed, runnerID)
+	return nil
 }
 
 // fakeHandle is a runner that exits when its channel is closed.
 type fakeHandle struct {
-	name string
-	done chan struct{}
+	name      string
+	done      chan struct{}
+	closeOnce sync.Once
+	killCount int
+	blockKill bool
 }
 
 func (h *fakeHandle) Wait(ctx context.Context) (int, error) {
@@ -54,8 +85,18 @@ func (h *fakeHandle) Wait(ctx context.Context) (int, error) {
 func (h *fakeHandle) Logs(context.Context) (io.ReadCloser, error) {
 	return io.NopCloser(strings.NewReader("")), nil
 }
-func (h *fakeHandle) Kill(context.Context) error { return nil }
-func (h *fakeHandle) ID() string                 { return h.name }
+func (h *fakeHandle) Kill(ctx context.Context) error {
+	h.killCount++
+	if h.blockKill {
+		<-ctx.Done()
+		h.complete()
+		return ctx.Err()
+	}
+	h.complete()
+	return nil
+}
+func (h *fakeHandle) ID() string { return h.name }
+func (h *fakeHandle) complete()  { h.closeOnce.Do(func() { close(h.done) }) }
 
 // fakeBackend records the LaunchRequests it receives.
 type fakeBackend struct {
@@ -65,11 +106,11 @@ type fakeBackend struct {
 	err      error
 }
 
-func (b *fakeBackend) Name() string                                { return "fake" }
-func (b *fakeBackend) Ping(context.Context) error                  { return nil }
-func (b *fakeBackend) OSType(context.Context) (string, error)      { return "linux", nil }
-func (b *fakeBackend) EnsureImage(context.Context, string) error   { return nil }
-func (b *fakeBackend) Close() error                                { return nil }
+func (b *fakeBackend) Name() string                              { return "fake" }
+func (b *fakeBackend) Ping(context.Context) error                { return nil }
+func (b *fakeBackend) OSType(context.Context) (string, error)    { return "linux", nil }
+func (b *fakeBackend) EnsureImage(context.Context, string) error { return nil }
+func (b *fakeBackend) Close() error                              { return nil }
 
 func (b *fakeBackend) Launch(_ context.Context, req backend.LaunchRequest) (backend.RunnerHandle, error) {
 	b.mu.Lock()
@@ -95,7 +136,7 @@ func (b *fakeBackend) finish(i int) {
 	b.mu.Lock()
 	h := b.handles[i]
 	b.mu.Unlock()
-	close(h.done)
+	h.complete()
 }
 
 // waitFor polls until cond holds or the deadline passes. Runner exit is
@@ -134,6 +175,14 @@ func TestDesiredCountLaunchesRunnersCarryingTheJITConfig(t *testing.T) {
 	for _, r := range reqs {
 		if want := "jit-for-" + r.Name; r.EncodedJITConfig != want {
 			t.Errorf("runner %s carried JIT %q, want %q", r.Name, r.EncodedJITConfig, want)
+		}
+		if len(jit.settings) != 3 {
+			t.Fatalf("generated %d JIT settings, want 3", len(jit.settings))
+		}
+		for _, setting := range jit.settings {
+			if setting.WorkFolder != "_work" {
+				t.Errorf("runner %s got JIT work folder %q, want _work", setting.Name, setting.WorkFolder)
+			}
 		}
 		if r.Image != "runner:latest" {
 			t.Errorf("runner %s got image %q, want runner:latest", r.Name, r.Image)
@@ -199,8 +248,9 @@ func TestMaxRunnersCapsWhatTheHostAdvertises(t *testing.T) {
 }
 
 func TestPartialLaunchReportsWhatStarted(t *testing.T) {
+	jit := &fakeJIT{}
 	be := &fakeBackend{err: errors.New("daemon unreachable")}
-	l := New(&fakeJIT{}, be, Options{ScaleSetID: 1})
+	l := New(jit, be, Options{ScaleSetID: 1})
 
 	got, err := l.HandleDesiredRunnerCount(context.Background(), 3)
 	if err == nil {
@@ -209,6 +259,116 @@ func TestPartialLaunchReportsWhatStarted(t *testing.T) {
 	if got != 0 {
 		t.Fatalf("reported %d runners, want 0", got)
 	}
+	if len(jit.removed) != 1 {
+		t.Fatalf("removed %d unused registrations, want 1", len(jit.removed))
+	}
+}
+
+func TestRunnerNamesAreUniqueAcrossLaunchers(t *testing.T) {
+	be1 := &fakeBackend{}
+	be2 := &fakeBackend{}
+	l1 := New(&fakeJIT{}, be1, Options{ScaleSetID: 1})
+	l2 := New(&fakeJIT{}, be2, Options{ScaleSetID: 1})
+
+	if _, err := l1.HandleDesiredRunnerCount(context.Background(), 1); err != nil {
+		t.Fatalf("first launcher: %v", err)
+	}
+	if _, err := l2.HandleDesiredRunnerCount(context.Background(), 1); err != nil {
+		t.Fatalf("second launcher: %v", err)
+	}
+	if got1, got2 := be1.requests()[0].Name, be2.requests()[0].Name; got1 == got2 {
+		t.Fatalf("runner names collided: %q", got1)
+	}
+}
+
+func TestShutdownKillsAndDeregistersRunners(t *testing.T) {
+	jit := &fakeJIT{}
+	be := &fakeBackend{}
+	l := New(jit, be, Options{ScaleSetID: 1})
+
+	if _, err := l.HandleDesiredRunnerCount(context.Background(), 2); err != nil {
+		t.Fatalf("launch: %v", err)
+	}
+	if err := l.Shutdown(context.Background()); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+	waitFor(t, func() bool { return l.Running() == 0 })
+	if len(jit.removed) != 2 {
+		t.Fatalf("removed %d registrations, want 2", len(jit.removed))
+	}
+	for _, handle := range be.handles {
+		if handle.killCount != 1 {
+			t.Errorf("kill count = %d, want 1", handle.killCount)
+		}
+	}
+}
+
+func TestShutdownGivesEveryRunnerIndependentCleanupContexts(t *testing.T) {
+	jit := &fakeJIT{}
+	be := &fakeBackend{}
+	l := New(jit, be, Options{ScaleSetID: 1, cleanupTimeout: 20 * time.Millisecond})
+
+	if _, err := l.HandleDesiredRunnerCount(context.Background(), 3); err != nil {
+		t.Fatalf("launch: %v", err)
+	}
+	be.handles[0].blockKill = true
+
+	err := l.Shutdown(context.Background())
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("shutdown error = %v, want deadline exceeded from blocked kill", err)
+	}
+	waitFor(t, func() bool { return l.Running() == 0 })
+
+	if len(jit.removed) != 3 {
+		t.Fatalf("removed %d registrations, want 3", len(jit.removed))
+	}
+	for i, handle := range be.handles {
+		if handle.killCount != 1 {
+			t.Errorf("handle %d kill count = %d, want 1", i, handle.killCount)
+		}
+	}
+}
+
+func TestShutdownStartsRemovalTimeoutAfterClientLockIsAvailable(t *testing.T) {
+	jit := &fakeJIT{blockFirstRemove: true}
+	be := &fakeBackend{}
+	l := New(jit, be, Options{ScaleSetID: 1, cleanupTimeout: 20 * time.Millisecond})
+
+	if _, err := l.HandleDesiredRunnerCount(context.Background(), 3); err != nil {
+		t.Fatalf("launch: %v", err)
+	}
+
+	err := l.Shutdown(context.Background())
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("shutdown error = %v, want deadline exceeded from first removal", err)
+	}
+	waitFor(t, func() bool { return l.Running() == 0 })
+
+	if len(jit.removeAttempts) != 3 {
+		t.Fatalf("attempted %d removals, want 3", len(jit.removeAttempts))
+	}
+	if len(jit.removed) != 2 {
+		t.Fatalf("completed %d removals, want 2 after the first timed out", len(jit.removed))
+	}
+}
+
+func TestLifecycleCallbacksTrackRunner(t *testing.T) {
+	be := &fakeBackend{}
+	var starts, stops atomic.Int32
+	l := New(&fakeJIT{}, be, Options{
+		ScaleSetID: 1,
+		OnStart:    func() { starts.Add(1) },
+		OnStop:     func(int, error) { stops.Add(1) },
+	})
+
+	if _, err := l.HandleDesiredRunnerCount(context.Background(), 1); err != nil {
+		t.Fatalf("launch: %v", err)
+	}
+	if got := starts.Load(); got != 1 {
+		t.Fatalf("start callbacks = %d, want 1", got)
+	}
+	be.finish(0)
+	waitFor(t, func() bool { return stops.Load() == 1 })
 }
 
 func TestJobCallbacksDoNotProvision(t *testing.T) {

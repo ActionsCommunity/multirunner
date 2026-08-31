@@ -526,7 +526,7 @@ func runOrchestrator(ctx context.Context, configPath string, interactive, instal
 	logger.Info("orchestrator running", "mode", cfg.Provisioning)
 	switch {
 	case cfg.Provisioning.IsScaleset():
-		err = runScaleset(ctx, cfg, scaleSetPools, logger)
+		err = runScaleset(ctx, cfg, scaleSetPools, hooks, logger)
 	case cfg.Provisioning.IsAutoscale():
 		err = runAutoscale(ctx, cfg, ghProvider, launchers, logger)
 	default:
@@ -557,27 +557,28 @@ type scaleSetPool struct {
 // runScaleset holds one long-poll session per pool and provisions runners as
 // GitHub reports demand. Each pool has its own scale set, because a scale set
 // carries one label set and therefore one runner OS.
-func runScaleset(ctx context.Context, cfg *config.Config, pools []scaleSetPool, logger *slog.Logger) error {
+func runScaleset(ctx context.Context, cfg *config.Config, pools []scaleSetPool, hooks pool.Hooks, logger *slog.Logger) error {
 	target, err := scalesetmode.TargetURL(cfg.GitHub.URL, string(cfg.GitHub.Scope), cfg.GitHub.Owner, cfg.GitHub.Repo)
 	if err != nil {
 		return err
 	}
 
-	client, err := scalesetmode.NewClient(scalesetmode.ClientOptions{
+	clientOpts := scalesetmode.ClientOptions{
 		TargetURL:      target,
 		PAT:            cfg.Auth.PAT,
 		AppID:          cfg.Auth.AppID,
 		InstallationID: cfg.Auth.InstallationID,
 		PrivateKeyPath: cfg.Auth.PrivateKeyPath,
-	})
-	if err != nil {
-		return err
 	}
 
 	g, gctx := errgroup.WithContext(ctx)
 	for _, p := range pools {
 		p := p
 		g.Go(func() error {
+			client, err := scalesetmode.NewClient(clientOpts)
+			if err != nil {
+				return err
+			}
 			return scalesetmode.Run(gctx, client, p.be, scalesetmode.SessionOptions{
 				Name:        p.cfg.ScaleSet,
 				RunnerGroup: p.cfg.RunnerGroup,
@@ -589,6 +590,16 @@ func runScaleset(ctx context.Context, cfg *config.Config, pools []scaleSetPool, 
 					Env:        p.env,
 					Mounts:     p.mounts,
 					MaxRunners: p.cfg.Size,
+					OnStart: func() {
+						if hooks.OnStart != nil {
+							hooks.OnStart(p.cfg.Name)
+						}
+					},
+					OnStop: func(code int, err error) {
+						if hooks.OnStop != nil {
+							hooks.OnStop(p.cfg.Name, code, err)
+						}
+					},
 				},
 			}, logger.With("pool", p.cfg.Name))
 		})

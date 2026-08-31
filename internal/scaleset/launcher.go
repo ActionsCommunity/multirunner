@@ -14,8 +14,12 @@ package scaleset
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/actions/scaleset"
 
@@ -23,13 +27,14 @@ import (
 )
 
 // jitGenerator is the part of *scaleset.Client this package needs. Narrowing it
-// to one method keeps the launcher testable without a live GitHub session.
+// keeps the launcher testable without a live GitHub session.
 type jitGenerator interface {
 	GenerateJitRunnerConfig(
 		ctx context.Context,
 		setting *scaleset.RunnerScaleSetJitRunnerSetting,
 		scaleSetID int,
 	) (*scaleset.RunnerScaleSetJitRunnerConfig, error)
+	RemoveRunner(ctx context.Context, runnerID int64) error
 }
 
 // Options configures a Launcher.
@@ -49,6 +54,11 @@ type Options struct {
 	// MaxRunners caps concurrent runners regardless of what GitHub asks for.
 	// Zero means the host will honour any requested count.
 	MaxRunners int
+	// OnStart and OnStop report runner lifecycle events.
+	OnStart func()
+	OnStop  func(exitCode int, err error)
+	// cleanupTimeout bounds each kill and deregistration operation.
+	cleanupTimeout time.Duration
 }
 
 // Launcher implements the scale set listener's handler interface by translating
@@ -61,8 +71,13 @@ type Launcher struct {
 	opts Options
 
 	mu      sync.Mutex
-	running map[string]struct{}
+	running map[string]runnerState
 	seq     int
+}
+
+type runnerState struct {
+	handle   backend.RunnerHandle
+	runnerID int64
 }
 
 // New returns a Launcher that provisions onto be.
@@ -71,7 +86,7 @@ func New(jit jitGenerator, be backend.Backend, opts Options) *Launcher {
 		jit:     jit,
 		be:      be,
 		opts:    opts,
-		running: make(map[string]struct{}),
+		running: make(map[string]runnerState),
 	}
 }
 
@@ -116,17 +131,32 @@ func (l *Launcher) HandleDesiredRunnerCount(ctx context.Context, count int) (int
 }
 
 // launchLocked generates a JIT config and starts one runner. Callers hold l.mu.
-func (l *Launcher) launchLocked(ctx context.Context) error {
+func (l *Launcher) launchLocked(ctx context.Context) (err error) {
+	if l.opts.OnStart != nil {
+		l.opts.OnStart()
+	}
+	defer func() {
+		if err != nil && l.opts.OnStop != nil {
+			l.opts.OnStop(-1, err)
+		}
+	}()
+
 	l.seq++
-	name := fmt.Sprintf("mr-scaleset-%d-%d", l.opts.ScaleSetID, l.seq)
+	name := fmt.Sprintf("mr-scaleset-%d-%s", l.opts.ScaleSetID, shortID())
 
 	jit, err := l.jit.GenerateJitRunnerConfig(
 		ctx,
-		&scaleset.RunnerScaleSetJitRunnerSetting{Name: name},
+		&scaleset.RunnerScaleSetJitRunnerSetting{
+			Name:       name,
+			WorkFolder: l.opts.WorkFolder,
+		},
 		l.opts.ScaleSetID,
 	)
 	if err != nil {
 		return fmt.Errorf("scaleset: generate JIT config for %s: %w", name, err)
+	}
+	if jit == nil {
+		return fmt.Errorf("scaleset: generate JIT config for %s returned nil", name)
 	}
 
 	// This is the whole integration point. The scale set listener hands back
@@ -143,10 +173,22 @@ func (l *Launcher) launchLocked(ctx context.Context) error {
 		Index:            l.seq,
 	})
 	if err != nil {
-		return fmt.Errorf("scaleset: launch %s: %w", name, err)
+		launchErr := fmt.Errorf("scaleset: launch %s: %w", name, err)
+		if jit.Runner != nil && jit.Runner.ID != 0 {
+			removeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			defer cancel()
+			if removeErr := l.jit.RemoveRunner(removeCtx, int64(jit.Runner.ID)); removeErr != nil {
+				return errors.Join(launchErr, fmt.Errorf("scaleset: remove unused runner %s: %w", name, removeErr))
+			}
+		}
+		return launchErr
 	}
 
-	l.running[name] = struct{}{}
+	var runnerID int64
+	if jit.Runner != nil {
+		runnerID = int64(jit.Runner.ID)
+	}
+	l.running[name] = runnerState{handle: handle, runnerID: runnerID}
 	go l.awaitExit(name, handle)
 	return nil
 }
@@ -154,11 +196,14 @@ func (l *Launcher) launchLocked(ctx context.Context) error {
 // awaitExit frees the slot once the runner finishes. Each runner is ephemeral,
 // so exactly one exit is expected per launch.
 func (l *Launcher) awaitExit(name string, h backend.RunnerHandle) {
-	_, _ = h.Wait(context.Background())
+	code, err := h.Wait(context.Background())
 
 	l.mu.Lock()
 	delete(l.running, name)
 	l.mu.Unlock()
+	if l.opts.OnStop != nil {
+		l.opts.OnStop(code, err)
+	}
 }
 
 // HandleJobStarted records that an assignment became a running job. The runner
@@ -179,4 +224,62 @@ func (l *Launcher) Running() int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return len(l.running)
+}
+
+// Shutdown terminates runners still owned by this listener and removes their
+// registrations. Each runner is cleaned up concurrently, and each kill and
+// deregistration receives its own bounded context.
+func (l *Launcher) Shutdown(ctx context.Context) error {
+	l.mu.Lock()
+	runners := make(map[string]runnerState, len(l.running))
+	for name, state := range l.running {
+		runners[name] = state
+	}
+	l.mu.Unlock()
+
+	timeout := l.opts.cleanupTimeout
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+
+	errCh := make(chan error, len(runners)*2)
+	var removeMu sync.Mutex
+	var wg sync.WaitGroup
+	for name, state := range runners {
+		wg.Add(1)
+		go func(name string, state runnerState) {
+			defer wg.Done()
+
+			killCtx, cancelKill := context.WithTimeout(context.WithoutCancel(ctx), timeout)
+			if err := state.handle.Kill(killCtx); err != nil {
+				errCh <- fmt.Errorf("kill %s: %w", name, err)
+			}
+			cancelKill()
+
+			if state.runnerID != 0 {
+				removeMu.Lock()
+				removeCtx, cancelRemove := context.WithTimeout(context.WithoutCancel(ctx), timeout)
+				if err := l.jit.RemoveRunner(removeCtx, state.runnerID); err != nil {
+					errCh <- fmt.Errorf("remove runner %s: %w", name, err)
+				}
+				cancelRemove()
+				removeMu.Unlock()
+			}
+		}(name, state)
+	}
+
+	wg.Wait()
+	close(errCh)
+
+	var errs []error
+	for err := range errCh {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
+}
+
+func shortID() string {
+	var b [8]byte
+	_, _ = rand.Read(b[:])
+	return hex.EncodeToString(b[:])
 }
