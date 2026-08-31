@@ -8,6 +8,8 @@ ARG BASE=mcr.microsoft.com/dotnet/runtime-deps:8.0-noble
 
 FROM ${BASE} AS build
 ARG RUNNER_VERSION=2.337.0
+ARG RUNNER_X64_SHA256=70920811a4f8ad4328818682bca5c6469c1c942fab52448868071d0063816613
+ARG RUNNER_ARM64_SHA256=9b1dc70626422526e3c94767cf024896beb15da5342a3f4819bf2feac13e0393
 # TARGETARCH is supplied automatically by buildx (amd64|arm64); map it to the
 # runner's release arch name so multi-arch builds fetch the right tarball.
 ARG TARGETARCH
@@ -16,12 +18,13 @@ RUN apt-get update -y && apt-get install -y --no-install-recommends curl ca-cert
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /actions-runner
 RUN case "${TARGETARCH:-amd64}" in \
-        amd64) RUNNER_ARCH=x64 ;; \
-        arm64) RUNNER_ARCH=arm64 ;; \
-        *)     RUNNER_ARCH="${TARGETARCH}" ;; \
+        amd64) RUNNER_ARCH=x64; RUNNER_SHA256="${RUNNER_X64_SHA256}" ;; \
+        arm64) RUNNER_ARCH=arm64; RUNNER_SHA256="${RUNNER_ARM64_SHA256}" ;; \
+        *)     echo "unsupported runner architecture: ${TARGETARCH}" && exit 1 ;; \
     esac \
     && curl -fsSL -o runner.tar.gz \
       "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-${RUNNER_ARCH}-${RUNNER_VERSION}.tar.gz" \
+    && echo "${RUNNER_SHA256}  runner.tar.gz" | sha256sum --check - \
     && tar xzf runner.tar.gz \
     && rm runner.tar.gz
 

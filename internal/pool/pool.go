@@ -62,7 +62,7 @@ func (p *Pool) Run(ctx context.Context) error {
 func (p *Pool) runSlot(ctx context.Context, index int) {
 	failures := 0
 	for ctx.Err() == nil {
-		_, err := p.l.RunOne(ctx)
+		_, err := p.l.RunOneForSlot(ctx, index)
 		if ctx.Err() != nil {
 			return
 		}

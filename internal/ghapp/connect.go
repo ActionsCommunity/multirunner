@@ -142,6 +142,7 @@ func buildManifest(opt Options, callbackBase string) string {
 	switch opt.Scope {
 	case "repo":
 		perms["administration"] = "write"
+		perms["contents"] = "read"
 	default: // org / user
 		perms["organization_self_hosted_runners"] = "write"
 	}

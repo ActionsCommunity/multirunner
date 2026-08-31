@@ -51,7 +51,7 @@ save/restore against the local server.
 
 For each runner slot, multirunner:
 
-1. Calls GitHub's `generate-jitconfig` (repo / org / enterprise scope) for a
+1. Calls GitHub's `generate-jitconfig` (repo / repos / org / enterprise scope) for a
    single-use registration.
 2. Launches a clean runner — a container or a VM — that runs the **stock GitHub
    runner** with that JIT config.
@@ -118,6 +118,36 @@ runners appear under **Settings → Actions → Runners**. Push a workflow with
 `config.example.yaml` documents every option (cache, autoscaling, tiers, …) when
 you want to go further.
 
+### Serving multiple repositories
+
+Use `scope: repos` to serve several repositories without granting organization
+runner access:
+
+```yaml
+github:
+  scope: repos
+  owner: my-org
+  repos:
+    - api
+    - web
+    - another-owner/tools
+auth:
+  pat: "${GITHUB_PAT}"
+```
+
+Short entries inherit `github.owner`; explicit `owner/repo` entries can span
+accounts when PAT authentication is used. A GitHub App installation belongs to
+one account, so App-authenticated lists must all use that installation account.
+The App also needs repository Administration write and Contents read permissions.
+Apps created by the current `multirunner connect --repo ...` flow request both.
+For an older App, add Contents read under the App's repository permissions and
+approve the updated permission on its installation.
+
+In fixed pool mode, every pool needs at least as many slots as configured
+repositories so each repository receives a warm runner. `multirunner doctor`
+rejects undersized pools. Autoscale mode instead registers capacity directly on
+the repository with queued work.
+
 ---
 
 ## Backends
@@ -151,8 +181,8 @@ The default `minimal` image is just the runner + git. For common toolchains, set
 |----------------|---------|----------------------------------------------------------------|
 | `minimal` (default) | both | runner + git + jq + unzip (Linux) / MinGit (Windows)      |
 | `native-build` | linux   | gcc/g++/make, cmake, ninja, pkg-config, python3 (+dev)         |
-| `node`         | linux   | + Node LTS + corepack (npm/pnpm/yarn); node-gyp works          |
-| `dotnet`       | linux   | + .NET SDK 8 & 9 (**Node included** for ASP.NET SPA builds)    |
+| `node`         | both    | + Node LTS + corepack (npm/pnpm/yarn); node-gyp works on Linux |
+| `dotnet`       | both    | + .NET SDK (**Node included** for ASP.NET SPA builds)          |
 | `rust`         | linux   | + rustup stable + musl target (**Node included** for napi-rs)  |
 | `go`           | linux   | + Go toolchain                                                 |
 | `buildtools`   | windows | + VS 2022 Build Tools (MSVC v143, Windows SDK, CMake, MSBuild) |
@@ -233,6 +263,8 @@ reads its JIT config from an attached ISO, runs one job, and powers off.
 multirunner bake --iso WinServer2022Eval.iso --golden /var/lib/multirunner/golden.qcow2
 # bake toolchains into the golden (the VM equivalent of container flavors):
 multirunner bake --iso WinServer2022Eval.iso --golden golden.qcow2 --tools dotnet,node,buildtools
+# optionally reject an ISO that does not match the licensed media you selected:
+multirunner bake --iso WinServer2022.iso --iso-sha256 <sha256> --golden golden.qcow2
 ```
 
 The QEMU backend boots the baked golden image and **ignores `image`/`image_tier`**
@@ -240,6 +272,12 @@ The QEMU backend boots the baked golden image and **ignores `image`/`image_tier`
 qemu pool). To give a VM runner toolchains, bake them in with `--tools`
 (`dotnet`, `node`, `go`, `buildtools` = VS 2022 Build Tools). List the same tools
 under `qemu.tools` so an auto-rebuild reuses them; changing the set re-bakes.
+Built-in bakes pin and verify runner 2.337.0, MinGit 2.54.0, Node 22.23.2,
+Go 1.24.4, .NET SDKs 8.0.424 and 9.0.317, and Visual Studio Build Tools
+17.14.39. The Windows ISO content and every selected payload identity are part
+of the golden fingerprint. Downloads are checked before execution or extraction.
+When selecting a different `--runner-version`, also provide its archive digest
+with `--runner-sha256`.
 
 ```yaml
 pools:
@@ -253,6 +291,8 @@ pools:
       mem_mb: 4096
       cpus: 2
       accel: kvm           # kvm (Linux) | whpx (Windows) | hvf (macOS) | "" auto
+      bake_iso: /var/lib/multirunner/WinServer2022.iso
+      bake_iso_sha256: "<sha256>"   # optional expected digest; ISO is always fingerprinted
       tools: [dotnet, node, buildtools]   # bake these into the golden on rebuild
 ```
 

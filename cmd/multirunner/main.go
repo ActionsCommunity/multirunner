@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/kardianos/service"
@@ -40,6 +41,7 @@ const version = "0.1.0-dev"
 // scan, which is the only check that scales with repo count times workflow count
 // rather than repo count alone.
 const remoteCheckTimeout = 90 * time.Second
+const remoteRepoCheckTimeout = 20 * time.Second
 
 func rootCmd() *cobra.Command {
 	var cfgPath string
@@ -243,7 +245,7 @@ func screenshotCmd() *cobra.Command {
 
 // bakeCmd builds a golden Windows Server Core image for the QEMU backend.
 func bakeCmd() *cobra.Command {
-	var iso, golden, accel, runnerVer, vncWeb string
+	var iso, isoSHA256, golden, accel, runnerVer, runnerSHA256, vncWeb string
 	var diskGB, memMB, cpus int
 	var licensed, prepareOnly bool
 	var tools []string
@@ -263,8 +265,13 @@ command without running it (for manual/observed installs).`,
 			opts := winvm.BakeOptions{
 				WindowsISO: iso, Golden: golden, DiskGB: diskGB, MemMB: memMB,
 				CPUs: cpus, Accel: accel, RunnerVersion: runnerVer, Licensed: licensed,
-				VNCWeb: vncWeb, Tools: tools, WorkflowsHash: winvm.ToolsHash(tools),
+				VNCWeb: vncWeb, Tools: tools, WindowsISOSHA256: isoSHA256, RunnerSHA256: runnerSHA256,
 			}
+			hash, err := winvm.ToolsHash(opts)
+			if err != nil {
+				return fmt.Errorf("bake inputs: %w", err)
+			}
+			opts.WorkflowsHash = hash
 			if prepareOnly {
 				autoISO, args, err := winvm.Prepare(cmd.Context(), &opts)
 				if err != nil {
@@ -279,12 +286,14 @@ command without running it (for manual/observed installs).`,
 	}
 	c.Flags().BoolVar(&prepareOnly, "prepare-only", false, "create disk + autounattend ISO and print the QEMU command, don't run")
 	c.Flags().StringVar(&iso, "iso", "", "path to a Windows Server ISO (required)")
+	c.Flags().StringVar(&isoSHA256, "iso-sha256", "", "expected SHA256 of the Windows Server ISO")
 	c.Flags().StringVar(&golden, "golden", "", "output golden qcow2 path (required)")
 	c.Flags().IntVar(&diskGB, "disk-gb", 40, "golden disk size (GB)")
 	c.Flags().IntVar(&memMB, "mem-mb", 4096, "install VM memory (MB)")
 	c.Flags().IntVar(&cpus, "cpus", 2, "install VM vCPUs")
 	c.Flags().StringVar(&accel, "accel", "", "QEMU accel: kvm|whpx|hvf|tcg ('' = auto)")
 	c.Flags().StringVar(&runnerVer, "runner-version", winvm.DefaultRunnerVersion, "actions/runner version to bake in")
+	c.Flags().StringVar(&runnerSHA256, "runner-sha256", "", "runner archive SHA256 (required for a non-default version)")
 	c.Flags().StringSliceVar(&tools, "tools", nil, "toolchains to bake into the golden: dotnet,node,go,buildtools")
 	c.Flags().BoolVar(&licensed, "licensed", false, "a real Windows key/KMS is configured (skip eval housekeeping)")
 	c.Flags().StringVar(&vncWeb, "vnc-web", "127.0.0.1:8090", "serve a browser VNC viewer at host:port to watch the install (empty to disable)")
@@ -415,7 +424,7 @@ func runOrchestrator(ctx context.Context, configPath string, interactive, instal
 	}
 
 	// Build the GitHub client provider. For scope=repos, create a per-repo
-	// client for each listed repo and wrap them in a round-robin RepoSet.
+	// client for each listed repo and wrap them in a RepoSet.
 	var ghProvider github.ClientProvider
 	if cfg.GitHub.Scope == config.ScopeRepos {
 		refs := cfg.GitHub.ResolvedRepos()
@@ -449,7 +458,9 @@ func runOrchestrator(ctx context.Context, configPath string, interactive, instal
 			"provisioning", cfg.Provisioning, "pools", len(cfg.Pools))
 	}
 
-	runQEMUHousekeeping(ctx, cfg, logger)
+	if err := runQEMUHousekeeping(ctx, cfg, logger); err != nil {
+		return err
+	}
 
 	gitMgr, err := setupGitCache(ctx, cfg, logger)
 	if err != nil {
@@ -525,28 +536,38 @@ func runOrchestrator(ctx context.Context, configPath string, interactive, instal
 	return nil
 }
 
-func runQEMUHousekeeping(ctx context.Context, cfg *config.Config, logger *slog.Logger) {
+func runQEMUHousekeeping(ctx context.Context, cfg *config.Config, logger *slog.Logger) error {
 	var refs []winvm.GoldenRef
 	for _, pc := range cfg.Pools {
 		if pc.Backend != "qemu" {
 			continue
 		}
-		refs = append(refs, winvm.GoldenRef{Bake: winvm.BakeOptions{
-			WindowsISO:    pc.QEMU.BakeISO,
-			Golden:        pc.QEMU.Golden,
-			MemMB:         pc.QEMU.MemMB,
-			CPUs:          pc.QEMU.CPUs,
-			Accel:         pc.QEMU.Accel,
-			RunnerVersion: pc.QEMU.RunnerVersion,
-			Licensed:      pc.QEMU.Licensed,
-			Tools:         pc.QEMU.Tools,
-			WorkflowsHash: winvm.ToolsHash(pc.QEMU.Tools),
-		}})
+		bake := winvm.BakeOptions{
+			WindowsISO:       pc.QEMU.BakeISO,
+			WindowsISOSHA256: pc.QEMU.BakeISOSHA256,
+			Golden:           pc.QEMU.Golden,
+			MemMB:            pc.QEMU.MemMB,
+			CPUs:             pc.QEMU.CPUs,
+			Accel:            pc.QEMU.Accel,
+			RunnerVersion:    pc.QEMU.RunnerVersion,
+			RunnerSHA256:     pc.QEMU.RunnerSHA256,
+			Licensed:         pc.QEMU.Licensed,
+			Tools:            pc.QEMU.Tools,
+		}
+		if bake.WindowsISO != "" {
+			hash, err := winvm.ToolsHash(bake)
+			if err != nil {
+				return fmt.Errorf("qemu pool %q bake inputs: %w", pc.Name, err)
+			}
+			bake.WorkflowsHash = hash
+		}
+		refs = append(refs, winvm.GoldenRef{Bake: bake})
 	}
 	if len(refs) == 0 {
-		return
+		return nil
 	}
 	winvm.NewHousekeeper(refs, winvm.DefaultPolicy(), 0, logger).CheckOnce(ctx)
+	return nil
 }
 
 // runAutoscale runs the on-demand scaler (polling) plus an optional webhook
@@ -691,7 +712,9 @@ func doctor(configPath string) error {
 		be.Close()
 		fmt.Printf("[%s] os=%s host=%s image=%s -> %s\n", pc.Name, pc.OS, pc.Docker.Host, pc.ImageRef(), status)
 	}
-	warnStarvedRepos(cfg)
+	if err := warnStarvedRepos(cfg); err != nil {
+		allOK = false
+	}
 	// The remote checks get a budget of their own. They share nothing with the
 	// pool pings above, and a single hung daemon eating the 20s would otherwise
 	// starve them into reporting "could not check" for every repo, which reads
@@ -701,7 +724,9 @@ func doctor(configPath string) error {
 	if err := checkActionsEnabled(apiCtx, cfg); err != nil {
 		allOK = false
 	}
-	warnNoSelfHostedWorkflows(apiCtx, cfg)
+	if err := warnNoSelfHostedWorkflows(apiCtx, cfg); err != nil {
+		allOK = false
+	}
 	if !allOK {
 		return fmt.Errorf("preflight found problems")
 	}
@@ -714,45 +739,33 @@ func doctor(configPath string) error {
 // forever and the operator sees nothing: no error, no runner, no work. It looks
 // identical to a repo that is merely idle, which is what makes it worth calling
 // out here. Returns an error if any repo is off, so doctor exits non-zero.
-//
-// Only meaningful for scope=repos; org and enterprise scopes have no per-repo
-// list to check. Repos that fail the lookup (deleted, renamed, token missing the
-// scope) are reported but do not fail the run, because that is a token or
-// inventory problem rather than the silent misconfiguration this guards against.
 func checkActionsEnabled(ctx context.Context, cfg *config.Config) error {
 	if cfg.GitHub.Scope != config.ScopeRepos {
 		return nil
 	}
 	var disabled []string
-	for _, ref := range cfg.GitHub.ResolvedRepos() {
-		repoGH := cfg.GitHub
-		repoGH.Scope = config.ScopeRepo
-		repoGH.Owner = ref.Owner
-		repoGH.Repo = ref.Repo
-		name := ref.Owner + "/" + ref.Repo
-
-		c, err := github.New(ctx, repoGH, cfg.Auth)
-		if err != nil {
-			fmt.Printf("\n[%s] could not check Actions: %v\n", name, err)
-			continue
-		}
-		on, err := c.ActionsEnabled(ctx)
-		if err != nil {
-			fmt.Printf("\n[%s] could not check Actions: %v\n", name, err)
-			continue
-		}
-		if !on {
-			disabled = append(disabled, name)
+	var incomplete []repoCheckResult
+	results := runRepoChecks(ctx, cfg, func(ctx context.Context, c *github.Client) (bool, error) {
+		return c.ActionsEnabled(ctx)
+	})
+	for _, result := range results {
+		if result.err != nil {
+			fmt.Printf("\n[%s] could not check Actions: %v\n", result.name, result.err)
+			incomplete = append(incomplete, result)
+		} else if !result.ok {
+			disabled = append(disabled, result.name)
 		}
 	}
-	if len(disabled) == 0 {
-		return nil
+	if len(disabled) > 0 {
+		fmt.Printf("\nWARNING: Actions is disabled on %d of %d configured repo(s): %s\n"+
+			"        These repos can never queue a job, so multirunner polls them for nothing.\n"+
+			"        fix: enable Actions under Settings > Actions > General, or drop them from github.repos.\n",
+			len(disabled), len(results), strings.Join(disabled, ", "))
 	}
-	fmt.Printf("\nWARNING: Actions is disabled on %d of %d configured repo(s): %s\n"+
-		"        These repos can never queue a job, so multirunner polls them for nothing.\n"+
-		"        fix: enable Actions under Settings > Actions > General, or drop them from github.repos.\n",
-		len(disabled), len(cfg.GitHub.ResolvedRepos()), strings.Join(disabled, ", "))
-	return fmt.Errorf("actions disabled on %d repo(s)", len(disabled))
+	if len(disabled) > 0 || len(incomplete) > 0 {
+		return fmt.Errorf("Actions checks failed: %d disabled, %d incomplete", len(disabled), len(incomplete))
+	}
+	return nil
 }
 
 // warnNoSelfHostedWorkflows flags configured repos where no workflow targets a
@@ -766,40 +779,32 @@ func checkActionsEnabled(ctx context.Context, cfg *config.Config) error {
 // matrix or expression forms cannot be resolved without evaluating the workflow,
 // so a miss here is possible. That is why this only ever advises and never fails
 // doctor: a false alarm on a working repo would be worse than staying quiet.
-func warnNoSelfHostedWorkflows(ctx context.Context, cfg *config.Config) {
+func warnNoSelfHostedWorkflows(ctx context.Context, cfg *config.Config) error {
 	if cfg.GitHub.Scope != config.ScopeRepos {
-		return
+		return nil
 	}
 	var unused []string
-	for _, ref := range cfg.GitHub.ResolvedRepos() {
-		repoGH := cfg.GitHub
-		repoGH.Scope = config.ScopeRepo
-		repoGH.Owner = ref.Owner
-		repoGH.Repo = ref.Repo
-		name := ref.Owner + "/" + ref.Repo
-
-		c, err := github.New(ctx, repoGH, cfg.Auth)
-		if err != nil {
-			fmt.Printf("\n[%s] could not scan workflows: %v\n", name, err)
-			continue
-		}
-		found, err := repoTargetsSelfHosted(ctx, c)
-		if err != nil {
-			fmt.Printf("\n[%s] could not scan workflows: %v\n", name, err)
-			continue
-		}
-		if !found {
-			unused = append(unused, name)
+	var incomplete []repoCheckResult
+	results := runRepoChecks(ctx, cfg, repoTargetsSelfHosted)
+	for _, result := range results {
+		if result.err != nil {
+			fmt.Printf("\n[%s] could not scan workflows: %v\n", result.name, result.err)
+			incomplete = append(incomplete, result)
+		} else if !result.ok {
+			unused = append(unused, result.name)
 		}
 	}
-	if len(unused) == 0 {
-		return
+	if len(unused) > 0 {
+		fmt.Printf("\nNOTE: heuristic scan found no workflow targeting a self-hosted runner in %d of %d configured repo(s): %s\n"+
+			"        multirunner polls these every interval but they can never send it a job.\n"+
+			"        fix: point a workflow at `runs-on: [self-hosted, ...]`, or drop them from github.repos.\n"+
+			"        (custom-label and matrix runs-on forms are not detected, so verify before removing)\n",
+			len(unused), len(results), strings.Join(unused, ", "))
 	}
-	fmt.Printf("\nNOTE: no workflow targets a self-hosted runner in %d of %d configured repo(s): %s\n"+
-		"        multirunner polls these every interval but they can never send it a job.\n"+
-		"        fix: point a workflow at `runs-on: [self-hosted, ...]`, or drop them from github.repos.\n"+
-		"        (custom-label and matrix runs-on forms are not detected, so verify before removing)\n",
-		len(unused), len(cfg.GitHub.ResolvedRepos()), strings.Join(unused, ", "))
+	if len(incomplete) > 0 {
+		return fmt.Errorf("workflow scans incomplete for %d repo(s)", len(incomplete))
+	}
+	return nil
 }
 
 // repoTargetsSelfHosted reports whether any workflow file mentions the
@@ -821,7 +826,7 @@ func repoTargetsSelfHosted(ctx context.Context, c *github.Client) (bool, error) 
 		if err != nil {
 			return false, err
 		}
-		if strings.Contains(string(body), "self-hosted") {
+		if strings.Contains(strings.ToLower(string(body)), "self-hosted") {
 			return true, nil
 		}
 	}
@@ -834,11 +839,12 @@ func repoTargetsSelfHosted(ctx context.Context, c *github.Client) (bool, error) 
 // finishes a job, so idle slots never rotate. Repos that never win a slot get no
 // runner at all and their jobs queue forever. Autoscale does not have this
 // problem because it places runners on the repo that queued the work.
-func warnStarvedRepos(cfg *config.Config) {
+func warnStarvedRepos(cfg *config.Config) error {
 	if cfg.GitHub.Scope != config.ScopeRepos || cfg.Provisioning.IsAutoscale() {
-		return
+		return nil
 	}
 	repos := len(cfg.GitHub.Repos)
+	var starved int
 	for _, pc := range cfg.Pools {
 		if pc.Size >= repos {
 			continue
@@ -846,7 +852,57 @@ func warnStarvedRepos(cfg *config.Config) {
 		fmt.Printf("\n[%s] WARNING: size=%d but repos=%d. At least %d repo(s) will have no %s runner and their jobs will stay queued.\n"+
 			"        fix: raise size to %d, or set provisioning: autoscale so runners are placed on the repo that queued the job.\n",
 			pc.Name, pc.Size, repos, repos-pc.Size, pc.OS, repos)
+		starved++
 	}
+	if starved > 0 {
+		return fmt.Errorf("%d pool(s) cannot cover every configured repo", starved)
+	}
+	return nil
+}
+
+type repoCheckResult struct {
+	name string
+	ok   bool
+	err  error
+}
+
+func runRepoChecks(
+	ctx context.Context,
+	cfg *config.Config,
+	check func(context.Context, *github.Client) (bool, error),
+) []repoCheckResult {
+	refs := cfg.GitHub.ResolvedRepos()
+	results := make([]repoCheckResult, len(refs))
+	limit := make(chan struct{}, 8)
+	var wg sync.WaitGroup
+	for i, ref := range refs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			name := ref.Owner + "/" + ref.Repo
+			results[i].name = name
+			select {
+			case limit <- struct{}{}:
+				defer func() { <-limit }()
+			case <-ctx.Done():
+				results[i].err = ctx.Err()
+				return
+			}
+			repoCtx, cancel := context.WithTimeout(ctx, remoteRepoCheckTimeout)
+			defer cancel()
+			repoGH := cfg.GitHub
+			repoGH.Scope = config.ScopeRepo
+			repoGH.Owner = ref.Owner
+			repoGH.Repo = ref.Repo
+			client, err := github.New(repoCtx, repoGH, cfg.Auth)
+			if err == nil {
+				results[i].ok, err = check(repoCtx, client)
+			}
+			results[i].err = err
+		}()
+	}
+	wg.Wait()
+	return results
 }
 
 func newLogger(l config.Log) *slog.Logger {

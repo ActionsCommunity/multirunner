@@ -25,24 +25,41 @@ try {
     # fetchOrStage prefers a copy staged on the autounattend CD (the host fetched
     # it fast); only if it's absent does it download (the VM's user-mode network is
     # slow/flaky, so the CD is the primary path).
-    function FetchOrStage($name, $url, $dest) {
+    function Assert-PayloadHash($name, $dest, $algorithm, $expected) {
+        $actual = (Get-FileHash $dest -Algorithm $algorithm).Hash
+        if ($actual -ne $expected) {
+            Remove-Item $dest -Force -ErrorAction SilentlyContinue
+            throw "$name $algorithm mismatch: got $actual"
+        }
+    }
+
+    function FetchOrStage($name, $url, $dest, $algorithm, $expected) {
         if ($src -and (Test-Path (Join-Path $src $name))) {
-            Copy-Item (Join-Path $src $name) $dest -Force
-            # The CD source is read-only; Copy-Item carries that attribute over, and
-            # Expand-Archive/Remove-Item then fail with "insufficient access rights".
-            Set-ItemProperty $dest -Name IsReadOnly -Value $false -Force
-            Mark "$name staged from CD"
-            return
+            try {
+                Copy-Item (Join-Path $src $name) $dest -Force
+                # The CD source is read-only; Copy-Item carries that attribute over, and
+                # Expand-Archive/Remove-Item then fail with "insufficient access rights".
+                Set-ItemProperty $dest -Name IsReadOnly -Value $false -Force
+                Assert-PayloadHash $name $dest $algorithm $expected
+                Mark "$name staged from CD"
+                return
+            }
+            catch { Mark "$name staged copy rejected: $($_.Exception.Message)" }
         }
         for ($i = 0; $i -lt 30; $i++) {
-            try { Invoke-WebRequest $url -OutFile $dest -UseBasicParsing -TimeoutSec 300; Mark "$name downloaded"; return }
+            try {
+                Invoke-WebRequest $url -OutFile $dest -UseBasicParsing -TimeoutSec 300
+                Assert-PayloadHash $name $dest $algorithm $expected
+                Mark "$name downloaded"
+                return
+            }
             catch { Mark "$name retry $i $($_.Exception.Message)"; Start-Sleep -Seconds 10 }
         }
         throw "$name unavailable (no CD copy and download failed)"
     }
 
     $url = "https://github.com/actions/runner/releases/download/v$ver/actions-runner-win-x64-$ver.zip"
-    FetchOrStage 'runner.zip' $url C:\runner.zip
+    FetchOrStage 'runner.zip' $url C:\runner.zip SHA256 '__RUNNER_SHA256__'
     Expand-Archive C:\runner.zip C:\actions-runner -Force
     Remove-Item C:\runner.zip
     Mark 'runner extracted'
@@ -52,7 +69,7 @@ try {
     # REST API full-archive download, and so `run:` steps and the job hook can run
     # git. Prepended to the machine PATH so every process (runner, hook, job) sees it.
     $gitUrl = 'https://github.com/git-for-windows/git/releases/download/v2.54.0.windows.1/MinGit-2.54.0-64-bit.zip'
-    FetchOrStage 'mingit.zip' $gitUrl C:\mingit.zip
+    FetchOrStage 'mingit.zip' $gitUrl C:\mingit.zip SHA256 '__MINGIT_SHA256__'
     Expand-Archive C:\mingit.zip C:\mingit -Force
     Remove-Item C:\mingit.zip
     $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
@@ -124,7 +141,7 @@ try {
     foreach ($t in $tools) {
         switch ($t) {
             'node' {
-                FetchOrStage 'node.zip' '__NODE_URL__' C:\node.zip
+                FetchOrStage 'node.zip' '__NODE_URL__' C:\node.zip SHA256 '__NODE_SHA256__'
                 Expand-Archive C:\node.zip C:\ -Force
                 Remove-Item C:\node.zip
                 $nd = (Get-ChildItem C:\ -Directory -Filter 'node-v*-win-x64' | Select-Object -First 1).FullName
@@ -134,33 +151,39 @@ try {
                 Mark 'node installed'
             }
             'go' {
-                FetchOrStage 'go.zip' '__GO_URL__' C:\go.zip
+                FetchOrStage 'go.zip' '__GO_URL__' C:\go.zip SHA256 '__GO_SHA256__'
                 Expand-Archive C:\go.zip C:\ -Force   # extracts C:\go
                 Remove-Item C:\go.zip
                 Add-MachinePath 'C:\go\bin'
                 Mark 'go installed'
             }
             'dotnet' {
-                FetchOrStage 'dotnet-install.ps1' 'https://dot.net/v1/dotnet-install.ps1' C:\dotnet-install.ps1
-                & C:\dotnet-install.ps1 -Channel 8.0 -InstallDir C:\dotnet
-                & C:\dotnet-install.ps1 -Channel 9.0 -InstallDir C:\dotnet
-                Remove-Item C:\dotnet-install.ps1
+                New-Item -ItemType Directory -Force C:\dotnet | Out-Null
+                FetchOrStage 'dotnet8.zip' '__DOTNET8_URL__' C:\dotnet8.zip SHA512 '__DOTNET8_SHA512__'
+                Expand-Archive C:\dotnet8.zip C:\dotnet -Force
+                Remove-Item C:\dotnet8.zip
+                FetchOrStage 'dotnet9.zip' '__DOTNET9_URL__' C:\dotnet9.zip SHA512 '__DOTNET9_SHA512__'
+                Expand-Archive C:\dotnet9.zip C:\dotnet -Force
+                Remove-Item C:\dotnet9.zip
                 [Environment]::SetEnvironmentVariable('DOTNET_ROOT', 'C:\dotnet', 'Machine')
                 [Environment]::SetEnvironmentVariable('DOTNET_CLI_TELEMETRY_OPTOUT', '1', 'Machine')
                 Add-MachinePath 'C:\dotnet'
                 Mark 'dotnet installed'
             }
             'buildtools' {
-                FetchOrStage 'vs_buildtools.exe' 'https://aka.ms/vs/17/release/vs_buildtools.exe' C:\vs_buildtools.exe
+                FetchOrStage 'vs_buildtools.exe' '__VS_URL__' C:\vs_buildtools.exe SHA256 '__VS_SHA256__'
+                FetchOrStage 'vs.channel' '__VS_CHANNEL_URL__' C:\vs.channel SHA256 '__VS_CHANNEL_SHA256__'
                 $p = Start-Process -FilePath C:\vs_buildtools.exe -Wait -PassThru -ArgumentList `
                     '--quiet', '--wait', '--norestart', '--nocache', '--installPath', 'C:\BuildTools', `
+                    '--channelUri', 'file:///C:/vs.channel', `
+                    '--installChannelUri', 'file:///C:/vs.channel', '--noUpdateInstaller', `
                     '--add', 'Microsoft.VisualStudio.Workload.VCTools', `
                     '--add', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64', `
                     '--add', 'Microsoft.VisualStudio.Component.Windows11SDK.26100', `
                     '--add', 'Microsoft.VisualStudio.Component.VC.CMake.Project', `
                     '--includeRecommended'
                 if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { throw "vs_buildtools failed: $($p.ExitCode)" }
-                Remove-Item C:\vs_buildtools.exe
+                Remove-Item C:\vs_buildtools.exe, C:\vs.channel
                 [Environment]::SetEnvironmentVariable('VSBUILDTOOLS', 'C:\BuildTools', 'Machine')
                 Mark 'buildtools installed'
             }

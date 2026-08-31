@@ -23,7 +23,7 @@ import (
 // legitimate "repo not managed here" answer, so no network access is needed.
 type recordingProvider struct{ asked []string }
 
-func (p *recordingProvider) NextClient() *github.Client { return nil }
+func (p *recordingProvider) ClientForSlot(int) *github.Client { return nil }
 func (p *recordingProvider) ClientFor(repo string) *github.Client {
 	p.asked = append(p.asked, repo)
 	return nil

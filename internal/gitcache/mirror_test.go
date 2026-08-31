@@ -2,8 +2,11 @@ package gitcache
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -207,8 +210,8 @@ func TestGitEnvAppendsHeaderAfterInheritedConfig(t *testing.T) {
 	if got := env["GIT_CONFIG_COUNT"]; got != "3" {
 		t.Errorf("GIT_CONFIG_COUNT = %q, want 3", got)
 	}
-	if got := env["GIT_CONFIG_KEY_2"]; got != "http.extraHeader" {
-		t.Errorf("GIT_CONFIG_KEY_2 = %q, want http.extraHeader", got)
+	if got := env["GIT_CONFIG_KEY_2"]; got != "http./.extraHeader" {
+		t.Errorf("GIT_CONFIG_KEY_2 = %q, want scoped extraHeader", got)
 	}
 	if got := env["GIT_CONFIG_VALUE_2"]; !strings.HasPrefix(got, "AUTHORIZATION: basic ") {
 		t.Errorf("GIT_CONFIG_VALUE_2 = %q, want an authorization header", got)
@@ -251,8 +254,69 @@ func TestGitEnvIgnoresBogusCount(t *testing.T) {
 	if got := env["GIT_CONFIG_COUNT"]; got != "1" {
 		t.Errorf("GIT_CONFIG_COUNT = %q, want 1", got)
 	}
-	if got := env["GIT_CONFIG_KEY_0"]; got != "http.extraHeader" {
-		t.Errorf("GIT_CONFIG_KEY_0 = %q, want http.extraHeader", got)
+	if got := env["GIT_CONFIG_KEY_0"]; got != "http./.extraHeader" {
+		t.Errorf("GIT_CONFIG_KEY_0 = %q, want scoped extraHeader", got)
+	}
+}
+
+func TestGitEnvDropsInheritedAuthorizationAndRewrite(t *testing.T) {
+	t.Setenv("GIT_CONFIG_COUNT", "3")
+	t.Setenv("GIT_CONFIG_KEY_0", "safe.bareRepository")
+	t.Setenv("GIT_CONFIG_VALUE_0", "explicit")
+	t.Setenv("GIT_CONFIG_KEY_1", "http.https://github.com/.extraHeader")
+	t.Setenv("GIT_CONFIG_VALUE_1", "Authorization: bearer inherited")
+	t.Setenv("GIT_CONFIG_KEY_2", "url.https://attacker.invalid/.insteadOf")
+	t.Setenv("GIT_CONFIG_VALUE_2", "https://github.com/")
+
+	m := &Manager{
+		baseURL: "https://github.com",
+		token:   "test-token",
+		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	env := resolveEnv(m.gitEnv())
+	if got := env["GIT_CONFIG_COUNT"]; got != "2" {
+		t.Fatalf("GIT_CONFIG_COUNT = %q, want safe config plus one auth header", got)
+	}
+	if got := env["GIT_CONFIG_KEY_1"]; got != "http.https://github.com/.extraHeader" {
+		t.Errorf("auth key = %q, want GitHub-scoped header", got)
+	}
+	if strings.Contains(strings.ToLower(env["GIT_CONFIG_VALUE_0"]), "authorization:") {
+		t.Error("inherited Authorization header survived sanitization")
+	}
+}
+
+func TestGitAuthCannotBeRewrittenToAnotherHost(t *testing.T) {
+	var primaryRequests, rewrittenRequests int
+	var primaryAuth string
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		primaryRequests++
+		primaryAuth = r.Header.Get("Authorization")
+		http.NotFound(w, r)
+	}))
+	defer primary.Close()
+	rewritten := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rewrittenRequests++
+		http.NotFound(w, r)
+	}))
+	defer rewritten.Close()
+
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", fmt.Sprintf("url.%s/.insteadOf", rewritten.URL))
+	t.Setenv("GIT_CONFIG_VALUE_0", primary.URL+"/")
+	m := &Manager{
+		baseURL: primary.URL,
+		token:   "test-token",
+		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	_ = m.git(context.Background(), "", "ls-remote", m.cloneURL("o/r"))
+	if primaryRequests == 0 {
+		t.Fatal("git did not contact the configured GitHub host")
+	}
+	if rewrittenRequests != 0 {
+		t.Fatalf("credentialed request was rewritten to another host %d time(s)", rewrittenRequests)
+	}
+	if len(primaryAuth) < len("Basic ") || !strings.EqualFold(primaryAuth[:len("Basic ")], "Basic ") {
+		t.Errorf("configured host Authorization = %q, want Basic credentials", primaryAuth)
 	}
 }
 

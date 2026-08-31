@@ -3,9 +3,11 @@ package github
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"testing"
 
@@ -14,10 +16,10 @@ import (
 	"github.com/GerardSmit/multirunner/internal/config"
 )
 
-func TestClientNextClientReturnsSelf(t *testing.T) {
+func TestClientForSlotReturnsSelf(t *testing.T) {
 	c := &Client{scope: config.ScopeRepo, owner: "o", repo: "r"}
-	if got := c.NextClient(); got != c {
-		t.Error("NextClient should return the same *Client")
+	if got := c.ClientForSlot(42); got != c {
+		t.Error("ClientForSlot should return the same *Client")
 	}
 }
 
@@ -28,7 +30,7 @@ func TestClientScope(t *testing.T) {
 	}
 }
 
-func TestRepoSetRoundRobin(t *testing.T) {
+func TestRepoSetStableSlotPlacement(t *testing.T) {
 	clients := make([]*Client, 3)
 	repos := make([]string, 3)
 	for i := range clients {
@@ -44,10 +46,10 @@ func TestRepoSetRoundRobin(t *testing.T) {
 		t.Errorf("Len = %d, want 3", rs.Len())
 	}
 
-	// First 6 calls should cycle through repos twice.
+	// Each pool gets the same complete placement independently.
 	for cycle := 0; cycle < 2; cycle++ {
 		for i := 0; i < 3; i++ {
-			got := rs.NextClient()
+			got := rs.ClientForSlot(i)
 			if got != clients[i] {
 				t.Errorf("cycle %d, index %d: got client for %q, want %q",
 					cycle, i, got.repo, clients[i].repo)
@@ -56,7 +58,7 @@ func TestRepoSetRoundRobin(t *testing.T) {
 	}
 }
 
-func TestRepoSetRoundRobinConcurrent(t *testing.T) {
+func TestRepoSetSlotPlacementConcurrent(t *testing.T) {
 	clients := make([]*Client, 4)
 	repos := make([]string, 4)
 	for i := range clients {
@@ -65,15 +67,23 @@ func TestRepoSetRoundRobinConcurrent(t *testing.T) {
 	}
 	rs := NewRepoSet(clients, repos)
 
-	const goroutines = 100
+	const pools = 20
 	var wg sync.WaitGroup
-	wg.Add(goroutines)
-	for g := 0; g < goroutines; g++ {
+	wg.Add(pools)
+	for poolIndex := 0; poolIndex < pools; poolIndex++ {
 		go func() {
 			defer wg.Done()
-			c := rs.NextClient()
-			if c == nil {
-				t.Error("NextClient returned nil")
+			seen := make(map[*Client]bool, len(clients))
+			for slot := range clients {
+				c := rs.ClientForSlot(slot)
+				if c == nil {
+					t.Errorf("pool %d slot %d returned nil", poolIndex, slot)
+					continue
+				}
+				seen[c] = true
+			}
+			if len(seen) != len(clients) {
+				t.Errorf("pool %d covered %d unique repos, want %d", poolIndex, len(seen), len(clients))
 			}
 		}()
 	}
@@ -251,12 +261,77 @@ func TestRepoSetQueuedJobsPartialFailure(t *testing.T) {
 		[]string{"o/bad", "o/good"},
 	)
 
-	// Should not error even though "bad" repo fails.
 	jobs, err := rs.QueuedJobs(context.Background())
-	if err != nil {
-		t.Fatalf("QueuedJobs: %v", err)
+	var pollErr *RepoPollError
+	if !errors.As(err, &pollErr) {
+		t.Fatalf("QueuedJobs error = %v, want RepoPollError", err)
+	}
+	if pollErr.AllFailed() {
+		t.Fatalf("partial failure reported as total: %v", err)
+	}
+	if _, ok := pollErr.Failures["o/bad"]; !ok {
+		t.Errorf("failure does not identify o/bad: %v", err)
 	}
 	if len(jobs) != 0 {
 		t.Errorf("got %d jobs from partial failure, want 0", len(jobs))
+	}
+}
+
+func TestRepoSetQueuedJobsRotatesStartingRepo(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/actions/runs"):
+			repo := strings.Split(r.URL.Path, "/")[3]
+			id := map[string]int{"a": 1, "b": 2, "c": 3}[repo]
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"workflow_runs": []map[string]any{{"id": id}},
+			})
+		case strings.Contains(r.URL.Path, "/actions/runs/"):
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"jobs": []map[string]any{{"status": "queued", "labels": []string{"self-hosted"}}},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	base, _ := url.Parse(srv.URL + "/")
+	var clients []*Client
+	var repos []string
+	for _, repo := range []string{"a", "b", "c"} {
+		ghc := github.NewClient(nil)
+		ghc.BaseURL = base
+		clients = append(clients, &Client{gh: ghc, scope: config.ScopeRepo, owner: "o", repo: repo})
+		repos = append(repos, "o/"+repo)
+	}
+	rs := NewRepoSet(clients, repos)
+	for call, want := range []string{"o/a", "o/b", "o/c"} {
+		jobs, err := rs.QueuedJobs(context.Background())
+		if err != nil {
+			t.Fatalf("call %d: %v", call, err)
+		}
+		if len(jobs) != 3 || jobs[0].Client.Target() != want {
+			t.Fatalf("call %d first target = %v, want %s", call, jobs[0].Client.Target(), want)
+		}
+	}
+}
+
+func TestRepoSetQueuedJobsAllFailed(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "down", http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+	base, _ := url.Parse(srv.URL + "/")
+	clients := make([]*Client, 2)
+	for i, repo := range []string{"a", "b"} {
+		ghc := github.NewClient(nil)
+		ghc.BaseURL = base
+		clients[i] = &Client{gh: ghc, scope: config.ScopeRepo, owner: "o", repo: repo}
+	}
+	_, err := NewRepoSet(clients, []string{"o/a", "o/b"}).QueuedJobs(context.Background())
+	var pollErr *RepoPollError
+	if !errors.As(err, &pollErr) || !pollErr.AllFailed() {
+		t.Fatalf("error = %v, want all-failed RepoPollError", err)
 	}
 }

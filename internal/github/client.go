@@ -183,23 +183,34 @@ func (c *Client) QueuedJobLabels(ctx context.Context) ([][]string, error) {
 	if c.scope != config.ScopeRepo {
 		return nil, nil
 	}
-	path := fmt.Sprintf("repos/%s/%s/actions/runs?status=queued&per_page=20",
-		url.PathEscape(c.owner), url.PathEscape(c.repo))
-	req, err := c.gh.NewRequest(http.MethodGet, path, nil)
-	if err != nil {
-		return nil, err
-	}
-	var out struct {
-		WorkflowRuns []struct {
-			ID int64 `json:"id"`
-		} `json:"workflow_runs"`
-	}
-	if _, err := c.gh.Do(ctx, req, &out); err != nil {
-		return nil, fmt.Errorf("list queued runs: %w", err)
+	runIDs := make([]int64, 0)
+	seen := make(map[int64]struct{})
+	for _, status := range []string{"queued", "in_progress"} {
+		opts := &github.ListWorkflowRunsOptions{
+			Status:      status,
+			ListOptions: github.ListOptions{PerPage: 100},
+		}
+		for {
+			runs, resp, err := c.gh.Actions.ListRepositoryWorkflowRuns(ctx, c.owner, c.repo, opts)
+			if err != nil {
+				return nil, fmt.Errorf("list %s workflow runs: %w", status, err)
+			}
+			for _, run := range runs.WorkflowRuns {
+				id := run.GetID()
+				if _, ok := seen[id]; !ok {
+					seen[id] = struct{}{}
+					runIDs = append(runIDs, id)
+				}
+			}
+			if resp.NextPage == 0 {
+				break
+			}
+			opts.Page = resp.NextPage
+		}
 	}
 	var labels [][]string
-	for _, run := range out.WorkflowRuns {
-		jobs, err := c.queuedJobsForRun(ctx, run.ID)
+	for _, runID := range runIDs {
+		jobs, err := c.queuedJobsForRun(ctx, runID)
 		if err != nil {
 			return nil, err
 		}
@@ -209,26 +220,25 @@ func (c *Client) QueuedJobLabels(ctx context.Context) ([][]string, error) {
 }
 
 func (c *Client) queuedJobsForRun(ctx context.Context, runID int64) ([][]string, error) {
-	path := fmt.Sprintf("repos/%s/%s/actions/runs/%d/jobs?filter=latest&per_page=100",
-		url.PathEscape(c.owner), url.PathEscape(c.repo), runID)
-	req, err := c.gh.NewRequest(http.MethodGet, path, nil)
-	if err != nil {
-		return nil, err
+	opts := &github.ListWorkflowJobsOptions{
+		Filter:      "latest",
+		ListOptions: github.ListOptions{PerPage: 100},
 	}
-	var out struct {
-		Jobs []struct {
-			Status string   `json:"status"`
-			Labels []string `json:"labels"`
-		} `json:"jobs"`
-	}
-	if _, err := c.gh.Do(ctx, req, &out); err != nil {
-		return nil, fmt.Errorf("list workflow jobs: %w", err)
-	}
-	labels := make([][]string, 0, len(out.Jobs))
-	for _, job := range out.Jobs {
-		if job.Status == "queued" {
-			labels = append(labels, job.Labels)
+	var labels [][]string
+	for {
+		jobs, resp, err := c.gh.Actions.ListWorkflowJobs(ctx, c.owner, c.repo, runID, opts)
+		if err != nil {
+			return nil, fmt.Errorf("list workflow jobs for run %d: %w", runID, err)
 		}
+		for _, job := range jobs.Jobs {
+			if job.GetStatus() == "queued" {
+				labels = append(labels, job.Labels)
+			}
+		}
+		if resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
 	}
 	return labels, nil
 }
@@ -265,6 +275,9 @@ func (c *Client) RepoFilePaths(ctx context.Context) ([]string, error) {
 	tree, _, err := c.gh.Git.GetTree(ctx, c.owner, c.repo, repo.GetDefaultBranch(), true)
 	if err != nil {
 		return nil, fmt.Errorf("get tree (%s): %w", repo.GetDefaultBranch(), err)
+	}
+	if tree.GetTruncated() {
+		return nil, fmt.Errorf("get tree (%s): recursive result was truncated", repo.GetDefaultBranch())
 	}
 	var out []string
 	for _, e := range tree.Entries {

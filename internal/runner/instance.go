@@ -55,6 +55,7 @@ func RunOnce(ctx context.Context, gh *github.Client, be backend.Backend, spec Sp
 		Index:            spec.Index,
 	})
 	if err != nil {
+		deregister(ctx, gh, jit.Runner.ID, spec.Name, logger)
 		return -1, fmt.Errorf("launch: %w", err)
 	}
 
@@ -66,26 +67,23 @@ func RunOnce(ctx context.Context, gh *github.Client, be backend.Backend, spec Sp
 	code, waitErr := handle.Wait(ctx)
 	cancelLogs()
 
-	// GitHub removes an ephemeral runner once it finishes its single job, but a
-	// runner that exits without taking one (host reboot, bad image, a kill on
-	// shutdown) leaves its registration behind permanently. Those pile up as
-	// offline runners on the repo and count against its runner limit. The
-	// container has exited by the time Wait returns, so cleanup is safe here
-	// regardless of why it exited, and in the common case GitHub has already
-	// done it for us.
-	defer deregister(ctx, gh, jit.Runner.ID, spec.Name, logger)
-
 	if ctx.Err() != nil {
-		// Shutdown: terminate the in-flight runner with a detached, bounded
-		// context (the job ctx is already cancelled).
-		detached, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
-		defer cancel()
-		_ = handle.Kill(detached)
+		if killErr := terminate(ctx, handle); killErr != nil {
+			return code, errors.Join(ctx.Err(), fmt.Errorf("kill runner: %w", killErr))
+		}
+		deregister(ctx, gh, jit.Runner.ID, spec.Name, logger)
 		return code, ctx.Err()
 	}
 	if waitErr != nil {
+		// A wait error does not prove that the runner stopped. Terminate it first
+		// and only remove its registration after the backend confirms the kill.
+		if killErr := terminate(ctx, handle); killErr != nil {
+			return code, errors.Join(fmt.Errorf("wait: %w", waitErr), fmt.Errorf("kill runner: %w", killErr))
+		}
+		deregister(ctx, gh, jit.Runner.ID, spec.Name, logger)
 		return code, fmt.Errorf("wait: %w", waitErr)
 	}
+	deregister(ctx, gh, jit.Runner.ID, spec.Name, logger)
 	logger.Info("runner exited", "name", spec.Name, "exit_code", code)
 	return code, nil
 }
@@ -93,6 +91,12 @@ func RunOnce(ctx context.Context, gh *github.Client, be backend.Backend, spec Sp
 // cleanupTimeout bounds the detached cleanup calls made once the job context is
 // already cancelled.
 const cleanupTimeout = 10 * time.Second
+
+func terminate(ctx context.Context, handle backend.RunnerHandle) error {
+	detached, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
+	defer cancel()
+	return handle.Kill(detached)
+}
 
 // deregister removes a runner registration best-effort. A registration that is
 // already gone is the expected outcome for a runner that completed its job, so

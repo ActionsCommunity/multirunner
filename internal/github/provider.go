@@ -2,8 +2,9 @@ package github
 
 import (
 	"context"
+	"fmt"
+	"sort"
 	"strings"
-	"sync"
 	"sync/atomic"
 
 	"github.com/GerardSmit/multirunner/internal/config"
@@ -16,15 +17,16 @@ import (
 // A repo-scoped runner registers to exactly one repo, so the client chosen for a
 // launch decides which repo that runner can ever serve. Demand-driven launches
 // must therefore place the runner on the repo that queued the job (QueuedJobs or
-// ClientFor). Only warm capacity, where no job has been queued yet to place
-// against, may fall back to NextClient rotation.
+// ClientFor). Warm capacity, where no job has been queued yet to place against,
+// uses deterministic per-pool slot placement.
 //
 // Both GenerateJITConfig and DeleteRunner within a single RunOnce call must use
 // the same *Client (the one chosen at the start of that call).
 type ClientProvider interface {
-	// NextClient returns a *Client for the next runner slot to register. It
-	// rotates blindly, so it is only correct for warm capacity.
-	NextClient() *Client
+	// ClientForSlot returns the registration client for a stable warm-pool slot.
+	// The same slot must keep the same target across retries and every pool must
+	// distribute its own slots independently.
+	ClientForSlot(slot int) *Client
 
 	// ClientFor returns the client for "owner/repo", or nil when this provider
 	// does not manage that repo.
@@ -49,12 +51,16 @@ type QueuedJob struct {
 // Verify *Client satisfies ClientProvider at compile time.
 var _ ClientProvider = (*Client)(nil)
 
-// NextClient returns the client itself (single-scope case).
-func (c *Client) NextClient() *Client { return c }
+// ClientForSlot returns the client itself (single-scope case).
+func (c *Client) ClientForSlot(int) *Client { return c }
 
-// ClientFor returns the client itself: a single-scope provider has exactly one
-// registration target, so every job maps to it.
-func (c *Client) ClientFor(string) *Client { return c }
+// ClientFor returns this client when it can serve repo.
+func (c *Client) ClientFor(repo string) *Client {
+	if c.scope == config.ScopeRepo && !strings.EqualFold(c.Target(), repo) {
+		return nil
+	}
+	return c
+}
 
 // QueuedJobs returns this client's queued jobs, each paired with the client.
 func (c *Client) QueuedJobs(ctx context.Context) ([]QueuedJob, error) {
@@ -83,13 +89,12 @@ func pairWith(c *Client, labels [][]string) []QueuedJob {
 	return jobs
 }
 
-// RepoSet wraps multiple per-repo *Clients and distributes runner registrations
-// across them via atomic round-robin. It is the ClientProvider for scope=repos.
+// RepoSet wraps multiple per-repo *Clients. Warm-pool placement is stable by
+// slot, while each queued-job poll rotates its starting repo for fairness.
 type RepoSet struct {
 	clients []*Client
 	repos   []string // "owner/repo" labels, same order as clients
-	counter atomic.Uint64
-	mu      sync.Mutex // protects nothing currently; reserved for future expansion
+	poll    atomic.Uint64
 }
 
 // NewRepoSet builds a RepoSet from a list of per-repo clients. The repos slice
@@ -98,10 +103,14 @@ func NewRepoSet(clients []*Client, repos []string) *RepoSet {
 	return &RepoSet{clients: clients, repos: repos}
 }
 
-// NextClient returns the next *Client in round-robin order. Thread-safe.
-func (rs *RepoSet) NextClient() *Client {
-	n := rs.counter.Add(1)
-	return rs.clients[(n-1)%uint64(len(rs.clients))]
+// ClientForSlot maps each warm-pool slot deterministically. Because the slot
+// index is local to a pool, concurrent pools cannot consume each other's
+// placement sequence.
+func (rs *RepoSet) ClientForSlot(slot int) *Client {
+	if len(rs.clients) == 0 || slot < 0 {
+		return nil
+	}
+	return rs.clients[slot%len(rs.clients)]
 }
 
 // ClientFor returns the client for "owner/repo", or nil when the repo is not in
@@ -116,20 +125,55 @@ func (rs *RepoSet) ClientFor(repo string) *Client {
 	return nil
 }
 
-// QueuedJobs aggregates queued jobs across all repos, tagging each with the
-// client for the repo that queued it so the runner lands where the work is.
-// Each per-repo client is queried sequentially (they share the same PAT, so the
-// rate limit is pooled). Errors on individual repos are skipped rather than
-// failing the aggregate: one unreachable repo should not stop the others from
-// being polled. The caller (autoscale) retries on the next poll interval.
+// RepoPollError reports the repositories that could not be polled. Results from
+// healthy repositories remain usable, but callers can distinguish a partial
+// result from a fully successful poll.
+type RepoPollError struct {
+	Failures map[string]error
+	Total    int
+}
+
+func (e *RepoPollError) Error() string {
+	names := make([]string, 0, len(e.Failures))
+	for name := range e.Failures {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	details := make([]string, 0, len(names))
+	for _, name := range names {
+		details = append(details, fmt.Sprintf("%s: %v", name, e.Failures[name]))
+	}
+	return fmt.Sprintf("queued-job polling failed for %d of %d repos: %s",
+		len(e.Failures), e.Total, strings.Join(details, "; "))
+}
+
+// AllFailed reports whether no configured repository could be polled.
+func (e *RepoPollError) AllFailed() bool {
+	return e.Total > 0 && len(e.Failures) == e.Total
+}
+
+// QueuedJobs aggregates queued jobs across all repos, rotating the first repo
+// on every call so constrained autoscale capacity cannot perpetually favor
+// earlier config entries.
 func (rs *RepoSet) QueuedJobs(ctx context.Context) ([]QueuedJob, error) {
+	if len(rs.clients) == 0 {
+		return nil, &RepoPollError{Total: 0}
+	}
 	var all []QueuedJob
-	for _, c := range rs.clients {
+	failures := make(map[string]error)
+	start := int(rs.poll.Add(1)-1) % len(rs.clients)
+	for offset := range rs.clients {
+		i := (start + offset) % len(rs.clients)
+		c := rs.clients[i]
 		labels, err := c.QueuedJobLabels(ctx)
 		if err != nil {
+			failures[rs.repos[i]] = err
 			continue
 		}
 		all = append(all, pairWith(c, labels)...)
+	}
+	if len(failures) > 0 {
+		return all, &RepoPollError{Failures: failures, Total: len(rs.clients)}
 	}
 	return all, nil
 }

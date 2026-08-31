@@ -12,7 +12,8 @@
 #     -t multirunner/runner-windows:node .
 ARG PARENT=gerardsmit/multirunner-runner-windows:minimal
 FROM ${PARENT}
-ARG NODE_VERSION=22.23.1
+ARG NODE_VERSION=22.23.2
+ARG NODE_SHA256=1177b4137ba5adaa56354ae40f1080c7450e8ae09cecb47da459d1c52ac99f97
 
 SHELL ["powershell", "-NoProfile", "-Command", "$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue';"]
 
@@ -27,6 +28,7 @@ ENV RUNNER_TOOL_CACHE=C:\\hostedtoolcache\\windows
 RUN $ver = $env:NODE_VERSION; \
     $dest = 'C:\hostedtoolcache\windows\node\' + $ver + '\x64'; \
     Invoke-WebRequest -Uri ('https://nodejs.org/dist/v{0}/node-v{0}-win-x64.zip' -f $ver) -OutFile C:/node.zip; \
+    if ((Get-FileHash C:/node.zip -Algorithm SHA256).Hash -ne $env:NODE_SHA256) { throw 'Node archive checksum mismatch' }; \
     Expand-Archive -Path C:/node.zip -DestinationPath C:/nodetmp; \
     New-Item -ItemType Directory -Force -Path $dest | Out-Null; \
     Copy-Item -Path ('C:/nodetmp/node-v{0}-win-x64/*' -f $ver) -Destination $dest -Recurse -Force; \

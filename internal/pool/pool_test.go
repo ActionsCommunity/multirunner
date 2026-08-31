@@ -52,7 +52,7 @@ type countingProvider struct {
 	calls int
 }
 
-func (p *countingProvider) NextClient() *github.Client                             { p.calls++; return p.next }
+func (p *countingProvider) ClientForSlot(int) *github.Client                       { p.calls++; return p.next }
 func (p *countingProvider) ClientFor(string) *github.Client                        { return nil }
 func (p *countingProvider) QueuedJobs(context.Context) ([]github.QueuedJob, error) { return nil, nil }
 func (p *countingProvider) Scope() config.Scope                                    { return config.ScopeRepos }
@@ -116,9 +116,8 @@ func TestRunOneOnRegistersToGivenRepo(t *testing.T) {
 	}
 }
 
-// TestRunOneUsesRotation pins the warm-capacity contract: with no queued job to
-// place against, rotation is still the right choice.
-func TestRunOneUsesRotation(t *testing.T) {
+// TestRunOneUsesStableSlot pins the warm-capacity contract.
+func TestRunOneUsesStableSlot(t *testing.T) {
 	srv, recorded := apiRecorder(t)
 	p := &countingProvider{next: testClient(t, srv.URL, "repoRotation")}
 	l := testLauncher(p, Hooks{})
@@ -127,7 +126,7 @@ func TestRunOneUsesRotation(t *testing.T) {
 		t.Fatal("RunOne should surface the stub API failure")
 	}
 	if p.calls != 1 {
-		t.Errorf("rotation consulted %d times, want 1", p.calls)
+		t.Errorf("slot placement consulted %d times, want 1", p.calls)
 	}
 	paths := recorded()
 	if len(paths) != 1 || !strings.Contains(paths[0], "/repos/o/repoRotation/") {

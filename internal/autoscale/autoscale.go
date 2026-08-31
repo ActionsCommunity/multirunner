@@ -5,6 +5,7 @@ package autoscale
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 	"time"
@@ -60,11 +61,16 @@ func (s *Scaler) Run(ctx context.Context) error {
 
 // OnQueued launches one runner for the first matching pool with spare capacity,
 // registered to repo ("owner/repo") so the runner can actually serve the job
-// that triggered it. An empty or unmanaged repo falls back to rotation.
+// that triggered it. Empty or unmanaged repositories are ignored.
 // Launches use the scaler's long-lived context (NOT the caller's), so a webhook
 // handler returning does not cancel the runner.
 func (s *Scaler) OnQueued(repo string, labels []string) {
-	s.launchFor(s.gh.ClientFor(repo), labels)
+	client := s.gh.ClientFor(repo)
+	if client == nil {
+		s.logger.Warn("ignoring queued job for unmanaged repository", "repo", repo)
+		return
+	}
+	s.launchFor(client, labels)
 }
 
 // launchFor launches one runner on client for the first matching pool with spare
@@ -123,7 +129,10 @@ func (s *Scaler) reconcile() {
 	jobs, err := s.gh.QueuedJobs(s.baseCtx)
 	if err != nil {
 		s.logger.Warn("poll queued jobs failed", "err", err)
-		return
+		var pollErr *github.RepoPollError
+		if errors.As(err, &pollErr) && pollErr.AllFailed() {
+			return
+		}
 	}
 	for _, job := range jobs {
 		s.launchFor(job.Client, job.Labels)

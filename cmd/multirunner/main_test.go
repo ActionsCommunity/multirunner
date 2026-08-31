@@ -5,15 +5,47 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
 
 	"github.com/GerardSmit/multirunner/internal/config"
+	"github.com/GerardSmit/multirunner/internal/winvm"
 )
+
+func TestBakeCommandExposesIntegrityFlags(t *testing.T) {
+	cmd := bakeCmd()
+	for _, name := range []string{"iso-sha256", "runner-sha256"} {
+		if cmd.Flags().Lookup(name) == nil {
+			t.Errorf("bake flag --%s is missing", name)
+		}
+	}
+}
+
+func TestQEMUHousekeepingRejectsUnexpectedISO(t *testing.T) {
+	iso := filepath.Join(t.TempDir(), "windows.iso")
+	if err := os.WriteFile(iso, []byte("media"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{Pools: []config.Pool{{
+		Name: "windows-vm", Backend: "qemu",
+		QEMU: config.QEMU{
+			Golden: "golden.qcow2", BakeISO: iso,
+			BakeISOSHA256: strings.Repeat("0", 64),
+			RunnerVersion: winvm.DefaultRunnerVersion,
+		},
+	}}}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	if err := runQEMUHousekeeping(t.Context(), cfg, logger); err == nil ||
+		!strings.Contains(err.Error(), "Windows ISO SHA256 mismatch") {
+		t.Fatalf("housekeeping error = %v", err)
+	}
+}
 
 func captureStdout(t *testing.T, fn func()) string {
 	t.Helper()
@@ -53,9 +85,13 @@ func starvedConfig(provisioning config.Provisioning, size int) *config.Config {
 // six of eleven repos unrunnable: in pool mode every slot pins to one repo for
 // its whole life, so a pool smaller than the repo list strands the remainder.
 func TestWarnStarvedReposFlagsUndersizedPool(t *testing.T) {
+	var err error
 	out := captureStdout(t, func() {
-		warnStarvedRepos(starvedConfig(config.ProvisioningPool, 2))
+		err = warnStarvedRepos(starvedConfig(config.ProvisioningPool, 2))
 	})
+	if err == nil {
+		t.Fatal("undersized pool must make doctor fail")
+	}
 	if !strings.Contains(out, "WARNING") {
 		t.Fatalf("no warning for size=2 repos=3: %q", out)
 	}
@@ -158,6 +194,30 @@ func TestCheckActionsEnabledSilentWhenAllEnabled(t *testing.T) {
 	}
 	if out != "" {
 		t.Errorf("warned when all repos enabled: %q", out)
+	}
+}
+
+func TestCheckActionsEnabledFailsOnIncompleteRepoCheck(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "/repos/o/b/") {
+			http.Error(w, `{"message":"rate limited"}`, http.StatusTooManyRequests)
+			return
+		}
+		_, _ = io.WriteString(w, `{"enabled":true}`)
+	}))
+	defer srv.Close()
+
+	cfg := starvedConfig(config.ProvisioningAutoscale, 3)
+	cfg.GitHub.URL = srv.URL
+	cfg.Auth = config.Auth{PAT: "x"}
+	var err error
+	out := captureStdout(t, func() { err = checkActionsEnabled(context.Background(), cfg) })
+	if err == nil {
+		t.Fatal("incomplete Actions check must make doctor fail")
+	}
+	if !strings.Contains(out, "o/b") || !strings.Contains(out, "could not check Actions") {
+		t.Fatalf("incomplete output does not identify repo: %q", out)
 	}
 }
 
@@ -269,11 +329,10 @@ func TestWarnNoSelfHostedWorkflowsFlagsUnusedRepos(t *testing.T) {
 }
 
 func TestWarnNoSelfHostedWorkflowsSilentWhenAllUsed(t *testing.T) {
-	body := "jobs:\n  b:\n    runs-on: [self-hosted, Linux, X64]\n"
 	srv := workflowServer(t, map[string]map[string]string{
-		"o/a": {"ci.yml": body},
-		"o/b": {"ci.yml": body},
-		"o/c": {"deploy.yaml": body},
+		"o/a": {"ci.yml": "jobs:\n  b:\n    runs-on: [self-hosted, Linux, X64]\n"},
+		"o/b": {"ci.yml": "jobs:\n  b:\n    runs-on: [SELF-HOSTED, Windows, X64]\n"},
+		"o/c": {"deploy.yaml": "jobs:\n  b:\n    runs-on: [Self-Hosted, Linux, ARM64]\n"},
 	})
 	defer srv.Close()
 
@@ -282,6 +341,31 @@ func TestWarnNoSelfHostedWorkflowsSilentWhenAllUsed(t *testing.T) {
 	})
 	if out != "" {
 		t.Errorf("warned when every repo targets self-hosted: %q", out)
+	}
+}
+
+func TestWarnNoSelfHostedWorkflowsFailsOnTruncatedTree(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "/git/trees/") {
+			_, _ = io.WriteString(w, `{"truncated":true,"tree":[]}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"default_branch":"main"}`)
+	}))
+	defer srv.Close()
+
+	var err error
+	out := captureStdout(t, func() {
+		err = warnNoSelfHostedWorkflows(context.Background(), selfHostedConfig(t, srv))
+	})
+	if err == nil {
+		t.Fatal("truncated workflow scan must make doctor fail")
+	}
+	for _, repo := range []string{"o/a", "o/b", "o/c"} {
+		if !strings.Contains(out, repo) {
+			t.Errorf("truncated scan output missing %s: %q", repo, out)
+		}
 	}
 }
 

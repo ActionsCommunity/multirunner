@@ -221,35 +221,60 @@ func (m *Manager) git(ctx context.Context, gitDir string, args ...string) error 
 // configured. Keeping the token out of argv avoids exposing it in command-line
 // process listings.
 //
-// Git's env-based config is an indexed list: GIT_CONFIG_COUNT plus a
-// GIT_CONFIG_KEY_n / GIT_CONFIG_VALUE_n pair per entry. The parent environment
-// may already carry entries, so the header is appended at the next free index
-// instead of resetting the count to 1, which would silently discard config the
-// operator deliberately set.
+// Git's env-based config is an indexed list. Inherited entries are rebuilt into
+// a dense, validated list before the credential is appended. URL rewrites are
+// excluded because they could redirect the configured GitHub URL to another
+// host after authentication was attached. Inherited Authorization headers are
+// also excluded to prevent duplicate credentials.
 func (m *Manager) gitEnv() []string {
 	env := append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	if m.token == "" {
 		return env
 	}
 
-	next := 0
+	count := 0
 	if raw := os.Getenv("GIT_CONFIG_COUNT"); raw != "" {
 		parsed, err := strconv.Atoi(raw)
 		if err != nil || parsed < 0 {
-			// Git rejects a bogus count outright. Start a fresh list so the
-			// mirror still works, but surface the broken environment.
 			m.logger.Warn("ignoring unusable GIT_CONFIG_COUNT", "value", raw)
 		} else {
-			next = parsed
+			count = parsed
 		}
 	}
 
+	type entry struct{ key, value string }
+	entries := make([]entry, 0, count+1)
+	for i := 0; i < count; i++ {
+		key, keyOK := os.LookupEnv(fmt.Sprintf("GIT_CONFIG_KEY_%d", i))
+		value, valueOK := os.LookupEnv(fmt.Sprintf("GIT_CONFIG_VALUE_%d", i))
+		if !keyOK || !valueOK || strings.TrimSpace(key) == "" {
+			m.logger.Warn("ignoring incomplete inherited git config", "index", i)
+			continue
+		}
+		lowerKey := strings.ToLower(key)
+		if strings.HasPrefix(lowerKey, "url.") &&
+			(strings.HasSuffix(lowerKey, ".insteadof") || strings.HasSuffix(lowerKey, ".pushinsteadof")) {
+			m.logger.Warn("ignoring inherited git URL rewrite while authenticated", "key", key)
+			continue
+		}
+		if strings.HasPrefix(lowerKey, "http.") && strings.HasSuffix(lowerKey, ".extraheader") &&
+			strings.HasPrefix(strings.ToLower(strings.TrimSpace(value)), "authorization:") {
+			m.logger.Warn("ignoring inherited git Authorization header", "key", key)
+			continue
+		}
+		entries = append(entries, entry{key: key, value: value})
+	}
+
 	hdr := "AUTHORIZATION: basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:"+m.token))
-	return append(env,
-		fmt.Sprintf("GIT_CONFIG_COUNT=%d", next+1),
-		fmt.Sprintf("GIT_CONFIG_KEY_%d=http.extraHeader", next),
-		fmt.Sprintf("GIT_CONFIG_VALUE_%d=%s", next, hdr),
-	)
+	base := strings.TrimRight(m.baseURL, "/") + "/"
+	entries = append(entries, entry{key: "http." + base + ".extraHeader", value: hdr})
+	env = append(env, fmt.Sprintf("GIT_CONFIG_COUNT=%d", len(entries)))
+	for i, item := range entries {
+		env = append(env,
+			fmt.Sprintf("GIT_CONFIG_KEY_%d=%s", i, item.key),
+			fmt.Sprintf("GIT_CONFIG_VALUE_%d=%s", i, item.value))
+	}
+	return env
 }
 
 func mirrorExists(path string) bool {

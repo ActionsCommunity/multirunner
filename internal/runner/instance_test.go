@@ -23,6 +23,7 @@ type stubHandle struct {
 	code    int
 	waitErr error
 	killed  bool
+	killErr error
 	// onWait fires inside Wait, letting a test cancel the job context at the
 	// exact moment production does: while the runner is in flight.
 	onWait func()
@@ -38,16 +39,19 @@ func (h *stubHandle) Wait(context.Context) (int, error) {
 func (h *stubHandle) Logs(context.Context) (io.ReadCloser, error) {
 	return io.NopCloser(strings.NewReader("")), nil
 }
-func (h *stubHandle) Kill(context.Context) error { h.killed = true; return nil }
+func (h *stubHandle) Kill(context.Context) error { h.killed = true; return h.killErr }
 
-type stubBackend struct{ handle *stubHandle }
+type stubBackend struct {
+	handle    *stubHandle
+	launchErr error
+}
 
 func (stubBackend) Name() string                              { return "stub" }
 func (stubBackend) Ping(context.Context) error                { return nil }
 func (stubBackend) OSType(context.Context) (string, error)    { return "linux", nil }
 func (stubBackend) EnsureImage(context.Context, string) error { return nil }
 func (b stubBackend) Launch(context.Context, backend.LaunchRequest) (backend.RunnerHandle, error) {
-	return b.handle, nil
+	return b.handle, b.launchErr
 }
 func (stubBackend) Close() error { return nil }
 
@@ -101,7 +105,7 @@ func discardLogger() *slog.Logger {
 func TestRunOnceDeregistersAfterExit(t *testing.T) {
 	gh, deletes := jitServer(t, http.StatusNoContent)
 
-	code, err := RunOnce(context.Background(), gh, stubBackend{&stubHandle{}},
+	code, err := RunOnce(context.Background(), gh, stubBackend{handle: &stubHandle{}},
 		Spec{Name: "mr-1", Image: "img"}, discardLogger())
 	if err != nil {
 		t.Fatalf("RunOnce: %v", err)
@@ -122,12 +126,15 @@ func TestRunOnceDeregistersAfterWaitFailure(t *testing.T) {
 	gh, deletes := jitServer(t, http.StatusNoContent)
 	handle := &stubHandle{code: 1, waitErr: errors.New("container vanished")}
 
-	if _, err := RunOnce(context.Background(), gh, stubBackend{handle},
+	if _, err := RunOnce(context.Background(), gh, stubBackend{handle: handle},
 		Spec{Name: "mr-1", Image: "img"}, discardLogger()); err == nil {
 		t.Fatal("RunOnce should surface the wait failure")
 	}
 	if got := deletes(); len(got) != 1 {
 		t.Errorf("deletes = %v, want the registration reclaimed even on failure", got)
+	}
+	if !handle.killed {
+		t.Error("wait failure must terminate the runner before deregistration")
 	}
 }
 
@@ -140,7 +147,7 @@ func TestRunOnceDeregistersOnShutdown(t *testing.T) {
 	defer cancel()
 	handle := &stubHandle{onWait: cancel}
 
-	_, err := RunOnce(ctx, gh, stubBackend{handle}, Spec{Name: "mr-1", Image: "img"}, discardLogger())
+	_, err := RunOnce(ctx, gh, stubBackend{handle: handle}, Spec{Name: "mr-1", Image: "img"}, discardLogger())
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("RunOnce error = %v, want context.Canceled", err)
 	}
@@ -160,7 +167,7 @@ func TestRunOnceToleratesAlreadyDeletedRunner(t *testing.T) {
 	var logs strings.Builder
 	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	if _, err := RunOnce(context.Background(), gh, stubBackend{&stubHandle{}},
+	if _, err := RunOnce(context.Background(), gh, stubBackend{handle: &stubHandle{}},
 		Spec{Name: "mr-1", Image: "img"}, logger); err != nil {
 		t.Fatalf("RunOnce: %v", err)
 	}
@@ -178,7 +185,7 @@ func TestRunOnceToleratesAlreadyDeletedRunner(t *testing.T) {
 func TestRunOnceSkipsDeregisterWithoutRunnerID(t *testing.T) {
 	gh, deletes := jitServerWithRunnerID(t, http.StatusNoContent, 0)
 
-	if _, err := RunOnce(context.Background(), gh, stubBackend{&stubHandle{}},
+	if _, err := RunOnce(context.Background(), gh, stubBackend{handle: &stubHandle{}},
 		Spec{Name: "mr-1", Image: "img"}, discardLogger()); err != nil {
 		t.Fatalf("RunOnce: %v", err)
 	}
@@ -194,11 +201,53 @@ func TestRunOnceReportsDeregisterFailure(t *testing.T) {
 	var logs strings.Builder
 	logger := slog.New(slog.NewTextHandler(&logs, nil))
 
-	if _, err := RunOnce(context.Background(), gh, stubBackend{&stubHandle{}},
+	if _, err := RunOnce(context.Background(), gh, stubBackend{handle: &stubHandle{}},
 		Spec{Name: "mr-1", Image: "img"}, logger); err != nil {
 		t.Fatalf("RunOnce: %v", err)
 	}
 	if !strings.Contains(logs.String(), "deregister runner failed") {
 		t.Errorf("a failed cleanup went unreported:\n%s", logs.String())
+	}
+}
+
+func TestRunOnceDeregistersAfterLaunchFailure(t *testing.T) {
+	gh, deletes := jitServer(t, http.StatusNoContent)
+	_, err := RunOnce(context.Background(), gh, stubBackend{launchErr: errors.New("partial launch")},
+		Spec{Name: "mr-1", Image: "img"}, discardLogger())
+	if err == nil || !strings.Contains(err.Error(), "partial launch") {
+		t.Fatalf("RunOnce error = %v, want launch failure", err)
+	}
+	if got := deletes(); len(got) != 1 {
+		t.Errorf("deletes = %v, want registration reclaimed after launch failure", got)
+	}
+}
+
+func TestRunOnceKeepsRegistrationWhenWaitAndKillFail(t *testing.T) {
+	gh, deletes := jitServer(t, http.StatusNoContent)
+	handle := &stubHandle{
+		waitErr: errors.New("transport interrupted"),
+		killErr: errors.New("daemon unreachable"),
+	}
+	_, err := RunOnce(context.Background(), gh, stubBackend{handle: handle},
+		Spec{Name: "mr-1", Image: "img"}, discardLogger())
+	if err == nil || !strings.Contains(err.Error(), "daemon unreachable") {
+		t.Fatalf("RunOnce error = %v, want kill failure", err)
+	}
+	if got := deletes(); len(got) != 0 {
+		t.Errorf("deletes = %v, live runner registration must be preserved", got)
+	}
+}
+
+func TestRunOnceKeepsRegistrationWhenShutdownKillFails(t *testing.T) {
+	gh, deletes := jitServer(t, http.StatusNoContent)
+	ctx, cancel := context.WithCancel(context.Background())
+	handle := &stubHandle{onWait: cancel, killErr: errors.New("kill failed")}
+	_, err := RunOnce(ctx, gh, stubBackend{handle: handle},
+		Spec{Name: "mr-1", Image: "img"}, discardLogger())
+	if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "kill failed") {
+		t.Fatalf("RunOnce error = %v, want cancellation and kill failure", err)
+	}
+	if got := deletes(); len(got) != 0 {
+		t.Errorf("deletes = %v, runner may still be alive", got)
 	}
 }

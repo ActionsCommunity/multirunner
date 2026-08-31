@@ -34,6 +34,7 @@ pools:
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
+
 	if c.GitHub.URL != "https://github.com" {
 		t.Errorf("default url = %q", c.GitHub.URL)
 	}
@@ -46,6 +47,31 @@ pools:
 	}
 	if p0.ImageTier != "minimal" || p0.MaxConsecutiveFailures != 5 {
 		t.Errorf("pool defaults not applied: %+v", p0)
+	}
+}
+
+func TestLoadQEMUBakeChecksums(t *testing.T) {
+	p := writeConfig(t, `
+github: {scope: org, owner: myorg}
+auth: {pat: ghp_x}
+pools:
+  - name: windows-vm
+    os: windows
+    backend: qemu
+    qemu:
+      golden: golden.qcow2
+      bake_iso: windows.iso
+      bake_iso_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      runner_version: 1.2.3
+      runner_sha256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+`)
+	c, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	qemu := c.Pools[0].QEMU
+	if qemu.BakeISOSHA256 != strings.Repeat("a", 64) || qemu.RunnerSHA256 != strings.Repeat("b", 64) {
+		t.Fatalf("QEMU checksums not loaded: %+v", qemu)
 	}
 }
 
@@ -83,6 +109,26 @@ auth: {pat: x}
 pools: [{name: p, os: linux, docker: {host: h}}]`,
 		"repos without owner": `
 github: {scope: repos, repos: [a, b]}
+auth: {pat: x}
+pools: [{name: p, os: linux, docker: {host: h}}]`,
+		"repos blank entry": `
+github: {scope: repos, owner: o, repos: [a, " "]}
+auth: {pat: x}
+pools: [{name: p, os: linux, docker: {host: h}}]`,
+		"repos empty owner": `
+github: {scope: repos, owner: o, repos: [/a]}
+auth: {pat: x}
+pools: [{name: p, os: linux, docker: {host: h}}]`,
+		"repos empty repo": `
+github: {scope: repos, owner: o, repos: [a/]}
+auth: {pat: x}
+pools: [{name: p, os: linux, docker: {host: h}}]`,
+		"repos extra slash": `
+github: {scope: repos, owner: o, repos: [o/a/extra]}
+auth: {pat: x}
+pools: [{name: p, os: linux, docker: {host: h}}]`,
+		"repos duplicate case": `
+github: {scope: repos, owner: o, repos: [a, O/A]}
 auth: {pat: x}
 pools: [{name: p, os: linux, docker: {host: h}}]`,
 	}
@@ -374,6 +420,30 @@ pools:
 	}
 	if refs[1].Owner != "bob" || refs[1].Repo != "repo-y" {
 		t.Errorf("refs[1] = %+v", refs[1])
+	}
+}
+
+func TestScopeReposTrimsEntries(t *testing.T) {
+	p := writeConfig(t, `
+github: {scope: repos, owner: " octocat ", repos: [" repo-a ", " octocat/repo-b "]}
+auth: {pat: x}
+pools: [{name: p, os: linux, docker: {host: h}}]`)
+	c, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.GitHub.Owner != "octocat" || c.GitHub.Repos[0] != "repo-a" || c.GitHub.Repos[1] != "octocat/repo-b" {
+		t.Fatalf("GitHub config not normalized: %+v", c.GitHub)
+	}
+}
+
+func TestScopeReposAppAuthRejectsMixedOwners(t *testing.T) {
+	p := writeConfig(t, `
+github: {scope: repos, owner: alice, repos: [one, bob/two]}
+auth: {app_id: 1, installation_id: 2, private_key_path: key.pem}
+pools: [{name: p, os: linux, docker: {host: h}}]`)
+	if _, err := Load(p); err == nil || !strings.Contains(err.Error(), "one installation account") {
+		t.Fatalf("Load error = %v, want installation-account error", err)
 	}
 }
 

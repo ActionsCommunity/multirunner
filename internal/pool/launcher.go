@@ -64,25 +64,27 @@ func (l *Launcher) EnsureImage(ctx context.Context) error {
 	return nil
 }
 
-// RunOne provisions a fresh JIT runner for the next repo in rotation and blocks
+// RunOne provisions a fresh JIT runner for warm-pool slot zero and blocks
 // until it finishes its one job. This is the warm-capacity path: there is no
-// queued job to place against, so rotation is the best available choice. When a
-// specific repo has queued work, call RunOneOn instead.
+// queued job to place against. When a specific repo has queued work, call
+// RunOneOn instead.
 func (l *Launcher) RunOne(ctx context.Context) (int, error) {
-	return l.RunOneOn(ctx, l.gh.NextClient())
+	return l.RunOneForSlot(ctx, 0)
+}
+
+// RunOneForSlot provisions a fresh runner for a stable warm-pool slot.
+func (l *Launcher) RunOneForSlot(ctx context.Context, slot int) (int, error) {
+	return l.RunOneOn(ctx, l.gh.ClientForSlot(slot))
 }
 
 // RunOneOn provisions a fresh JIT runner registered to client's repo and blocks
 // until it finishes its one job. A repo-scoped runner binds to exactly one repo,
 // so demand-driven launches must pass the client for the repo that queued the
 // job; otherwise the runner idles on a repo that has no work while the job that
-// triggered the launch stays queued. A nil client falls back to rotation.
+// triggered the launch stays queued. A nil client is rejected.
 func (l *Launcher) RunOneOn(ctx context.Context, client *github.Client) (int, error) {
 	// Resolve before the OnStart hook so an unusable pool cannot leak an
 	// unmatched start into the metrics.
-	if client == nil {
-		client = l.gh.NextClient()
-	}
 	if client == nil {
 		return 0, fmt.Errorf("pool %s: no github client available to register a runner", l.cfg.Name)
 	}

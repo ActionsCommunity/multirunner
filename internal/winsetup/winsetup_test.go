@@ -150,6 +150,39 @@ func TestScriptIsolationDefaultsToAuto(t *testing.T) {
 	}
 }
 
+func TestScriptAutoIsolationRecognizesServerCore(t *testing.T) {
+	if !strings.Contains(script, `$installType -like 'Server*'`) {
+		t.Error("auto isolation does not recognize Server Core installation types")
+	}
+}
+
+func TestScriptHyperVIsolationEnablesRequiredFeature(t *testing.T) {
+	for _, want := range []string{
+		`if ($Isolation -eq 'hyperv') { $features += 'Microsoft-Hyper-V' }`,
+		"nested virtualization",
+		"reboot-required",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("installer missing Hyper-V requirement handling %q", want)
+		}
+	}
+}
+
+func TestScriptUpgradesMismatchedDockerVersion(t *testing.T) {
+	for _, want := range []string{
+		`if ($installedVersion -ne $DockerVersion)`,
+		`$stagedDockerd --version`,
+		`Stop-Service $ServiceName -ErrorAction Stop`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("installer upgrade path missing %q", want)
+		}
+	}
+	if strings.Contains(script, `if (-not (Test-Path $dockerd))`) {
+		t.Error("installer still skips every existing dockerd regardless of version")
+	}
+}
+
 // Without "group" in daemon.json the pipe ACL is Administrators/LocalSystem
 // only and non-elevated docker clients get "permission denied".
 func TestScriptWritesGroupIntoDaemonConfig(t *testing.T) {

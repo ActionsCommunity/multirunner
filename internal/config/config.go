@@ -224,10 +224,12 @@ type QEMU struct {
 	CPUs    int    `yaml:"cpus"`
 	Accel   string `yaml:"accel"` // "" = auto (kvm/whpx/hvf)
 	// Housekeeping (golden eval license + rebuilds):
-	BakeISO       string   `yaml:"bake_iso"`       // Windows ISO for rebuilds (enables auto-rebuild)
-	RunnerVersion string   `yaml:"runner_version"` // runner version to bake
-	Licensed      bool     `yaml:"licensed"`       // real key/KMS -> skip eval housekeeping
-	Tools         []string `yaml:"tools"`          // toolchains to bake into the golden: dotnet | node | go | buildtools
+	BakeISO       string   `yaml:"bake_iso"`        // Windows ISO for rebuilds (enables auto-rebuild)
+	BakeISOSHA256 string   `yaml:"bake_iso_sha256"` // optional expected SHA256 of bake_iso
+	RunnerVersion string   `yaml:"runner_version"`  // runner version to bake
+	RunnerSHA256  string   `yaml:"runner_sha256"`   // required with a non-default runner_version
+	Licensed      bool     `yaml:"licensed"`        // real key/KMS -> skip eval housekeeping
+	Tools         []string `yaml:"tools"`           // toolchains to bake into the golden: dotnet | node | go | buildtools
 }
 
 // Containerd configures the containerd/runhcs Windows-container backend. The
@@ -310,6 +312,10 @@ func expandEnvRef(v string) string {
 }
 
 func (c *Config) applyDefaults() {
+	c.GitHub.Owner = strings.TrimSpace(c.GitHub.Owner)
+	for i := range c.GitHub.Repos {
+		c.GitHub.Repos[i] = strings.TrimSpace(c.GitHub.Repos[i])
+	}
 	if c.GitHub.URL == "" {
 		c.GitHub.URL = "https://github.com"
 	}
@@ -413,10 +419,33 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("github.repos must list at least one repo for scope=repos")
 		}
 		// owner is optional when every entry uses explicit "owner/repo" format.
+		seenRepos := make(map[string]struct{}, len(c.GitHub.Repos))
+		var appOwner string
 		for _, entry := range c.GitHub.Repos {
+			parts := strings.Split(entry, "/")
+			if len(parts) > 2 || entry == "" {
+				return fmt.Errorf("invalid github.repos entry %q: expected repo or owner/repo", entry)
+			}
+			for _, part := range parts {
+				if part == "" || strings.TrimSpace(part) != part || strings.ContainsAny(part, " \t\r\n") {
+					return fmt.Errorf("invalid github.repos entry %q: owner and repo must be non-empty and contain no whitespace", entry)
+				}
+			}
 			ref := ParseRepoRef(entry, c.GitHub.Owner)
-			if ref.Owner == "" {
+			if ref.Owner == "" || ref.Repo == "" {
 				return fmt.Errorf("github.owner is required (or use owner/repo format) for repos entry %q", entry)
+			}
+			key := strings.ToLower(ref.Owner + "/" + ref.Repo)
+			if _, ok := seenRepos[key]; ok {
+				return fmt.Errorf("duplicate github.repos entry %q", entry)
+			}
+			seenRepos[key] = struct{}{}
+			if c.Auth.IsApp() {
+				if appOwner == "" {
+					appOwner = ref.Owner
+				} else if !strings.EqualFold(appOwner, ref.Owner) {
+					return fmt.Errorf("scope=repos with GitHub App auth requires every repo to belong to one installation account; %q and %q differ", appOwner, ref.Owner)
+				}
 			}
 		}
 	case ScopeOrg, ScopeEnterprise:

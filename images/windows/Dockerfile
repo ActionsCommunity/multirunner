@@ -10,13 +10,16 @@ ARG BASE=mcr.microsoft.com/windows/servercore:ltsc2025
 
 FROM ${BASE}
 ARG RUNNER_VERSION=2.337.0
+ARG RUNNER_SHA256=1150692afa94e71f872017e254ea55b6eece1eece3fe7e3a6d4c93d0a1b85cfc
 ARG GIT_VERSION=2.47.1
 ARG POWERSHELL_VERSION=7.6.4
+ARG POWERSHELL_SHA256=80832551c52809301e6071c8bac977beb5a2f1ec953eb4db9f94deb953333793
 
 SHELL ["powershell", "-NoProfile", "-Command", "$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue';"]
 
 WORKDIR C:/actions-runner
 RUN Invoke-WebRequest -Uri ('https://github.com/actions/runner/releases/download/v{0}/actions-runner-win-x64-{0}.zip' -f $env:RUNNER_VERSION) -OutFile runner.zip; \
+    if ((Get-FileHash runner.zip -Algorithm SHA256).Hash -ne $env:RUNNER_SHA256) { throw 'Runner archive checksum mismatch' }; \
     Expand-Archive -Path runner.zip -DestinationPath .; \
     Remove-Item runner.zip
 
@@ -29,6 +32,7 @@ RUN Invoke-WebRequest -Uri ('https://github.com/git-for-windows/git/releases/dow
 # GitHub-hosted windows runners ship it, so workflows routinely declare
 # `shell: pwsh`. Without it those steps fail with "pwsh: command not found".
 RUN Invoke-WebRequest -Uri ('https://github.com/PowerShell/PowerShell/releases/download/v{0}/PowerShell-{0}-win-x64.zip' -f $env:POWERSHELL_VERSION) -OutFile pwsh.zip; \
+    if ((Get-FileHash pwsh.zip -Algorithm SHA256).Hash -ne $env:POWERSHELL_SHA256) { throw 'PowerShell archive checksum mismatch' }; \
     Expand-Archive -Path pwsh.zip -DestinationPath C:/PowerShell; \
     Remove-Item pwsh.zip
 

@@ -1,37 +1,27 @@
 package backend
 
 import (
+	"runtime"
 	"testing"
-
-	"github.com/docker/docker/api/types/container"
 )
 
-// newDockerBackend only constructs the client, it never dials, so any
-// well-formed host works here. It has to be transport-neutral rather than an
-// npipe:// path: that protocol is unavailable off-Windows, and these tests also
-// cover the non-Windows autoIsolation() fallback in autoisolation_other.go.
+// newDockerBackend only constructs the client, it never dials.
 const testWinHost = "tcp://127.0.0.1:2375"
 
-// NewDockerWindows must resolve "" and "auto" through autoIsolation() exactly
-// like NewContainerdWindows. Pinning "process" breaks Windows client editions,
-// where process isolation requires an exact host/container build match.
-func TestNewDockerWindowsResolvesAutoIsolation(t *testing.T) {
-	want := container.Isolation(autoIsolation())
-	if want == "" {
-		t.Fatal("autoIsolation() returned empty")
-	}
+// Auto isolation cannot inspect a remote daemon's host edition, so it must fail
+// closed unless the daemon is reached through a verified-local Windows pipe.
+func TestNewDockerWindowsRejectsAutoIsolationForRemoteHost(t *testing.T) {
 	for _, in := range []string{"", "auto"} {
-		b, err := NewDockerWindows(testWinHost, in)
-		if err != nil {
-			t.Fatalf("NewDockerWindows(%q): %v", in, err)
+		if _, err := NewDockerWindows(testWinHost, in); err == nil {
+			t.Errorf("NewDockerWindows(%q) accepted remote auto isolation", in)
 		}
-		db, ok := b.(*dockerBackend)
-		if !ok {
-			t.Fatalf("NewDockerWindows(%q) returned %T, want *dockerBackend", in, b)
-		}
-		if db.isolation != want {
-			t.Errorf("isolation for %q = %q, want %q", in, db.isolation, want)
-		}
+	}
+}
+
+func TestNewDockerWindowsRecognizesLocalPipeForAutoIsolation(t *testing.T) {
+	got := isLocalWindowsPipe(`NPIPE:////./pipe/docker_engine_windows`)
+	if want := runtime.GOOS == "windows"; got != want {
+		t.Fatalf("isLocalWindowsPipe() = %v, want %v", got, want)
 	}
 }
 

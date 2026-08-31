@@ -63,26 +63,50 @@ try {
         throw 'This script must be run as Administrator.'
     }
 
-    # 1. Containers feature
-    $feature = Get-WindowsOptionalFeature -Online -FeatureName Containers
-    if ($feature.State -ne 'Enabled') {
-        Write-Host 'Enabling Windows Containers feature...'
-        $res = Enable-WindowsOptionalFeature -Online -FeatureName Containers -All -NoRestart
-        if ($res.RestartNeeded) {
-            Write-Warning 'A reboot is required to finish enabling Containers. Reboot, then re-run.'
-            Set-Status 'reboot-required'
-            return
+    # 1. Resolve isolation and enable every feature that mode needs.
+    if ($Isolation -eq 'auto') {
+        $installType = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' `
+            -Name InstallationType -ErrorAction SilentlyContinue).InstallationType
+        $Isolation = if ($installType -like 'Server*') { 'process' } else { 'hyperv' }
+        Write-Host "Auto-selected isolation: $Isolation (InstallationType=$installType)"
+    }
+
+    $features = @('Containers')
+    if ($Isolation -eq 'hyperv') { $features += 'Microsoft-Hyper-V' }
+    $restartNeeded = $false
+    foreach ($featureName in $features) {
+        $feature = Get-WindowsOptionalFeature -Online -FeatureName $featureName
+        if ($feature.State -ne 'Enabled') {
+            Write-Host "Enabling Windows feature $featureName..."
+            $res = Enable-WindowsOptionalFeature -Online -FeatureName $featureName -All -NoRestart
+            $restartNeeded = $restartNeeded -or $res.RestartNeeded
+        }
+    }
+    if ($restartNeeded) {
+        Write-Warning 'A reboot is required to finish enabling the container features. Reboot, then re-run.'
+        Set-Status 'reboot-required'
+        return
+    }
+    if ($Isolation -eq 'hyperv') {
+        $computer = Get-CimInstance Win32_ComputerSystem
+        if ($computer.Model -match 'Virtual|VMware|KVM|HVM|VirtualBox') {
+            Write-Warning 'This host appears to be a VM. Hyper-V isolation also requires nested virtualization to be enabled by the outer hypervisor.'
         }
     }
 
-    # 2. Download Moby static binaries. They land directly in $InstallDir with
+    # 2. Install or upgrade Moby static binaries. They land directly in $InstallDir with
     # no bin\ subfolder so dockerd.exe matches the Controlled Folder Access
     # allowlist entry exactly; see the note on $InstallDir above. Extraction
     # goes through a temp staging dir so the zip's own docker\ folder is not
     # left behind inside the install directory.
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
     $dockerd = Join-Path $InstallDir 'dockerd.exe'
-    if (-not (Test-Path $dockerd)) {
+    $installedVersion = ''
+    if (Test-Path $dockerd) {
+        $versionOutput = & $dockerd --version
+        if ($versionOutput -match 'version\s+([^,]+)') { $installedVersion = $Matches[1] }
+    }
+    if ($installedVersion -ne $DockerVersion) {
         $url = "https://download.docker.com/win/static/stable/x86_64/docker-$DockerVersion.zip"
         $zip = Join-Path $env:TEMP "docker-$DockerVersion.zip"
         $staging = Join-Path $env:TEMP "docker-$DockerVersion-extract"
@@ -90,23 +114,23 @@ try {
         Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
         Remove-Item $staging -Recurse -Force -ErrorAction SilentlyContinue
         Expand-Archive -Path $zip -DestinationPath $staging -Force   # extracts <staging>\docker\*.exe
+        $stagedDockerd = Join-Path $staging 'docker\dockerd.exe'
+        $stagedVersion = & $stagedDockerd --version
+        if ($stagedVersion -notmatch "version\s+$([regex]::Escape($DockerVersion)),") {
+            throw "Downloaded dockerd version did not match requested $DockerVersion: $stagedVersion"
+        }
+        if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) {
+            Stop-Service $ServiceName -ErrorAction Stop
+        }
         Copy-Item (Join-Path $staging 'docker\*.exe') $InstallDir -Force
         Remove-Item $zip, $staging -Recurse -Force -ErrorAction SilentlyContinue
+        Write-Host "Installed Docker $DockerVersion (previous: $installedVersion)"
+    }
+    else {
+        Write-Host "Docker $DockerVersion is already installed."
     }
 
-    # 3. Resolve isolation. Process isolation requires an exact host/container
-    # build match and is only generally usable on Windows Server; client
-    # editions (Pro/Enterprise/IoT) must use Hyper-V. Mirrors autoIsolation()
-    # in internal/backend so the daemon default matches what multirunner asks
-    # for per container.
-    if ($Isolation -eq 'auto') {
-        $installType = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' `
-            -Name InstallationType -ErrorAction SilentlyContinue).InstallationType
-        $Isolation = if ($installType -eq 'Server') { 'process' } else { 'hyperv' }
-        Write-Host "Auto-selected isolation: $Isolation (InstallationType=$installType)"
-    }
-
-    # 4. Ensure the pipe-access group exists. Without "group" in daemon.json the
+    # 3. Ensure the pipe-access group exists. Without "group" in daemon.json the
     # named pipe ACL is Administrators/LocalSystem only, so a non-elevated
     # `docker -H <pipe> ...` fails with "permission denied". The multirunner
     # service runs as LocalSystem and is unaffected, but interactive use and
@@ -130,7 +154,7 @@ try {
         catch { Write-Warning "Could not add $me to ${Group}: $($_.Exception.Message)" }
     }
 
-    # 5. daemon.json. Config and the image store live under %ProgramData%, not
+    # 4. daemon.json. Config and the image store live under %ProgramData%, not
     # InstallDir: Program Files is for read-only program files, while the image
     # store grows to many GB and the daemon rewrites config on every install.
     $cfgDir = Join-Path $StatusDir 'docker'
@@ -146,7 +170,7 @@ try {
     $daemon | ConvertTo-Json | Set-Content -Path $cfgPath -Encoding ascii
     Write-Host "Wrote $cfgPath"
 
-    # 6. Register + start the service
+    # 5. Register + start the service
     if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) {
         Write-Host "Service $ServiceName already exists; reconfiguring."
         Stop-Service $ServiceName -ErrorAction SilentlyContinue
