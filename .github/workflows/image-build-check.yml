@@ -101,14 +101,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
       - name: Build and run arm64 node flavor
         run: |
           set -euo pipefail
           B=mr-check-linux-arm64
-          docker buildx build --platform linux/arm64 --load -f images/linux/Dockerfile -t $B:minimal .
-          docker buildx build --platform linux/arm64 --load -f images/linux/flavors/native-build.Dockerfile --build-arg PARENT=$B:minimal -t $B:native-build .
-          docker buildx build --platform linux/arm64 --load -f images/linux/flavors/node.Dockerfile --build-arg PARENT=$B:native-build -t $B:node .
+          docker build --platform linux/arm64 -f images/linux/Dockerfile -t $B:minimal .
+          docker build --platform linux/arm64 -f images/linux/flavors/native-build.Dockerfile --build-arg PARENT=$B:minimal -t $B:native-build .
+          docker build --platform linux/arm64 -f images/linux/flavors/node.Dockerfile --build-arg PARENT=$B:native-build -t $B:node .
           docker run --rm --platform linux/arm64 --entrypoint bash $B:node -lc '
             set -eu
             test -x "$RUNNER_TOOL_CACHE/node/22.23.2/arm64/bin/node"
