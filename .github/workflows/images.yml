@@ -192,6 +192,7 @@ jobs:
           docker run --rm --entrypoint cmd "$IMG:dotnet-$SUFFIX" /c "where dotnet && dotnet --list-sdks"
           docker push "$IMG:dotnet-$SUFFIX"
           docker rmi -f "$IMG:dotnet-$SUFFIX" "$IMG:node-$SUFFIX"
+          docker builder prune -af
           docker image prune -f
 
           # buildtools flavor

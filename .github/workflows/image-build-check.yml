@@ -156,6 +156,7 @@ jobs:
           # Free this branch before building the next one. `minimal` survives
           # because buildtools layers on it.
           docker rmi -f $B:dotnet $B:node
+          docker builder prune -af
           docker image prune -f
           df -h / || true
 
