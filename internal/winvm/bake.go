@@ -3,8 +3,10 @@ package winvm
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/sha512"
 	"embed"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -20,16 +22,43 @@ import (
 	"github.com/GerardSmit/multirunner/internal/vmview"
 )
 
+// DefaultRunnerVersion is the actions/runner baked into golden VMs. It is a
+// single constant because the value is a hard dependency: GitHub rejects
+// runners that are too old, and a rejected runner registers, idles briefly,
+// then exits without claiming a job, which reads as a scheduling fault rather
+// than a version one. Two copies of this literal previously drifted apart, so
+// the CLI default and the option default must resolve to the same place.
+//
+// Keep this in step with RUNNER_VERSION in images/linux/Dockerfile and
+// images/windows/Dockerfile.
+const DefaultRunnerVersion = "2.337.0"
+const DefaultRunnerSHA256 = "1150692afa94e71f872017e254ea55b6eece1eece3fe7e3a6d4c93d0a1b85cfc"
+
 // minGitURL is the portable Git for Windows build staged into the golden so
 // actions/checkout uses real git (incremental fetch + dotgit-cache bundle) and
 // `run:`/job-hook steps can run git. Kept in sync with install-golden.ps1.
+const minGitVersion = "2.54.0.windows.1"
 const minGitURL = "https://github.com/git-for-windows/git/releases/download/v2.54.0.windows.1/MinGit-2.54.0-64-bit.zip"
+const minGitSHA256 = "04f937e1f0918b17b9be6f2294cb2bb66e96e1d9832d1c298e2de088a1d0e668"
 
 // Toolchain versions baked into the golden when requested via --tools. Kept here
 // (not in the script) so the host can stage the big downloads onto the CD.
 const (
-	bakeNodeVersion = "22.20.0"
+	bakeNodeVersion = "22.23.2"
+	bakeNodeSHA256  = "1177b4137ba5adaa56354ae40f1080c7450e8ae09cecb47da459d1c52ac99f97"
 	bakeGoVersion   = "1.24.4"
+	bakeGoSHA256    = "b751a1136cb9d8a2e7ebb22c538c4f02c09b98138c7c8bfb78a54a4566c013b1"
+
+	bakeDotNet8Version = "8.0.424"
+	bakeDotNet8SHA512  = "1787ab90635c2950672ed7c6507b000e1b212ea7d9a22fcef37061344d37c64d4c4eda12b8742601eff5b45c8736485b31c55613892f240c300190e4e88a58b0"
+	bakeDotNet9Version = "9.0.317"
+	bakeDotNet9SHA512  = "9d2206253b14bdad493e08b5d843d5da1bd534f66d7a43ca1ac4fed31fd11721f5f7bfc8fa79cc3ba0370a705a0c4e7226c1ce214489d239a55580d864e9e43a"
+
+	bakeVSVersion       = "17.14.39"
+	bakeVSURL           = "https://download.visualstudio.microsoft.com/download/pr/fa619120-9c0e-47e6-bfe0-3ee96fb671b2/2aeac090a9cfb2c56474aa9a6c5817ad8cfb879539e0ed1aecec33de9fc2dc4f/vs_BuildTools.exe"
+	bakeVSSHA256        = "2aeac090a9cfb2c56474aa9a6c5817ad8cfb879539e0ed1aecec33de9fc2dc4f"
+	bakeVSChannelURL    = "https://download.visualstudio.microsoft.com/download/pr/fa619120-9c0e-47e6-bfe0-3ee96fb671b2/c26f06fe7ef8ee5381d82838bb39db61d0cb01124493eab761cdace9720e0995/VisualStudio.17.Release.chman"
+	bakeVSChannelSHA256 = "4c81e902fb7fe2acea779b828e6dc548fe0bbb693df50eda0224263c16686bdd"
 )
 
 func bakeNodeURL() string {
@@ -39,16 +68,154 @@ func bakeGoURL() string {
 	return fmt.Sprintf("https://go.dev/dl/go%s.windows-amd64.zip", bakeGoVersion)
 }
 
-// ToolsHash is a stable fingerprint of the requested toolchains, stored in the
-// golden meta as the WorkflowsHash so housekeeping rebuilds the golden when the
-// tool set changes.
-func ToolsHash(tools []string) string {
-	norm := normalizeTools(tools)
-	if len(norm) == 0 {
-		return ""
+func bakeDotNetURL(version string) string {
+	return fmt.Sprintf("https://builds.dotnet.microsoft.com/dotnet/Sdk/%s/dotnet-sdk-%s-win-x64.zip", version, version)
+}
+
+type bakeArtifact struct {
+	Name      string
+	Version   string
+	URL       string
+	Algorithm string
+	Digest    string
+}
+
+func bakeArtifacts(runnerVersion, runnerSHA256 string, tools []string) ([]bakeArtifact, error) {
+	if runnerVersion == "" {
+		runnerVersion = DefaultRunnerVersion
 	}
-	sum := sha256.Sum256([]byte(strings.Join(norm, ",")))
-	return "tools:" + hex.EncodeToString(sum[:8])
+	if runnerSHA256 == "" {
+		if runnerVersion != DefaultRunnerVersion {
+			return nil, fmt.Errorf("runner SHA256 is required for custom version %s", runnerVersion)
+		}
+		runnerSHA256 = DefaultRunnerSHA256
+	}
+	if err := validateSHA256(runnerSHA256); err != nil {
+		return nil, fmt.Errorf("runner SHA256: %w", err)
+	}
+	artifacts := []bakeArtifact{
+		{
+			Name:    "runner.zip",
+			Version: runnerVersion,
+			URL: fmt.Sprintf("https://github.com/actions/runner/releases/download/v%s/actions-runner-win-x64-%s.zip",
+				runnerVersion, runnerVersion),
+			Algorithm: "SHA256",
+			Digest:    runnerSHA256,
+		},
+		{Name: "mingit.zip", Version: minGitVersion, URL: minGitURL, Algorithm: "SHA256", Digest: minGitSHA256},
+	}
+	for _, tool := range normalizeTools(tools) {
+		switch tool {
+		case "node":
+			artifacts = append(artifacts, bakeArtifact{
+				Name: "node.zip", Version: bakeNodeVersion, URL: bakeNodeURL(), Algorithm: "SHA256", Digest: bakeNodeSHA256,
+			})
+		case "go":
+			artifacts = append(artifacts, bakeArtifact{
+				Name: "go.zip", Version: bakeGoVersion, URL: bakeGoURL(), Algorithm: "SHA256", Digest: bakeGoSHA256,
+			})
+		case "dotnet":
+			artifacts = append(artifacts,
+				bakeArtifact{Name: "dotnet8.zip", Version: bakeDotNet8Version, URL: bakeDotNetURL(bakeDotNet8Version), Algorithm: "SHA512", Digest: bakeDotNet8SHA512},
+				bakeArtifact{Name: "dotnet9.zip", Version: bakeDotNet9Version, URL: bakeDotNetURL(bakeDotNet9Version), Algorithm: "SHA512", Digest: bakeDotNet9SHA512},
+			)
+		case "buildtools":
+			artifacts = append(artifacts,
+				bakeArtifact{Name: "vs_buildtools.exe", Version: bakeVSVersion, URL: bakeVSURL, Algorithm: "SHA256", Digest: bakeVSSHA256},
+				bakeArtifact{Name: "vs.channel", Version: bakeVSVersion, URL: bakeVSChannelURL, Algorithm: "SHA256", Digest: bakeVSChannelSHA256},
+			)
+		}
+	}
+	return artifacts, nil
+}
+
+// ToolsHash fingerprints every input that changes the provisioned golden image.
+// It is non-empty even without optional tools so template and runner updates
+// rebuild existing minimal goldens.
+func ToolsHash(o BakeOptions) (string, error) {
+	isoDigest := "none"
+	if o.WindowsISO != "" {
+		if o.WindowsISOSHA256 != "" {
+			if err := validateSHA256(o.WindowsISOSHA256); err != nil {
+				return "", fmt.Errorf("Windows ISO SHA256: %w", err)
+			}
+		}
+		var err error
+		isoDigest, err = fileDigest(o.WindowsISO, "SHA256")
+		if err != nil {
+			return "", fmt.Errorf("hash Windows ISO: %w", err)
+		}
+		if o.WindowsISOSHA256 != "" && !strings.EqualFold(isoDigest, o.WindowsISOSHA256) {
+			return "", fmt.Errorf("Windows ISO SHA256 mismatch: got %s, want %s", isoDigest, o.WindowsISOSHA256)
+		}
+	}
+	artifacts, err := bakeArtifacts(o.RunnerVersion, o.RunnerSHA256, o.Tools)
+	if err != nil {
+		return "", err
+	}
+	return toolsHashResolved(o.Tools, isoDigest, artifacts), nil
+}
+
+func toolsHashResolved(tools []string, isoDigest string, artifacts []bakeArtifact) string {
+	norm := normalizeTools(tools)
+	h := sha256.New()
+	_, _ = io.WriteString(h, "golden-inputs:v3\n")
+	_, _ = io.WriteString(h, "windows-iso:sha256="+isoDigest+"\n")
+	_, _ = io.WriteString(h, "tools="+strings.Join(norm, ",")+"\n")
+	for _, artifact := range artifacts {
+		_, _ = fmt.Fprintf(h, "artifact=%s|%s|%s|%s|%s\n",
+			artifact.Name, artifact.Version, artifact.URL, artifact.Algorithm, strings.ToLower(artifact.Digest))
+	}
+
+	for _, name := range []string{
+		"autounattend.xml",
+		"githook.ps1",
+		"install-golden.ps1",
+		"setupcomplete.cmd",
+		"startup.ps1",
+	} {
+		data, err := templatesFS.ReadFile("templates/" + name)
+		if err != nil {
+			panic("embedded golden template missing: " + name)
+		}
+		_, _ = io.WriteString(h, name+"\x00")
+		_, _ = h.Write(data)
+	}
+	return "golden:" + hex.EncodeToString(h.Sum(nil)[:8])
+}
+
+func validateSHA256(digest string) error {
+	if len(digest) != sha256.Size*2 {
+		return fmt.Errorf("must contain %d hexadecimal characters", sha256.Size*2)
+	}
+	if _, err := hex.DecodeString(digest); err != nil {
+		return fmt.Errorf("must be hexadecimal: %w", err)
+	}
+	return nil
+}
+
+func fileDigest(path, algorithm string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	var h interface {
+		io.Writer
+		Sum([]byte) []byte
+	}
+	switch strings.ToUpper(algorithm) {
+	case "SHA256":
+		h = sha256.New()
+	case "SHA512":
+		h = sha512.New()
+	default:
+		return "", fmt.Errorf("unsupported digest algorithm %q", algorithm)
+	}
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // normalizeTools lowercases, de-dups, and sorts a tool list for stable hashing
@@ -74,12 +241,14 @@ var templatesFS embed.FS
 // BakeOptions configures building (or rebuilding) a golden Windows image.
 type BakeOptions struct {
 	WindowsISO       string // path to a Windows Server ISO (Server Core selected by the answer file)
+	WindowsISOSHA256 string // optional expected SHA256; the computed digest always enters the golden fingerprint
 	Golden           string // output golden qcow2
 	DiskGB           int
 	MemMB            int
 	CPUs             int
 	Accel            string // "" = auto
 	RunnerVersion    string
+	RunnerSHA256     string   // required when RunnerVersion is not DefaultRunnerVersion
 	Tools            []string // toolchains baked into the golden: dotnet | node | go | buildtools
 	AdminPassword    string
 	EvalDays         int  // 180 (server) / 90 (client)
@@ -105,7 +274,7 @@ func (o *BakeOptions) defaults() {
 		o.CPUs = 2
 	}
 	if o.RunnerVersion == "" {
-		o.RunnerVersion = "2.335.0"
+		o.RunnerVersion = DefaultRunnerVersion
 	}
 	if o.AdminPassword == "" {
 		o.AdminPassword = "Multirunner!1"
@@ -167,7 +336,7 @@ func copyFile(dst, src string) error {
 
 // AutounattendFiles returns the answer file + provisioning scripts with bake
 // substitutions applied (for the autounattend ISO).
-func AutounattendFiles(runnerVersion, adminPassword string, tools []string) (map[string]string, error) {
+func AutounattendFiles(runnerVersion, runnerSHA256, adminPassword string, tools []string) (map[string]string, error) {
 	read := func(name string) (string, error) {
 		b, err := templatesFS.ReadFile("templates/" + name)
 		return string(b), err
@@ -194,9 +363,24 @@ func AutounattendFiles(runnerVersion, adminPassword string, tools []string) (map
 	}
 	unattend = strings.ReplaceAll(unattend, "__ADMIN_PASSWORD__", adminPassword)
 	install = strings.ReplaceAll(install, "__RUNNER_VERSION__", runnerVersion)
+	if runnerSHA256 == "" && runnerVersion == DefaultRunnerVersion {
+		runnerSHA256 = DefaultRunnerSHA256
+	}
+	install = strings.ReplaceAll(install, "__RUNNER_SHA256__", runnerSHA256)
 	install = strings.ReplaceAll(install, "__TOOLS__", strings.Join(normalizeTools(tools), ","))
 	install = strings.ReplaceAll(install, "__NODE_URL__", bakeNodeURL())
+	install = strings.ReplaceAll(install, "__NODE_SHA256__", bakeNodeSHA256)
 	install = strings.ReplaceAll(install, "__GO_URL__", bakeGoURL())
+	install = strings.ReplaceAll(install, "__GO_SHA256__", bakeGoSHA256)
+	install = strings.ReplaceAll(install, "__MINGIT_SHA256__", minGitSHA256)
+	install = strings.ReplaceAll(install, "__DOTNET8_URL__", bakeDotNetURL(bakeDotNet8Version))
+	install = strings.ReplaceAll(install, "__DOTNET8_SHA512__", bakeDotNet8SHA512)
+	install = strings.ReplaceAll(install, "__DOTNET9_URL__", bakeDotNetURL(bakeDotNet9Version))
+	install = strings.ReplaceAll(install, "__DOTNET9_SHA512__", bakeDotNet9SHA512)
+	install = strings.ReplaceAll(install, "__VS_URL__", bakeVSURL)
+	install = strings.ReplaceAll(install, "__VS_SHA256__", bakeVSSHA256)
+	install = strings.ReplaceAll(install, "__VS_CHANNEL_URL__", bakeVSChannelURL)
+	install = strings.ReplaceAll(install, "__VS_CHANNEL_SHA256__", bakeVSChannelSHA256)
 	return map[string]string{
 		"autounattend.xml":   unattend,
 		"setupcomplete.cmd":  setupComplete,
@@ -290,38 +474,36 @@ func cpuArg(accel string) string {
 	}
 }
 
-// stageBakeBinaries downloads the runner + MinGit zips on the host (fast) into a
-// temp dir and returns ISO file refs (name -> host path) plus a cleanup func.
+// stageBakeBinaries downloads immutable, digest-pinned provisioning artifacts
+// on the host into a temp dir and returns ISO file refs plus a cleanup func.
 // Best-effort: a file that fails to download is simply omitted, and the guest
-// falls back to downloading it itself.
-func stageBakeBinaries(ctx context.Context, runnerVersion string, tools []string) (map[string]string, func()) {
+// falls back to downloading and verifying it itself.
+func stageBakeBinaries(ctx context.Context, runnerVersion, runnerSHA256 string, tools []string) (map[string]string, func()) {
+	artifacts, err := bakeArtifacts(runnerVersion, runnerSHA256, tools)
+	if err != nil {
+		return nil, func() {}
+	}
+	return stageArtifacts(ctx, artifacts)
+}
+
+func stageArtifacts(ctx context.Context, artifacts []bakeArtifact) (map[string]string, func()) {
 	dir, err := os.MkdirTemp("", "mr-bakestage")
 	if err != nil {
 		return nil, func() {}
 	}
 	cleanup := func() { _ = os.RemoveAll(dir) }
 	refs := map[string]string{}
-	runnerURL := fmt.Sprintf("https://github.com/actions/runner/releases/download/v%s/actions-runner-win-x64-%s.zip", runnerVersion, runnerVersion)
-	stage := map[string]string{"runner.zip": runnerURL, "mingit.zip": minGitURL}
-	// Stage the big single-file toolchain payloads on the CD too (SLIRP is slow).
-	// vs_buildtools is not staged: its bootstrapper pulls payloads from MS at run
-	// time regardless, so install-golden downloads it directly.
-	for _, t := range normalizeTools(tools) {
-		switch t {
-		case "node":
-			stage["node.zip"] = bakeNodeURL()
-		case "go":
-			stage["go.zip"] = bakeGoURL()
-		case "dotnet":
-			stage["dotnet-install.ps1"] = "https://dot.net/v1/dotnet-install.ps1"
-		}
-	}
-	for name, url := range stage {
-		dst := filepath.Join(dir, name)
-		if err := downloadFile(ctx, url, dst); err != nil {
+	for _, artifact := range artifacts {
+		dst := filepath.Join(dir, artifact.Name)
+		if err := downloadFile(ctx, artifact.URL, dst); err != nil {
 			continue
 		}
-		refs[name] = dst
+		got, err := fileDigest(dst, artifact.Algorithm)
+		if err != nil || !strings.EqualFold(got, artifact.Digest) {
+			_ = os.Remove(dst)
+			continue
+		}
+		refs[artifact.Name] = dst
 	}
 	return refs, cleanup
 }
@@ -344,9 +526,13 @@ func downloadFile(ctx context.Context, url, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	_, err = io.Copy(f, resp.Body)
-	return err
+	_, copyErr := io.Copy(f, resp.Body)
+	closeErr := f.Close()
+	if err := errors.Join(copyErr, closeErr); err != nil {
+		_ = os.Remove(dst)
+		return err
+	}
+	return nil
 }
 
 // Prepare creates the base disk + autounattend ISO for a bake and returns the
@@ -359,20 +545,25 @@ func Prepare(ctx context.Context, o *BakeOptions) (autoISO string, args []string
 	if _, err := os.Stat(o.WindowsISO); err != nil {
 		return "", nil, fmt.Errorf("bake: windows iso: %w", err)
 	}
+	hash, err := ToolsHash(*o)
+	if err != nil {
+		return "", nil, fmt.Errorf("bake inputs: %w", err)
+	}
+	o.WorkflowsHash = hash
 	if out, err := exec.CommandContext(ctx, o.ImgBin, "create", "-f", "qcow2", o.Golden, fmt.Sprintf("%dG", o.DiskGB)).CombinedOutput(); err != nil {
 		return "", nil, fmt.Errorf("create golden disk: %w: %s", err, out)
 	}
 	_ = os.Remove(GoldenSerialPath(o.Golden)) // stale markers must not satisfy the bake check
-	files, err := AutounattendFiles(o.RunnerVersion, o.AdminPassword, o.Tools)
+	files, err := AutounattendFiles(o.RunnerVersion, o.RunnerSHA256, o.AdminPassword, o.Tools)
 	if err != nil {
 		return "", nil, err
 	}
 	autoISO = o.Golden + ".autounattend.iso"
-	// Stage the runner + MinGit zips onto the ISO so the guest reads them off the
-	// virtual CD. The VM's user-mode (SLIRP) network is too slow/flaky for ~230MB
-	// of downloads; the host fetches them fast and install-golden copies from CD,
-	// falling back to a direct download only if a staged file is missing.
-	refs, cleanup := stageBakeBinaries(ctx, o.RunnerVersion, o.Tools)
+	// Stage the runner and selected tool payloads onto the ISO so the guest reads
+	// them from the virtual CD. The VM's user-mode network is slow for large
+	// downloads, so the guest downloads directly only when a verified staged file
+	// is unavailable.
+	refs, cleanup := stageBakeBinaries(ctx, o.RunnerVersion, o.RunnerSHA256, o.Tools)
 	defer cleanup()
 	if err := BuildISOFiles(autoISO, "AUTOUNATTEND", files, refs); err != nil {
 		return "", nil, err

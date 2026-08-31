@@ -8,7 +8,9 @@ on:
   pull_request:
     paths:
       - "images/**"
+      - ".gitattributes"
       - ".github/workflows/image-build-check.yml"
+      - ".github/workflows/images.yml"
   workflow_dispatch:
 
 jobs:
@@ -32,24 +34,202 @@ jobs:
         run: |
           set -euo pipefail
           B=mr-check-linux
-          docker run --rm --entrypoint bash $B:native-build -lc 'gcc --version && cmake --version && python3 --version'
-          docker run --rm --entrypoint bash $B:node          -lc 'node --version && corepack --version'
+          docker run --rm --entrypoint bash $B:native-build -lc '
+            set -eu
+            printf "#include <openssl/ssl.h>\nint main(void){return OPENSSL_VERSION_NUMBER == 0;}\n" > probe.c
+            gcc probe.c -lssl -lcrypto -o probe
+            printf "#include <unicode/utypes.h>\nint main(void){return U_ICU_VERSION_MAJOR_NUM == 0;}\n" > probe.c
+            gcc probe.c $(pkg-config --cflags --libs icu-uc) -o probe
+            printf "#include <sql.h>\n#include <libpq-fe.h>\nint main(void){return 0;}\n" > probe.c
+            gcc probe.c -I$(pg_config --includedir) -lodbc -lpq -o probe
+            mkdir autotools-probe && cd autotools-probe
+            printf "AC_INIT([probe],[1.0])\nAM_INIT_AUTOMAKE([foreign])\nAC_PROG_CC\nAC_CONFIG_FILES([Makefile])\nAC_OUTPUT\n" > configure.ac
+            printf "bin_PROGRAMS = probe\nprobe_SOURCES = probe.c\n" > Makefile.am
+            printf "int main(void){return 0;}\n" > probe.c
+            autoreconf -fi && ./configure && make
+          '
+          docker run --rm --entrypoint bash $B:node          -lc '
+            set -eu
+            arch=$(dpkg --print-architecture); [ "$arch" = amd64 ] && arch=x64
+            version=22.23.2
+            test -x "$RUNNER_TOOL_CACHE/node/$version/$arch/bin/node"
+            test -f "$RUNNER_TOOL_CACHE/node/$version/$arch.complete"
+            test "$(stat -c %U "$RUNNER_TOOL_CACHE/node/$version/$arch")" = runner
+            "$RUNNER_TOOL_CACHE/node/$version/$arch/bin/node" --version
+            corepack --version
+          '
           docker run --rm --entrypoint bash $B:dotnet        -lc 'dotnet --list-sdks && node --version'
           docker run --rm --entrypoint bash $B:rust          -lc 'rustc --version && cargo --version'
           docker run --rm --entrypoint bash $B:go            -lc 'go version'
+
+      # The cache-redirect patch must live ONLY in the sidecar. If it leaks into
+      # the live DLL, ACTIONS_RESULTS_URL is unset whenever cache.enabled is false
+      # and actions/upload-artifact fails with "Unable to get the
+      # ACTIONS_RESULTS_URL env variable".
+      - name: Verify cache patch is sidecar-only
+        run: |
+          set -euo pipefail
+          B=mr-check-linux
+          docker run --rm --entrypoint bash $B:minimal -lc '
+            set -eu
+            grep -qa "A.C.T.I.O.N.S._.R.E.S.U.L.T.S._.U.R.L" bin/Runner.Worker.dll
+            grep -qa "A.C.T.I.O.N.S._.R.E.S.U.L.T.S._.U.R.X" bin/Runner.Worker.dll.mrpatched
+            ! grep -qa "A.C.T.I.O.N.S._.R.E.S.U.L.T.S._.U.R.X" bin/Runner.Worker.dll
+          '
+
+      - name: Exercise cache patch entrypoint modes
+        run: |
+          set -euo pipefail
+          B=mr-check-linux
+          for mode in stock patched; do
+            args=(-e JIT_CONFIG=invalid)
+            if [ "$mode" = patched ]; then
+              args+=(-e ACTIONS_RESULTS_URL=http://cache.invalid/)
+            fi
+            id=$(docker create "${args[@]}" "$B:minimal")
+            docker start -a "$id" || true
+            docker cp "$id:/home/runner/bin/Runner.Worker.dll" "runner-worker-$mode.dll"
+            docker rm "$id"
+          done
+          grep -qa "A.C.T.I.O.N.S._.R.E.S.U.L.T.S._.U.R.L" runner-worker-stock.dll
+          if grep -qa "A.C.T.I.O.N.S._.R.E.S.U.L.T.S._.U.R.X" runner-worker-stock.dll; then exit 1; fi
+          grep -qa "A.C.T.I.O.N.S._.R.E.S.U.L.T.S._.U.R.X" runner-worker-patched.dll
+          rm runner-worker-stock.dll runner-worker-patched.dll
+
+  linux-arm64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - name: Build and run arm64 node flavor
+        run: |
+          set -euo pipefail
+          B=mr-check-linux-arm64
+          docker build --platform linux/arm64 -f images/linux/Dockerfile -t $B:minimal .
+          docker build --platform linux/arm64 -f images/linux/flavors/native-build.Dockerfile --build-arg PARENT=$B:minimal -t $B:native-build .
+          docker build --platform linux/arm64 -f images/linux/flavors/node.Dockerfile --build-arg PARENT=$B:native-build -t $B:node .
+          docker run --rm --platform linux/arm64 --entrypoint bash $B:node -lc '
+            set -eu
+            test -x "$RUNNER_TOOL_CACHE/node/22.23.2/arm64/bin/node"
+            test -f "$RUNNER_TOOL_CACHE/node/22.23.2/arm64.complete"
+            node --version
+          '
 
   windows:
     runs-on: windows-2025
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build minimal + buildtools (no push)
+      # Windows images are large (roughly ten GB each), so building the whole
+      # graph before testing any of it exhausts the hosted runner's disk on the
+      # buildtools layer. Build one branch, assert it, then delete its derived
+      # tags and reclaim the space before starting the next. `minimal` is kept
+      # throughout because both branches build on it.
+      - name: Build minimal
         shell: bash
         run: |
           set -euo pipefail
           B=mr-check-windows
           docker build -f images/windows/Dockerfile -t $B:minimal .
+          df -h / || true
+
+      - name: Build and assert node + dotnet, then reclaim
+        shell: bash
+        run: |
+          set -euo pipefail
+          B=mr-check-windows
+          docker build -f images/windows/flavors/node.Dockerfile   --build-arg "PARENT=$B:minimal" -t $B:node .
+          docker build -f images/windows/flavors/dotnet.Dockerfile --build-arg "PARENT=$B:node"    -t $B:dotnet .
+
+          # `where` also proves the machine PATH edits survived into a fresh
+          # container, which is what jobs calling node/dotnet directly rely on.
+          docker run --rm --entrypoint cmd $B:node   /c "where node && where npm && node --version"
+          docker run --rm --entrypoint cmd $B:dotnet /c "where dotnet && dotnet --list-sdks && node --version"
+
+          # Docker's default escape character is `\`, so an unescaped
+          # `ENV X=C:\foo` silently becomes `C:foo`. Assert the real values.
+          docker run --rm --entrypoint cmd $B:dotnet /c \
+            "if not \"%RUNNER_TOOL_CACHE%\"==\"C:\\hostedtoolcache\\windows\" exit 1"
+          docker run --rm --entrypoint cmd $B:dotnet /c \
+            "if not \"%DOTNET_ROOT%\"==\"C:\\dotnet\" exit 1"
+
+          # Free this branch before building the next one. `minimal` survives
+          # because buildtools layers on it.
+          docker rmi -f $B:dotnet $B:node
+          docker builder prune -af
+          docker image prune -f
+          df -h / || true
+
+      - name: Build and assert buildtools
+        shell: bash
+        run: |
+          set -euo pipefail
+          B=mr-check-windows
           docker build -f images/windows/flavors/buildtools.Dockerfile --build-arg "PARENT=$B:minimal" -t $B:buildtools .
+
+      # The cache-redirect patch must live ONLY in the sidecar. If it leaks into
+      # the live DLL, ACTIONS_RESULTS_URL is unset whenever cache.enabled is false
+      # and actions/upload-artifact fails with "Unable to get the
+      # ACTIONS_RESULTS_URL env variable".
+      #
+      # Scan bytes, not decoded text: the UTF-16LE literal sits at an odd file
+      # offset, so reading the DLL as UTF-16 from byte 0 never finds it.
+      - name: Verify cache patch is sidecar-only
+        shell: pwsh
+        run: |
+          $script = @'
+          function Test-Lit([string]$Path, [string]$S) {
+              $b = [IO.File]::ReadAllBytes($Path)
+              $q = [Text.Encoding]::Unicode.GetBytes($S)
+              for ($i = 0; $i -le $b.Length - $q.Length; $i++) {
+                  $m = $true
+                  for ($j = 0; $j -lt $q.Length; $j++) { if ($b[$i+$j] -ne $q[$j]) { $m = $false; break } }
+                  if ($m) { return $true }
+              }
+              return $false
+          }
+          $dll = 'C:\actions-runner\bin\Runner.Worker.dll'
+          if (-not (Test-Lit $dll 'ACTIONS_RESULTS_URL')) { throw 'stock DLL was patched' }
+          if (Test-Lit $dll 'ACTIONS_RESULTS_URX') { throw 'stock DLL was patched' }
+          if (-not (Test-Lit ($dll + '.mrpatched') 'ACTIONS_RESULTS_URX')) { throw 'sidecar not patched' }
+          'sidecar-only OK'
+          '@
+          docker run --rm --entrypoint pwsh mr-check-windows:minimal -NoProfile -Command $script
+
+      - name: Exercise cache patch entrypoint modes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($mode in 'stock', 'patched') {
+              $args = @('create', '--env', 'JIT_CONFIG=invalid')
+              if ($mode -eq 'patched') {
+                  $args += @('--env', 'ACTIONS_RESULTS_URL=http://cache.invalid/')
+              }
+              $args += 'mr-check-windows:minimal'
+              $id = (& docker @args).Trim()
+              & cmd /c "docker start --attach $id || ver > nul"
+              & docker cp "${id}:C:\actions-runner\bin\Runner.Worker.dll" ".\runner-worker-$mode.dll"
+              if ($LASTEXITCODE -ne 0) { throw "docker cp failed for $mode mode" }
+              & docker rm $id
+              if ($LASTEXITCODE -ne 0) { throw "docker rm failed for $mode mode" }
+          }
+
+          function Test-Lit([string]$Path, [string]$S) {
+              $b = [IO.File]::ReadAllBytes($Path)
+              $q = [Text.Encoding]::Unicode.GetBytes($S)
+              for ($i = 0; $i -le $b.Length - $q.Length; $i++) {
+                  $m = $true
+                  for ($j = 0; $j -lt $q.Length; $j++) {
+                      if ($b[$i+$j] -ne $q[$j]) { $m = $false; break }
+                  }
+                  if ($m) { return $true }
+              }
+              return $false
+          }
+          if (-not (Test-Lit .\runner-worker-stock.dll 'ACTIONS_RESULTS_URL')) { throw 'stock entrypoint mode was patched' }
+          if (Test-Lit .\runner-worker-stock.dll 'ACTIONS_RESULTS_URX') { throw 'stock entrypoint mode was patched' }
+          if (-not (Test-Lit .\runner-worker-patched.dll 'ACTIONS_RESULTS_URX')) { throw 'redirect entrypoint mode was not patched' }
+          Remove-Item .\runner-worker-stock.dll, .\runner-worker-patched.dll
 
       - name: Smoke-test VS Build Tools
         shell: bash
@@ -58,3 +238,15 @@ jobs:
           B=mr-check-windows
           docker run --rm --entrypoint powershell $B:buildtools -NoProfile -Command \
             "& 'C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe' -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath"
+          docker run --rm --entrypoint cmd $B:buildtools /s /c \
+            "if not \"%VSBUILDTOOLS%\"==\"C:\BuildTools\" exit 1 && call \"%VSBUILDTOOLS%\Common7\Tools\VsDevCmd.bat\" && where cl"
+
+      - name: Smoke-test shells on PATH
+        shell: bash
+        run: |
+          set -euo pipefail
+          B=mr-check-windows
+          # pwsh is the default shell for `run:` steps on Windows in GitHub
+          # Actions, so it must resolve on PATH or `shell: pwsh` steps fail.
+          docker run --rm --entrypoint cmd $B:minimal /c "where pwsh && where git"
+          docker run --rm --entrypoint pwsh $B:minimal -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'

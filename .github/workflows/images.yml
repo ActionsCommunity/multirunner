@@ -8,8 +8,8 @@ on:
 jobs:
   # Linux runner (minimal + flavors) and cache server images (multi-arch: amd64 + arm64).
   # Flavors layer on one another, so the steps are ordered minimal -> native-build ->
-  # node -> {dotnet, rust}; native-build -> go. Each layer pushes a stable :<flavor>
-  # channel tag the next layer references via --build-arg PARENT.
+  # node -> {dotnet, rust}; native-build -> go. Each layer uses an immutable
+  # staging tag until the complete graph is ready for stable-tag promotion.
   linux:
     runs-on: ubuntu-latest
     env:
@@ -36,98 +36,95 @@ jobs:
             echo "suffix=sha-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Minimal runner image metadata
-        id: meta-runner
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.IMG }}
-          tags: |
-            type=raw,value=minimal
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable=${{ github.ref_type == 'tag' }}
-            type=sha,enable=${{ github.ref_type != 'tag' }}
-
-      - name: Build + push minimal runner image
+      - name: Build + push staged minimal runner image
         uses: docker/build-push-action@v6
         with:
           context: .
           file: images/linux/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ steps.meta-runner.outputs.tags }}
+          tags: ${{ env.IMG }}:minimal-${{ steps.vars.outputs.suffix }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Build + push native-build flavor
+      - name: Build + push staged native-build flavor
         uses: docker/build-push-action@v6
         with:
           context: .
           file: images/linux/flavors/native-build.Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
-          build-args: PARENT=${{ env.IMG }}:minimal
-          tags: |
-            ${{ env.IMG }}:native-build
-            ${{ env.IMG }}:native-build-${{ steps.vars.outputs.suffix }}
+          build-args: PARENT=${{ env.IMG }}:minimal-${{ steps.vars.outputs.suffix }}
+          tags: ${{ env.IMG }}:native-build-${{ steps.vars.outputs.suffix }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Build + push node flavor
+      - name: Build + push staged node flavor
         uses: docker/build-push-action@v6
         with:
           context: .
           file: images/linux/flavors/node.Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
-          build-args: PARENT=${{ env.IMG }}:native-build
-          tags: |
-            ${{ env.IMG }}:node
-            ${{ env.IMG }}:node-${{ steps.vars.outputs.suffix }}
+          build-args: PARENT=${{ env.IMG }}:native-build-${{ steps.vars.outputs.suffix }}
+          tags: ${{ env.IMG }}:node-${{ steps.vars.outputs.suffix }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Build + push dotnet flavor
+      - name: Build + push staged dotnet flavor
         uses: docker/build-push-action@v6
         with:
           context: .
           file: images/linux/flavors/dotnet.Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
-          build-args: PARENT=${{ env.IMG }}:node
-          tags: |
-            ${{ env.IMG }}:dotnet
-            ${{ env.IMG }}:dotnet-${{ steps.vars.outputs.suffix }}
+          build-args: PARENT=${{ env.IMG }}:node-${{ steps.vars.outputs.suffix }}
+          tags: ${{ env.IMG }}:dotnet-${{ steps.vars.outputs.suffix }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Build + push rust flavor
+      - name: Build + push staged rust flavor
         uses: docker/build-push-action@v6
         with:
           context: .
           file: images/linux/flavors/rust.Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
-          build-args: PARENT=${{ env.IMG }}:node
-          tags: |
-            ${{ env.IMG }}:rust
-            ${{ env.IMG }}:rust-${{ steps.vars.outputs.suffix }}
+          build-args: PARENT=${{ env.IMG }}:node-${{ steps.vars.outputs.suffix }}
+          tags: ${{ env.IMG }}:rust-${{ steps.vars.outputs.suffix }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Build + push go flavor
+      - name: Build + push staged go flavor
         uses: docker/build-push-action@v6
         with:
           context: .
           file: images/linux/flavors/go.Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
-          build-args: PARENT=${{ env.IMG }}:native-build
-          tags: |
-            ${{ env.IMG }}:go
-            ${{ env.IMG }}:go-${{ steps.vars.outputs.suffix }}
+          build-args: PARENT=${{ env.IMG }}:native-build-${{ steps.vars.outputs.suffix }}
+          tags: ${{ env.IMG }}:go-${{ steps.vars.outputs.suffix }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Promote complete Linux runner graph
+        shell: bash
+        run: |
+          set -euo pipefail
+          SUFFIX="${{ steps.vars.outputs.suffix }}"
+          for flavor in minimal native-build node dotnet rust go; do
+            docker buildx imagetools create \
+              --tag "${IMG}:${flavor}" \
+              "${IMG}:${flavor}-${SUFFIX}"
+          done
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            MINOR="${SUFFIX%.*}"
+            docker buildx imagetools create \
+              --tag "${IMG}:${SUFFIX}" \
+              --tag "${IMG}:${MINOR}" \
+              --tag "${IMG}:latest" \
+              "${IMG}:minimal-${SUFFIX}"
+          fi
 
       - name: Cache server image metadata
         id: meta-cache
@@ -152,7 +149,7 @@ jobs:
           cache-to: type=gha,mode=max
 
   # Windows runner images (amd64 only; Server 2025 / ltsc2025 process isolation).
-  # minimal first, then the buildtools flavor layered on it.
+  # minimal first, then node -> dotnet chained on it, plus buildtools on minimal.
   windows:
     runs-on: windows-2025
     steps:
@@ -162,6 +159,8 @@ jobs:
         with:
           username: gerardsmit
           password: ${{ secrets.DOCKER_PAT }}
+
+      - uses: docker/setup-buildx-action@v3
 
       - name: Build + push windows runner images
         shell: bash
@@ -174,19 +173,46 @@ jobs:
             SUFFIX="sha-$(git rev-parse --short HEAD)"
           fi
 
-          # minimal
-          docker build -f images/windows/Dockerfile -t "$IMG:minimal" -t "$IMG:minimal-$SUFFIX" .
-          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-            docker tag "$IMG:minimal" "$IMG:$SUFFIX"
-            docker tag "$IMG:minimal" "$IMG:latest"
-          else
-            docker tag "$IMG:minimal" "$IMG:$SUFFIX"
-          fi
-          docker push --all-tags "$IMG"
+          # Publish immutable staging tags first. Stable tags are promoted only
+          # after every flavor has built and passed its smoke check.
+          docker build -f images/windows/Dockerfile -t "$IMG:minimal-$SUFFIX" .
+          docker push "$IMG:minimal-$SUFFIX"
 
-          # buildtools flavor (layers on minimal just pushed)
+          # node flavor
+          docker build -f images/windows/flavors/node.Dockerfile \
+            --build-arg "PARENT=$IMG:minimal-$SUFFIX" \
+            -t "$IMG:node-$SUFFIX" .
+          docker run --rm --entrypoint cmd "$IMG:node-$SUFFIX" /c "where node && node --version"
+          docker push "$IMG:node-$SUFFIX"
+
+          # dotnet flavor (layers on node, mirroring the linux chain)
+          docker build -f images/windows/flavors/dotnet.Dockerfile \
+            --build-arg "PARENT=$IMG:node-$SUFFIX" \
+            -t "$IMG:dotnet-$SUFFIX" .
+          docker run --rm --entrypoint cmd "$IMG:dotnet-$SUFFIX" /c "where dotnet && dotnet --list-sdks"
+          docker push "$IMG:dotnet-$SUFFIX"
+          docker rmi -f "$IMG:dotnet-$SUFFIX" "$IMG:node-$SUFFIX"
+          docker builder prune -af
+          docker image prune -f
+
+          # buildtools flavor
           docker build -f images/windows/flavors/buildtools.Dockerfile \
-            --build-arg "PARENT=$IMG:minimal" \
-            -t "$IMG:buildtools" -t "$IMG:buildtools-$SUFFIX" .
-          docker push "$IMG:buildtools"
+            --build-arg "PARENT=$IMG:minimal-$SUFFIX" \
+            -t "$IMG:buildtools-$SUFFIX" .
+          docker run --rm --entrypoint cmd "$IMG:buildtools-$SUFFIX" /s /c \
+            "call \"C:\BuildTools\Common7\Tools\VsDevCmd.bat\" && where cl"
           docker push "$IMG:buildtools-$SUFFIX"
+
+          for flavor in minimal node dotnet buildtools; do
+            docker buildx imagetools create \
+              --tag "$IMG:$flavor" \
+              "$IMG:$flavor-$SUFFIX"
+          done
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            MINOR="${SUFFIX%.*}"
+            docker buildx imagetools create \
+              --tag "$IMG:$SUFFIX" \
+              --tag "$IMG:$MINOR" \
+              --tag "$IMG:latest" \
+              "$IMG:minimal-$SUFFIX"
+          fi

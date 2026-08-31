@@ -22,12 +22,12 @@ type Pool struct {
 }
 
 // New builds a Pool.
-func New(cfg config.Pool, image string, be backend.Backend, gh *github.Client, env map[string]string, mounts []backend.Mount, logger *slog.Logger) *Pool {
+func New(cfg config.Pool, image string, be backend.Backend, gh github.ClientProvider, env map[string]string, mounts []backend.Mount, logger *slog.Logger) *Pool {
 	return NewWithHooks(cfg, image, be, gh, env, mounts, logger, Hooks{})
 }
 
 // NewWithHooks builds a Pool with lifecycle hooks (metrics).
-func NewWithHooks(cfg config.Pool, image string, be backend.Backend, gh *github.Client, env map[string]string, mounts []backend.Mount, logger *slog.Logger, hooks Hooks) *Pool {
+func NewWithHooks(cfg config.Pool, image string, be backend.Backend, gh github.ClientProvider, env map[string]string, mounts []backend.Mount, logger *slog.Logger, hooks Hooks) *Pool {
 	return NewPool(NewLauncher(cfg, image, be, gh, env, mounts, logger, hooks), logger)
 }
 
@@ -62,7 +62,7 @@ func (p *Pool) Run(ctx context.Context) error {
 func (p *Pool) runSlot(ctx context.Context, index int) {
 	failures := 0
 	for ctx.Err() == nil {
-		_, err := p.l.RunOne(ctx)
+		_, err := p.l.RunOneForSlot(ctx, index)
 		if ctx.Err() != nil {
 			return
 		}

@@ -3,6 +3,7 @@ package github
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -144,8 +145,13 @@ func TestQueuedJobLabels(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/repos/octo/hello/actions/runs":
-			if r.URL.Query().Get("status") != "queued" {
-				t.Errorf("status query = %q", r.URL.Query().Get("status"))
+			status := r.URL.Query().Get("status")
+			if status != "queued" && status != "in_progress" {
+				t.Errorf("status query = %q", status)
+			}
+			if status == "in_progress" {
+				_ = json.NewEncoder(w).Encode(map[string]any{"workflow_runs": []map[string]any{}})
+				return
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"workflow_runs": []map[string]any{{"id": 101}},
@@ -174,6 +180,60 @@ func TestQueuedJobLabels(t *testing.T) {
 	}
 }
 
+func TestQueuedJobLabelsPaginatesRunsAndJobsAndChecksActiveRuns(t *testing.T) {
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page := r.URL.Query().Get("page")
+		switch r.URL.Path {
+		case "/repos/octo/hello/actions/runs":
+			switch {
+			case r.URL.Query().Get("status") == "queued" && page == "":
+				w.Header().Set("Link", "<"+srv.URL+r.URL.Path+"?status=queued&per_page=100&page=2>; rel=\"next\"")
+				_ = json.NewEncoder(w).Encode(map[string]any{"workflow_runs": []map[string]any{{"id": 101}}})
+			case r.URL.Query().Get("status") == "queued" && page == "2":
+				_ = json.NewEncoder(w).Encode(map[string]any{"workflow_runs": []map[string]any{{"id": 102}}})
+			case r.URL.Query().Get("status") == "in_progress":
+				_ = json.NewEncoder(w).Encode(map[string]any{"workflow_runs": []map[string]any{{"id": 201}}})
+			default:
+				t.Errorf("unexpected runs query = %q", r.URL.RawQuery)
+			}
+		case "/repos/octo/hello/actions/runs/101/jobs":
+			if page == "" {
+				w.Header().Set("Link", "<"+srv.URL+r.URL.Path+"?filter=latest&per_page=100&page=2>; rel=\"next\"")
+				_ = json.NewEncoder(w).Encode(map[string]any{"jobs": []map[string]any{
+					{"status": "queued", "labels": []string{"self-hosted", "first-page"}},
+				}})
+			} else {
+				_ = json.NewEncoder(w).Encode(map[string]any{"jobs": []map[string]any{
+					{"status": "queued", "labels": []string{"self-hosted", "second-page"}},
+				}})
+			}
+		case "/repos/octo/hello/actions/runs/102/jobs":
+			_ = json.NewEncoder(w).Encode(map[string]any{"jobs": []map[string]any{}})
+		case "/repos/octo/hello/actions/runs/201/jobs":
+			_ = json.NewEncoder(w).Encode(map[string]any{"jobs": []map[string]any{
+				{"status": "queued", "labels": []string{"self-hosted", "active-run"}},
+			}})
+		default:
+			t.Errorf("unexpected path = %s", r.URL.String())
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv, config.ScopeRepo, "octo", "hello")
+	labels, err := c.QueuedJobLabels(context.Background())
+	if err != nil {
+		t.Fatalf("QueuedJobLabels: %v", err)
+	}
+	if len(labels) != 3 {
+		t.Fatalf("labels = %#v, want jobs from two job pages and one active run", labels)
+	}
+	if labels[0][1] != "first-page" || labels[1][1] != "second-page" || labels[2][1] != "active-run" {
+		t.Fatalf("labels arrived in wrong order: %#v", labels)
+	}
+}
+
 func TestPATTransportSetsAuth(t *testing.T) {
 	var gotAuth string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -198,5 +258,91 @@ func TestRunnersPath(t *testing.T) {
 	c := &Client{scope: config.Scope("bogus")}
 	if _, err := c.runnersPath("x"); err == nil {
 		t.Fatal("expected error for unsupported scope")
+	}
+}
+
+func TestActionsEnabled(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"enabled", `{"enabled":true}`, true},
+		{"disabled", `{"enabled":false}`, false},
+		// An omitted field must read as disabled, not as a silent "true".
+		{"omitted", `{}`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotPath string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotPath = r.URL.Path
+				w.Header().Set("Content-Type", "application/json")
+				if _, err := io.WriteString(w, tc.body); err != nil {
+					t.Errorf("write: %v", err)
+				}
+			}))
+			defer srv.Close()
+
+			c := newTestClient(t, srv, config.ScopeRepo, "octo", "hello")
+			got, err := c.ActionsEnabled(context.Background())
+			if err != nil {
+				t.Fatalf("ActionsEnabled: %v", err)
+			}
+			if want := "/repos/octo/hello/actions/permissions"; gotPath != want {
+				t.Errorf("path = %q, want %q", gotPath, want)
+			}
+			if got != tc.want {
+				t.Errorf("enabled = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestActionsEnabledRequiresRepoScope pins that org and enterprise clients are
+// rejected rather than silently querying /repos//actions/permissions.
+func TestActionsEnabledRequiresRepoScope(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected request to %s", r.URL.Path)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv, config.ScopeOrg, "myorg", "")
+	if _, err := c.ActionsEnabled(context.Background()); err == nil {
+		t.Fatal("want error for org-scoped client, got nil")
+	}
+}
+
+// TestDeleteRunnerNotFound pins the race with GitHub's own cleanup: an ephemeral
+// runner that finished its job is already deregistered, so callers doing
+// best-effort cleanup need to tell that apart from a real failure.
+func TestDeleteRunnerNotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv, config.ScopeRepo, "octo", "hello")
+	err := c.DeleteRunner(context.Background(), 42)
+	if !errors.Is(err, ErrRunnerNotFound) {
+		t.Fatalf("DeleteRunner error = %v, want ErrRunnerNotFound", err)
+	}
+}
+
+// TestDeleteRunnerServerErrorIsNotNotFound pins that only 404 is treated as
+// "already gone". A 500 must stay a real failure so it gets logged.
+func TestDeleteRunnerServerErrorIsNotNotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"message":"boom"}`, http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv, config.ScopeRepo, "octo", "hello")
+	err := c.DeleteRunner(context.Background(), 42)
+	if err == nil {
+		t.Fatal("want error on 500")
+	}
+	if errors.Is(err, ErrRunnerNotFound) {
+		t.Fatalf("500 reported as ErrRunnerNotFound: %v", err)
 	}
 }

@@ -19,6 +19,14 @@ cleanup() {
 }
 trap cleanup TERM INT
 
+# The image ships the stock Runner.Worker.dll plus a patched sidecar that stops
+# the runner from overriding ACTIONS_RESULTS_URL / ACTIONS_CACHE_URL. Swap it in
+# only when multirunner injected a cache redirect; otherwise stock behaviour must
+# win so actions/upload-artifact and actions/cache still reach GitHub.
+if [ -n "${ACTIONS_RESULTS_URL:-}" ] && [ -f bin/Runner.Worker.dll.mrpatched ]; then
+  cp -f bin/Runner.Worker.dll.mrpatched bin/Runner.Worker.dll
+fi
+
 ./run.sh --jitconfig "${JIT_CONFIG}" &
 runner_pid=$!
 wait "${runner_pid}"

@@ -2,14 +2,19 @@
 
 github:
   url: "https://github.com"      # change for GHES
-  scope: "org"                   # repo | org | enterprise
-  owner: "myorg"                 # org name (org) | repo owner (repo) | enterprise slug (enterprise)
+  scope: "org"                   # repo | repos | org | enterprise
+  owner: "myorg"                 # org name (org) | repo owner (repo/repos) | enterprise slug (enterprise)
   repo: "myrepo"                 # only for scope=repo
+  # repos:                       # only for scope=repos (multiple repos, one instance)
+  #   - repo-one                 # uses owner above
+  #   - repo-two                 # uses owner above
+  #   - otheruser/repo-three     # explicit owner (cross-account requires PAT auth)
 
 auth:
   pat: "${GITHUB_PAT}"           # ${ENV} refs are resolved from the environment (keeps secrets off disk)
   #                                scopes: admin:org (org) / repo (repo) / manage_runners:enterprise
-  # GitHub App (recommended for shared/production — short-lived, not user-tied):
+  # GitHub App (recommended for shared/production — short-lived, not user-tied).
+  # With scope=repos, every repo must be covered by this one installation account.
   # app_id: 123456
   # installation_id: 78901234
   # private_key_path: "C:/path/app.pem"
@@ -106,6 +111,13 @@ pools:
       mem_mb: 4096
       cpus: 2
       accel: ""                  # "" = auto: kvm (Linux) / whpx (Windows) / hvf (macOS)
+      # bake_iso enables automatic rebuilds. Its content is always part of the
+      # golden fingerprint; set bake_iso_sha256 to also reject unexpected media.
+      # bake_iso: "/var/lib/multirunner/WinServer2022.iso"
+      # bake_iso_sha256: "<64 lowercase hex characters>"
+      # runner_version: "2.337.0"
+      # runner_sha256 is required when runner_version is not the built-in version.
+      # runner_sha256: "<64 lowercase hex characters>"
       # Toolchains baked into the golden (the VM equivalent of image_tier; qemu
       # ignores image/image_tier). Options: dotnet | node | go | buildtools.
       # Match `multirunner bake --tools ...`; changing the set forces a rebuild.
@@ -115,11 +127,16 @@ pools:
     os: windows
     size: 2
     runner_group_id: 1
+    # Windows image_tier options (pulled automatically):
+    #   minimal (default) | node | dotnet | buildtools
+    # dotnet layers on node, so it already bundles Node. buildtools layers on
+    # minimal and adds the MSVC toolchain for native C/C++.
+    image_tier: minimal
     labels: [self-hosted, windows, x64]
     work_folder: _work
     docker:
       host: "npipe:////./pipe/docker_engine_windows"
-      isolation: process
+      isolation: auto            # auto (default): process on Server, hyperv on client
       windows_dind: "off"        # off | host-pipe | hyperv
     max_consecutive_failures: 5
 

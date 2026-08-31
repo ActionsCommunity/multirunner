@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -166,7 +167,8 @@ func (m *Manager) Bundle(ctx context.Context, repoSlug string, w io.Writer) erro
 	lock := m.repoLock(repoSlug)
 	lock.Lock()
 	defer lock.Unlock()
-	cmd := exec.CommandContext(ctx, "git", "-C", path, "bundle", "create", "-", "--all")
+	cmd := exec.CommandContext(ctx, "git", "--git-dir="+path, "bundle", "create", "-", "--all")
+	cmd.Env = m.gitEnv()
 	cmd.Stdout = w
 	var errb strings.Builder
 	cmd.Stderr = &errb
@@ -191,32 +193,88 @@ func (m *Manager) cloneURL(repoSlug string) string {
 	return m.baseURL + "/" + repoSlug + ".git"
 }
 
-// git runs a git command, optionally inside repoDir, injecting an auth header
-// through Git's environment-based config when a token is configured. Keeping it
-// out of argv avoids exposing the PAT in command-line process listings.
-func (m *Manager) git(ctx context.Context, repoDir string, args ...string) error {
-	full := make([]string, 0, len(args)+4)
-	env := os.Environ()
-	if m.token != "" {
-		hdr := "AUTHORIZATION: basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:"+m.token))
-		env = append(env,
-			"GIT_CONFIG_COUNT=1",
-			"GIT_CONFIG_KEY_0=http.extraHeader",
-			"GIT_CONFIG_VALUE_0="+hdr,
-		)
-	}
-	if repoDir != "" {
-		full = append(full, "-C", repoDir)
+// git runs a git command, optionally against the bare repository at gitDir.
+//
+// gitDir is passed as --git-dir rather than -C because every repository this
+// package operates on is bare. Git refuses to *discover* a bare repository from
+// the working directory when safe.bareRepository is "explicit" (a hardening
+// control some orgs and CI sandboxes set); it only accepts one named explicitly
+// via --git-dir or GIT_DIR. Using -C would break the cache for those users.
+func (m *Manager) git(ctx context.Context, gitDir string, args ...string) error {
+	full := make([]string, 0, len(args)+1)
+	if gitDir != "" {
+		full = append(full, "--git-dir="+gitDir)
 	}
 	full = append(full, args...)
 
 	cmd := exec.CommandContext(ctx, "git", full...)
-	cmd.Env = append(env, "GIT_TERMINAL_PROMPT=0")
+	cmd.Env = m.gitEnv()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git %s: %w: %s", redact(args), err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// gitEnv builds the environment for a git subprocess: the parent environment
+// plus an auth header injected through Git's env-based config when a token is
+// configured. Keeping the token out of argv avoids exposing it in command-line
+// process listings.
+//
+// Git's env-based config is an indexed list. Inherited entries are rebuilt into
+// a dense, validated list before the credential is appended. URL rewrites are
+// excluded because they could redirect the configured GitHub URL to another
+// host after authentication was attached. Inherited Authorization headers are
+// also excluded to prevent duplicate credentials.
+func (m *Manager) gitEnv() []string {
+	env := append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	if m.token == "" {
+		return env
+	}
+
+	count := 0
+	if raw := os.Getenv("GIT_CONFIG_COUNT"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 0 {
+			m.logger.Warn("ignoring unusable GIT_CONFIG_COUNT", "value", raw)
+		} else {
+			count = parsed
+		}
+	}
+
+	type entry struct{ key, value string }
+	entries := make([]entry, 0, count+1)
+	for i := 0; i < count; i++ {
+		key, keyOK := os.LookupEnv(fmt.Sprintf("GIT_CONFIG_KEY_%d", i))
+		value, valueOK := os.LookupEnv(fmt.Sprintf("GIT_CONFIG_VALUE_%d", i))
+		if !keyOK || !valueOK || strings.TrimSpace(key) == "" {
+			m.logger.Warn("ignoring incomplete inherited git config", "index", i)
+			continue
+		}
+		lowerKey := strings.ToLower(key)
+		if strings.HasPrefix(lowerKey, "url.") &&
+			(strings.HasSuffix(lowerKey, ".insteadof") || strings.HasSuffix(lowerKey, ".pushinsteadof")) {
+			m.logger.Warn("ignoring inherited git URL rewrite while authenticated", "key", key)
+			continue
+		}
+		if strings.HasPrefix(lowerKey, "http.") && strings.HasSuffix(lowerKey, ".extraheader") &&
+			strings.HasPrefix(strings.ToLower(strings.TrimSpace(value)), "authorization:") {
+			m.logger.Warn("ignoring inherited git Authorization header", "key", key)
+			continue
+		}
+		entries = append(entries, entry{key: key, value: value})
+	}
+
+	hdr := "AUTHORIZATION: basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:"+m.token))
+	base := strings.TrimRight(m.baseURL, "/") + "/"
+	entries = append(entries, entry{key: "http." + base + ".extraHeader", value: hdr})
+	env = append(env, fmt.Sprintf("GIT_CONFIG_COUNT=%d", len(entries)))
+	for i, item := range entries {
+		env = append(env,
+			fmt.Sprintf("GIT_CONFIG_KEY_%d=%s", i, item.key),
+			fmt.Sprintf("GIT_CONFIG_VALUE_%d=%s", i, item.value))
+	}
+	return env
 }
 
 func mirrorExists(path string) bool {

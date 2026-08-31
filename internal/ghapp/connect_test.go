@@ -31,6 +31,9 @@ func TestBuildManifest(t *testing.T) {
 	if m["default_permissions"].(map[string]any)["administration"] != "write" {
 		t.Errorf("repo perms = %v", m["default_permissions"])
 	}
+	if m["default_permissions"].(map[string]any)["contents"] != "read" {
+		t.Errorf("repo contents permission = %v, want read", m["default_permissions"])
+	}
 }
 
 func TestCreateAppURL(t *testing.T) {

@@ -15,6 +15,7 @@ type Scope string
 
 const (
 	ScopeRepo       Scope = "repo"
+	ScopeRepos      Scope = "repos"
 	ScopeOrg        Scope = "org"
 	ScopeEnterprise Scope = "enterprise"
 )
@@ -84,10 +85,35 @@ func (g GitCache) DotGit() bool { return g.Mode == "dotgit-cache" && g.Path != "
 
 // GitHub identifies the target and scope.
 type GitHub struct {
-	URL   string `yaml:"url"`
-	Scope Scope  `yaml:"scope"`
-	Owner string `yaml:"owner"`
-	Repo  string `yaml:"repo"`
+	URL   string   `yaml:"url"`
+	Scope Scope    `yaml:"scope"`
+	Owner string   `yaml:"owner"`
+	Repo  string   `yaml:"repo"`
+	Repos []string `yaml:"repos"` // only for scope=repos: "repo" or "owner/repo"
+}
+
+// RepoRef is a resolved owner/repo pair from the repos list.
+type RepoRef struct {
+	Owner string
+	Repo  string
+}
+
+// ParseRepoRef splits a repos entry into owner and repo. If the entry contains
+// a slash, it is treated as "owner/repo". Otherwise the default owner is used.
+func ParseRepoRef(entry, defaultOwner string) RepoRef {
+	if i := strings.IndexByte(entry, '/'); i > 0 && i < len(entry)-1 {
+		return RepoRef{Owner: entry[:i], Repo: entry[i+1:]}
+	}
+	return RepoRef{Owner: defaultOwner, Repo: entry}
+}
+
+// ResolvedRepos returns each repos entry parsed into owner/repo pairs.
+func (gh GitHub) ResolvedRepos() []RepoRef {
+	refs := make([]RepoRef, len(gh.Repos))
+	for i, entry := range gh.Repos {
+		refs[i] = ParseRepoRef(entry, gh.Owner)
+	}
+	return refs
 }
 
 // Auth holds either a PAT or GitHub App credentials. PAT takes precedence when set.
@@ -150,6 +176,8 @@ var publishedFlavors = map[string]map[string]bool{
 		"go":           true,
 	},
 	"windows": {
+		"node":       true,
+		"dotnet":     true,
 		"buildtools": true,
 	},
 }
@@ -196,10 +224,12 @@ type QEMU struct {
 	CPUs    int    `yaml:"cpus"`
 	Accel   string `yaml:"accel"` // "" = auto (kvm/whpx/hvf)
 	// Housekeeping (golden eval license + rebuilds):
-	BakeISO       string   `yaml:"bake_iso"`       // Windows ISO for rebuilds (enables auto-rebuild)
-	RunnerVersion string   `yaml:"runner_version"` // runner version to bake
-	Licensed      bool     `yaml:"licensed"`       // real key/KMS -> skip eval housekeeping
-	Tools         []string `yaml:"tools"`          // toolchains to bake into the golden: dotnet | node | go | buildtools
+	BakeISO       string   `yaml:"bake_iso"`        // Windows ISO for rebuilds (enables auto-rebuild)
+	BakeISOSHA256 string   `yaml:"bake_iso_sha256"` // optional expected SHA256 of bake_iso
+	RunnerVersion string   `yaml:"runner_version"`  // runner version to bake
+	RunnerSHA256  string   `yaml:"runner_sha256"`   // required with a non-default runner_version
+	Licensed      bool     `yaml:"licensed"`        // real key/KMS -> skip eval housekeeping
+	Tools         []string `yaml:"tools"`           // toolchains to bake into the golden: dotnet | node | go | buildtools
 }
 
 // Containerd configures the containerd/runhcs Windows-container backend. The
@@ -216,7 +246,7 @@ type Containerd struct {
 type Docker struct {
 	Host        string `yaml:"host"`
 	EnableDinD  bool   `yaml:"enable_dind"`
-	Isolation   string `yaml:"isolation"`    // process | hyperv (windows)
+	Isolation   string `yaml:"isolation"`    // process | hyperv | auto (default, windows)
 	WindowsDinD string `yaml:"windows_dind"` // off | host-pipe | hyperv
 }
 
@@ -282,6 +312,10 @@ func expandEnvRef(v string) string {
 }
 
 func (c *Config) applyDefaults() {
+	c.GitHub.Owner = strings.TrimSpace(c.GitHub.Owner)
+	for i := range c.GitHub.Repos {
+		c.GitHub.Repos[i] = strings.TrimSpace(c.GitHub.Repos[i])
+	}
 	if c.GitHub.URL == "" {
 		c.GitHub.URL = "https://github.com"
 	}
@@ -345,9 +379,11 @@ func (c *Config) applyDefaults() {
 		if p.MaxConsecutiveFailures == 0 {
 			p.MaxConsecutiveFailures = 5
 		}
-		if p.OS == "windows" && p.Docker.Isolation == "" {
-			p.Docker.Isolation = "process"
-		}
+		// Windows isolation is intentionally left empty here. The backend
+		// resolves "" / "auto" via autoIsolation() (process on Server, hyperv
+		// on client), matching the containerd backend. Defaulting to "process"
+		// here broke client editions, where process isolation needs an exact
+		// host/image build match.
 	}
 }
 
@@ -357,6 +393,9 @@ func (c *Config) applyDefaults() {
 // baked golden image and ignores image/image_tier entirely.
 func (c *Config) Warnings() []string {
 	var w []string
+	if c.GitHub.Scope == ScopeRepos && c.GitHub.Repo != "" {
+		w = append(w, "github.repo is ignored when scope=repos; use github.repos instead")
+	}
 	for i := range c.Pools {
 		p := &c.Pools[i]
 		if p.Backend == "qemu" && (p.Image != "" || (p.ImageTier != "" && p.ImageTier != "minimal")) {
@@ -375,12 +414,46 @@ func (c *Config) Validate() error {
 		if c.GitHub.Owner == "" || c.GitHub.Repo == "" {
 			return fmt.Errorf("github.owner and github.repo are required for scope=repo")
 		}
+	case ScopeRepos:
+		if len(c.GitHub.Repos) == 0 {
+			return fmt.Errorf("github.repos must list at least one repo for scope=repos")
+		}
+		// owner is optional when every entry uses explicit "owner/repo" format.
+		seenRepos := make(map[string]struct{}, len(c.GitHub.Repos))
+		var appOwner string
+		for _, entry := range c.GitHub.Repos {
+			parts := strings.Split(entry, "/")
+			if len(parts) > 2 || entry == "" {
+				return fmt.Errorf("invalid github.repos entry %q: expected repo or owner/repo", entry)
+			}
+			for _, part := range parts {
+				if part == "" || strings.TrimSpace(part) != part || strings.ContainsAny(part, " \t\r\n") {
+					return fmt.Errorf("invalid github.repos entry %q: owner and repo must be non-empty and contain no whitespace", entry)
+				}
+			}
+			ref := ParseRepoRef(entry, c.GitHub.Owner)
+			if ref.Owner == "" || ref.Repo == "" {
+				return fmt.Errorf("github.owner is required (or use owner/repo format) for repos entry %q", entry)
+			}
+			key := strings.ToLower(ref.Owner + "/" + ref.Repo)
+			if _, ok := seenRepos[key]; ok {
+				return fmt.Errorf("duplicate github.repos entry %q", entry)
+			}
+			seenRepos[key] = struct{}{}
+			if c.Auth.IsApp() {
+				if appOwner == "" {
+					appOwner = ref.Owner
+				} else if !strings.EqualFold(appOwner, ref.Owner) {
+					return fmt.Errorf("scope=repos with GitHub App auth requires every repo to belong to one installation account; %q and %q differ", appOwner, ref.Owner)
+				}
+			}
+		}
 	case ScopeOrg, ScopeEnterprise:
 		if c.GitHub.Owner == "" {
 			return fmt.Errorf("github.owner is required for scope=%s", c.GitHub.Scope)
 		}
 	default:
-		return fmt.Errorf("github.scope must be one of repo|org|enterprise, got %q", c.GitHub.Scope)
+		return fmt.Errorf("github.scope must be one of repo|repos|org|enterprise, got %q", c.GitHub.Scope)
 	}
 
 	if c.Auth.PAT == "" {

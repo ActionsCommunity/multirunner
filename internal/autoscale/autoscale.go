@@ -5,7 +5,9 @@ package autoscale
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/GerardSmit/multirunner/internal/config"
@@ -16,7 +18,7 @@ import (
 // Scaler launches runners on demand across a set of pool launchers.
 type Scaler struct {
 	states    []*state
-	gh        *github.Client
+	gh        github.ClientProvider
 	scope     config.Scope
 	pollEvery time.Duration
 	logger    *slog.Logger
@@ -29,7 +31,7 @@ type state struct {
 }
 
 // New builds a Scaler. pollSec <= 0 disables API polling (webhook-only).
-func New(launchers []*pool.Launcher, gh *github.Client, scope config.Scope, pollSec int, logger *slog.Logger) *Scaler {
+func New(launchers []*pool.Launcher, gh github.ClientProvider, scope config.Scope, pollSec int, logger *slog.Logger) *Scaler {
 	states := make([]*state, len(launchers))
 	for i, l := range launchers {
 		states[i] = &state{l: l, sem: make(chan struct{}, l.Max())}
@@ -57,13 +59,26 @@ func (s *Scaler) Run(ctx context.Context) error {
 	return nil
 }
 
-// OnQueued launches one runner for the first matching pool with spare capacity.
+// OnQueued launches one runner for the first matching pool with spare capacity,
+// registered to repo ("owner/repo") so the runner can actually serve the job
+// that triggered it. Empty or unmanaged repositories are ignored.
 // Launches use the scaler's long-lived context (NOT the caller's), so a webhook
 // handler returning does not cancel the runner.
-func (s *Scaler) OnQueued(labels []string) {
+func (s *Scaler) OnQueued(repo string, labels []string) {
+	client := s.gh.ClientFor(repo)
+	if client == nil {
+		s.logger.Warn("ignoring queued job for unmanaged repository", "repo", repo)
+		return
+	}
+	s.launchFor(client, labels)
+}
+
+// launchFor launches one runner on client for the first matching pool with spare
+// capacity.
+func (s *Scaler) launchFor(client *github.Client, labels []string) {
 	for _, st := range s.states {
 		if labelsMatch(st.l.Labels(), labels) {
-			if s.tryLaunch(st) {
+			if s.tryLaunch(st, client) {
 				return
 			}
 		}
@@ -71,13 +86,17 @@ func (s *Scaler) OnQueued(labels []string) {
 	s.logger.Debug("queued job: no matching pool with spare capacity", "labels", labels)
 }
 
-func (s *Scaler) tryLaunch(st *state) bool {
+func (s *Scaler) tryLaunch(st *state, client *github.Client) bool {
 	select {
 	case st.sem <- struct{}{}:
-		s.logger.Info("scaling up", "pool", st.l.Name())
+		target := "rotation"
+		if client != nil {
+			target = client.Target()
+		}
+		s.logger.Info("scaling up", "pool", st.l.Name(), "target", target)
 		go func() {
 			defer func() { <-st.sem }()
-			if _, err := st.l.RunOne(s.baseCtx); err != nil && s.baseCtx.Err() == nil {
+			if _, err := st.l.RunOneOn(s.baseCtx, client); err != nil && s.baseCtx.Err() == nil {
 				s.logger.Error("runner failed", "pool", st.l.Name(), "err", err)
 			}
 		}()
@@ -100,28 +119,38 @@ func (s *Scaler) pollLoop(ctx context.Context) {
 	}
 }
 
-// reconcile queries queued work (repo scope) and tops up runners to capacity.
+// reconcile queries queued work (repo/repos scope) and tops up runners to capacity.
+// Each job carries the client for the repo that queued it, so the runner is
+// registered there rather than wherever rotation happens to point.
 func (s *Scaler) reconcile() {
-	if s.scope != config.ScopeRepo {
+	if s.scope != config.ScopeRepo && s.scope != config.ScopeRepos {
 		return // org/enterprise: rely on webhook (no cheap queued-jobs endpoint)
 	}
-	jobs, err := s.gh.QueuedJobLabels(s.baseCtx)
+	jobs, err := s.gh.QueuedJobs(s.baseCtx)
 	if err != nil {
 		s.logger.Warn("poll queued jobs failed", "err", err)
-		return
+		var pollErr *github.RepoPollError
+		if errors.As(err, &pollErr) && pollErr.AllFailed() {
+			return
+		}
 	}
-	for _, labels := range jobs {
-		s.OnQueued(labels)
+	for _, job := range jobs {
+		s.launchFor(job.Client, job.Labels)
 	}
 }
 
 // labelsMatch reports whether a pool with poolLabels can serve a job requesting
 // jobLabels (the pool must carry every requested label).
+//
+// Matching is case-insensitive because GitHub treats runner labels that way: a
+// job requesting the standard `[self-hosted, Windows, X64]` is served by a runner
+// registered as `windows`/`x64`. Comparing case-sensitively here made autoscale
+// silently match nothing for any workflow using GitHub's default label casing.
 func labelsMatch(poolLabels, jobLabels []string) bool {
 	for _, jl := range jobLabels {
 		found := false
 		for _, pl := range poolLabels {
-			if pl == jl {
+			if strings.EqualFold(pl, jl) {
 				found = true
 				break
 			}

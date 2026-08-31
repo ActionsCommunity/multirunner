@@ -1,0 +1,10 @@
+# Files consumed by container builds must keep LF on every platform.
+#
+# Without this, a Windows checkout with core.autocrlf=true rewrites
+# entrypoint.sh to CRLF. The kernel then reads the shebang as
+# "/usr/bin/env bash\r" and looks for a binary literally named "bash\r",
+# so every Linux runner container dies with exit code 127 before it can
+# register, and queued jobs hang forever.
+*.sh            text eol=lf
+Dockerfile      text eol=lf
+*.Dockerfile    text eol=lf

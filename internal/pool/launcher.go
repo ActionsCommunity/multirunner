@@ -31,7 +31,7 @@ type Launcher struct {
 	cfg    config.Pool
 	image  string
 	be     backend.Backend
-	gh     *github.Client
+	gh     github.ClientProvider
 	env    map[string]string
 	mounts []backend.Mount
 	logger *slog.Logger
@@ -39,7 +39,7 @@ type Launcher struct {
 }
 
 // NewLauncher builds a Launcher.
-func NewLauncher(cfg config.Pool, image string, be backend.Backend, gh *github.Client, env map[string]string, mounts []backend.Mount, logger *slog.Logger, hooks Hooks) *Launcher {
+func NewLauncher(cfg config.Pool, image string, be backend.Backend, gh github.ClientProvider, env map[string]string, mounts []backend.Mount, logger *slog.Logger, hooks Hooks) *Launcher {
 	return &Launcher{
 		cfg: cfg, image: image, be: be, gh: gh,
 		env: env, mounts: mounts, logger: logger.With("pool", cfg.Name), hooks: hooks,
@@ -64,8 +64,30 @@ func (l *Launcher) EnsureImage(ctx context.Context) error {
 	return nil
 }
 
-// RunOne provisions a fresh JIT runner and blocks until it finishes its one job.
+// RunOne provisions a fresh JIT runner for warm-pool slot zero and blocks
+// until it finishes its one job. This is the warm-capacity path: there is no
+// queued job to place against. When a specific repo has queued work, call
+// RunOneOn instead.
 func (l *Launcher) RunOne(ctx context.Context) (int, error) {
+	return l.RunOneForSlot(ctx, 0)
+}
+
+// RunOneForSlot provisions a fresh runner for a stable warm-pool slot.
+func (l *Launcher) RunOneForSlot(ctx context.Context, slot int) (int, error) {
+	return l.RunOneOn(ctx, l.gh.ClientForSlot(slot))
+}
+
+// RunOneOn provisions a fresh JIT runner registered to client's repo and blocks
+// until it finishes its one job. A repo-scoped runner binds to exactly one repo,
+// so demand-driven launches must pass the client for the repo that queued the
+// job; otherwise the runner idles on a repo that has no work while the job that
+// triggered the launch stays queued. A nil client is rejected.
+func (l *Launcher) RunOneOn(ctx context.Context, client *github.Client) (int, error) {
+	// Resolve before the OnStart hook so an unusable pool cannot leak an
+	// unmatched start into the metrics.
+	if client == nil {
+		return 0, fmt.Errorf("pool %s: no github client available to register a runner", l.cfg.Name)
+	}
 	if l.hooks.OnStart != nil {
 		l.hooks.OnStart(l.cfg.Name)
 	}
@@ -78,7 +100,7 @@ func (l *Launcher) RunOne(ctx context.Context) (int, error) {
 		Env:           l.env,
 		Mounts:        l.mounts,
 	}
-	code, err := runner.RunOnce(ctx, l.gh, l.be, spec, l.logger)
+	code, err := runner.RunOnce(ctx, client, l.be, spec, l.logger.With("target", client.Target()))
 	if l.hooks.OnStop != nil {
 		l.hooks.OnStop(l.cfg.Name, code, err)
 	}

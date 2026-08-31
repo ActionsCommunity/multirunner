@@ -6,6 +6,7 @@ package runner
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -54,6 +55,7 @@ func RunOnce(ctx context.Context, gh *github.Client, be backend.Backend, spec Sp
 		Index:            spec.Index,
 	})
 	if err != nil {
+		deregister(ctx, gh, jit.Runner.ID, spec.Name, logger)
 		return -1, fmt.Errorf("launch: %w", err)
 	}
 
@@ -66,24 +68,54 @@ func RunOnce(ctx context.Context, gh *github.Client, be backend.Backend, spec Sp
 	cancelLogs()
 
 	if ctx.Err() != nil {
-		// Shutdown: terminate the in-flight runner and deregister it from GitHub
-		// with a detached, bounded context (the job ctx is already cancelled).
-		detached, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-		defer cancel()
-		_ = handle.Kill(detached)
-		if jit.Runner.ID != 0 {
-			if err := gh.DeleteRunner(detached, jit.Runner.ID); err != nil {
-				logger.Warn("deregister runner on shutdown failed",
-					"name", spec.Name, "runner_id", jit.Runner.ID, "err", err)
-			}
+		if killErr := terminate(ctx, handle); killErr != nil {
+			return code, errors.Join(ctx.Err(), fmt.Errorf("kill runner: %w", killErr))
 		}
+		deregister(ctx, gh, jit.Runner.ID, spec.Name, logger)
 		return code, ctx.Err()
 	}
 	if waitErr != nil {
+		// A wait error does not prove that the runner stopped. Terminate it first
+		// and only remove its registration after the backend confirms the kill.
+		if killErr := terminate(ctx, handle); killErr != nil {
+			return code, errors.Join(fmt.Errorf("wait: %w", waitErr), fmt.Errorf("kill runner: %w", killErr))
+		}
+		deregister(ctx, gh, jit.Runner.ID, spec.Name, logger)
 		return code, fmt.Errorf("wait: %w", waitErr)
 	}
+	deregister(ctx, gh, jit.Runner.ID, spec.Name, logger)
 	logger.Info("runner exited", "name", spec.Name, "exit_code", code)
 	return code, nil
+}
+
+// cleanupTimeout bounds the detached cleanup calls made once the job context is
+// already cancelled.
+const cleanupTimeout = 10 * time.Second
+
+func terminate(ctx context.Context, handle backend.RunnerHandle) error {
+	detached, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
+	defer cancel()
+	return handle.Kill(detached)
+}
+
+// deregister removes a runner registration best-effort. A registration that is
+// already gone is the expected outcome for a runner that completed its job, so
+// that case is not worth a warning.
+func deregister(ctx context.Context, gh *github.Client, runnerID int64, name string, logger *slog.Logger) {
+	if runnerID == 0 {
+		return
+	}
+	detached, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
+	defer cancel()
+
+	err := gh.DeleteRunner(detached, runnerID)
+	switch {
+	case err == nil:
+		logger.Debug("reclaimed unused runner registration", "name", name, "runner_id", runnerID)
+	case errors.Is(err, github.ErrRunnerNotFound):
+	default:
+		logger.Warn("deregister runner failed", "name", name, "runner_id", runnerID, "err", err)
+	}
 }
 
 func streamLogs(ctx context.Context, handle backend.RunnerHandle, logger *slog.Logger) {

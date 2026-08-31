@@ -2,12 +2,14 @@ package winvm
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sync"
 
 	"github.com/GerardSmit/multirunner/internal/backend"
 )
@@ -145,7 +147,7 @@ func (b *Backend) Launch(ctx context.Context, req backend.LaunchRequest) (backen
 		}
 		return nil, fmt.Errorf("start qemu: %w", err)
 	}
-	return &vmHandle{cmd: cmd, overlay: overlay, iso: isoPath, vars: varsCopy}, nil
+	return newVMHandle(cmd, overlay, isoPath, varsCopy), nil
 }
 
 func (b *Backend) Close() error { return nil }
@@ -166,25 +168,40 @@ type vmHandle struct {
 	overlay string
 	iso     string
 	vars    string // per-VM UEFI NVRAM copy (empty for BIOS)
+
+	done       chan struct{}
+	waitErr    error
+	cleanupErr error
+	killOnce   sync.Once
+	killErr    error
+}
+
+func newVMHandle(cmd *exec.Cmd, overlay, iso, vars string) *vmHandle {
+	h := &vmHandle{
+		cmd: cmd, overlay: overlay, iso: iso, vars: vars,
+		done: make(chan struct{}),
+	}
+	go func() {
+		h.waitErr = cmd.Wait()
+		h.cleanupErr = h.cleanup()
+		close(h.done)
+	}()
+	return h
 }
 
 func (h *vmHandle) ID() string { return filepath.Base(h.overlay) }
 
 func (h *vmHandle) Wait(ctx context.Context) (int, error) {
-	done := make(chan error, 1)
-	go func() { done <- h.cmd.Wait() }()
 	select {
-	case err := <-done:
-		h.cleanup()
-		if err != nil {
-			if ee, ok := err.(*exec.ExitError); ok {
-				return ee.ExitCode(), nil // VM exited non-zero; not a launch error
+	case <-h.done:
+		if h.waitErr != nil {
+			if ee, ok := h.waitErr.(*exec.ExitError); ok {
+				return ee.ExitCode(), h.cleanupErr
 			}
-			return -1, err
+			return -1, errors.Join(h.waitErr, h.cleanupErr)
 		}
-		return 0, nil
+		return 0, h.cleanupErr
 	case <-ctx.Done():
-		_ = h.Kill(context.WithoutCancel(ctx))
 		return -1, ctx.Err()
 	}
 }
@@ -192,17 +209,47 @@ func (h *vmHandle) Wait(ctx context.Context) (int, error) {
 func (h *vmHandle) Logs(ctx context.Context) (io.ReadCloser, error) { return nil, nil }
 
 func (h *vmHandle) Kill(ctx context.Context) error {
-	if h.cmd.Process != nil {
-		_ = h.cmd.Process.Kill()
+	h.killOnce.Do(func() {
+		if h.cmd.Process == nil {
+			h.killErr = fmt.Errorf("qemu process is unavailable")
+			return
+		}
+		h.killErr = h.cmd.Process.Kill()
+		if errors.Is(h.killErr, os.ErrProcessDone) {
+			h.killErr = nil
+		}
+	})
+	if h.killErr != nil {
+		return fmt.Errorf("kill qemu: %w", h.killErr)
 	}
-	h.cleanup()
-	return nil
+	select {
+	case <-h.done:
+		var waitErr error
+		if h.waitErr != nil {
+			if _, ok := h.waitErr.(*exec.ExitError); !ok {
+				waitErr = fmt.Errorf("wait for qemu exit: %w", h.waitErr)
+			}
+		}
+		return errors.Join(waitErr, h.cleanupErr)
+	case <-ctx.Done():
+		return fmt.Errorf("wait for qemu exit: %w", ctx.Err())
+	}
 }
 
-func (h *vmHandle) cleanup() {
-	os.Remove(h.overlay)
-	os.Remove(h.iso)
-	if h.vars != "" {
-		os.Remove(h.vars)
+func (h *vmHandle) cleanup() error {
+	var errs []error
+	remove := func(kind, path string) {
+		if path == "" {
+			return
+		}
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, fmt.Errorf("remove %s %s: %w", kind, path, err))
+		}
 	}
+	remove("overlay", h.overlay)
+	remove("JIT ISO", h.iso)
+	if h.vars != "" {
+		remove("NVRAM", h.vars)
+	}
+	return errors.Join(errs...)
 }
