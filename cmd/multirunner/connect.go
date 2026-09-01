@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -50,14 +51,18 @@ func connectCmd(cfgPath, org, repo, name string, port int, keyOut string) error 
 		return fmt.Errorf("write config: %w", err)
 	}
 
-	fmt.Println()
-	fmt.Printf("Connected. App %q (id=%d) installed (installation=%d).\n", creds.Slug, creds.AppID, creds.InstallationID)
-	fmt.Printf("  private key : %s\n", keyOut)
-	fmt.Printf("  config      : %s (auth set to App; pat removed)\n", cfgPath)
-	if creds.WebhookSecret != "" {
-		fmt.Printf("  webhook secret (save for provisioning: webhook): %s\n", creds.WebhookSecret)
-	}
-	fmt.Printf("  app settings: %s\n", creds.HTMLURL)
-	fmt.Println("\nRun:  multirunner run -config " + cfgPath)
-	return nil
+	return writeConnectSuccess(os.Stdout, cfgPath, keyOut, creds)
+}
+
+func writeConnectSuccess(w io.Writer, cfgPath, keyOut string, creds *ghapp.Credentials) error {
+	_, err := fmt.Fprintf(w, `
+Connected. App %q (id=%d) installed (installation=%d).
+  private key : %s
+  config      : %s (GitHub App authentication configured)
+  app settings: %s
+  webhook     : configure webhook mode separately if needed
+
+Run:  multirunner run --config %s
+`, creds.Slug, creds.AppID, creds.InstallationID, keyOut, cfgPath, creds.HTMLURL, cfgPath)
+	return err
 }

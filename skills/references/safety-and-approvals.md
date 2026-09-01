@@ -22,6 +22,6 @@ Apply these rules to every multirunner skill:
 
 `multirunner connect` is preferred over PAT authentication. It creates and installs
 a GitHub App and writes a restricted private key. Show its target and command before
-approval, but don't relay its raw output because it can contain a webhook secret.
-The current command accepts `--repo owner/repo` or `--org organization`. Don't invent
-repository-list or enterprise flags.
+approval. Its success output omits generated secrets; never inspect or relay
+secret-bearing API responses. The current command accepts `--repo owner/repo` or
+`--org organization`. Don't invent repository-list or enterprise flags.
