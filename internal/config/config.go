@@ -3,6 +3,8 @@ package config
 
 import (
 	"fmt"
+	"math"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -174,21 +176,22 @@ type Cache struct {
 
 // Pool is one per-OS pool of ephemeral runner slots.
 type Pool struct {
-	Name                   string     `yaml:"name"`
-	OS                     string     `yaml:"os"`      // linux | windows
-	Backend                string     `yaml:"backend"` // docker (default) | containerd | qemu
-	Size                   int        `yaml:"size"`
-	ImageTier              string     `yaml:"image_tier"`
-	Image                  string     `yaml:"image"`
-	QEMU                   QEMU       `yaml:"qemu"`
-	Containerd             Containerd `yaml:"containerd"`
-	RunnerGroupID          int64      `yaml:"runner_group_id"`
-	Labels                 []string   `yaml:"labels"`
-	WorkFolder             string     `yaml:"work_folder"`
-	NamePrefix             string     `yaml:"name_prefix"`
-	Docker                 Docker     `yaml:"docker"`
-	ToolCache              ToolCache  `yaml:"tool_cache"`
-	MaxConsecutiveFailures int        `yaml:"max_consecutive_failures"`
+	Name                   string          `yaml:"name"`
+	OS                     string          `yaml:"os"`      // linux | windows
+	Backend                string          `yaml:"backend"` // docker (default) | containerd | qemu
+	Size                   int             `yaml:"size"`
+	ImageTier              string          `yaml:"image_tier"`
+	Image                  string          `yaml:"image"`
+	Container              ContainerConfig `yaml:"container"`
+	QEMU                   QEMU            `yaml:"qemu"`
+	Containerd             Containerd      `yaml:"containerd"`
+	RunnerGroupID          int64           `yaml:"runner_group_id"`
+	Labels                 []string        `yaml:"labels"`
+	WorkFolder             string          `yaml:"work_folder"`
+	NamePrefix             string          `yaml:"name_prefix"`
+	Docker                 Docker          `yaml:"docker"`
+	ToolCache              ToolCache       `yaml:"tool_cache"`
+	MaxConsecutiveFailures int             `yaml:"max_consecutive_failures"`
 	// ScaleSet names the runner scale set that feeds this pool when
 	// provisioning is "scaleset". Each pool needs its own, because a scale set
 	// carries one set of labels and therefore one runner OS.
@@ -196,6 +199,68 @@ type Pool struct {
 	// RunnerGroup is the runner group the scale set is created in. Empty means
 	// the default group.
 	RunnerGroup string `yaml:"runner_group"`
+}
+
+const (
+	bytesPerMiB  int64 = 1024 * 1024
+	nanosPerCPU  int64 = 1_000_000_000
+	maxMemoryMiB       = math.MaxInt64 / bytesPerMiB
+	maxCPUCount        = math.MaxInt64 / nanosPerCPU
+)
+
+// ContainerConfig limits each container runner. MemorySwapMB is the total
+// memory plus swap limit used by Docker, so setting it equal to MemoryMB
+// disables swap. Zero values leave the backend defaults unchanged.
+type ContainerConfig struct {
+	CPUs         CPUCount  `yaml:"cpus"`
+	MemoryMB     Mebibytes `yaml:"memory_mb"`
+	MemorySwapMB Mebibytes `yaml:"memory_swap_mb"`
+	DNS          []string  `yaml:"dns"`
+}
+
+// CPUCount is an integer number of virtual CPUs.
+type CPUCount int64
+
+// UnmarshalYAML rejects fractional and string CPU values.
+func (c *CPUCount) UnmarshalYAML(node *yaml.Node) error {
+	if node.Tag != "!!int" {
+		return fmt.Errorf("CPU count must be an integer")
+	}
+	var value int64
+	if err := node.Decode(&value); err != nil {
+		return fmt.Errorf("decode CPU count: %w", err)
+	}
+	*c = CPUCount(value)
+	return nil
+}
+
+// Mebibytes is an integer memory quantity in 1024-byte units.
+type Mebibytes int64
+
+// UnmarshalYAML rejects fractional and string memory values.
+func (m *Mebibytes) UnmarshalYAML(node *yaml.Node) error {
+	if node.Tag != "!!int" {
+		return fmt.Errorf("memory must be an integer number of MiB")
+	}
+	var value int64
+	if err := node.Decode(&value); err != nil {
+		return fmt.Errorf("decode memory: %w", err)
+	}
+	*m = Mebibytes(value)
+	return nil
+}
+
+// NanoCPUs returns the Linux Docker CPU quota representation.
+func (c ContainerConfig) NanoCPUs() int64 { return int64(c.CPUs) * nanosPerCPU }
+
+// MemoryBytes returns the normalized container memory limit.
+func (c ContainerConfig) MemoryBytes() int64 { return int64(c.MemoryMB) * bytesPerMiB }
+
+// MemorySwapBytes returns the normalized total memory plus swap limit.
+func (c ContainerConfig) MemorySwapBytes() int64 { return int64(c.MemorySwapMB) * bytesPerMiB }
+
+func (c ContainerConfig) configured() bool {
+	return c.CPUs != 0 || c.MemoryMB != 0 || c.MemorySwapMB != 0 || len(c.DNS) != 0
 }
 
 // publishedFlavors lists the per-OS image flavors CI builds and pushes as tags
@@ -467,6 +532,11 @@ func (c *Config) applyDefaults() {
 		if p.MaxConsecutiveFailures == 0 {
 			p.MaxConsecutiveFailures = 5
 		}
+		for j, server := range p.Container.DNS {
+			if ip := net.ParseIP(server); ip != nil {
+				p.Container.DNS[j] = ip.String()
+			}
+		}
 		// Windows isolation is intentionally left empty here. The backend
 		// resolves "" / "auto" via autoIsolation() (process on Server, hyperv
 		// on client), matching the containerd backend. Defaulting to "process"
@@ -585,6 +655,9 @@ func (c *Config) Validate() error {
 		if p.Size < 1 {
 			return fmt.Errorf("pools[%q].size must be >= 1", p.Name)
 		}
+		if err := validateContainerConfig(p); err != nil {
+			return err
+		}
 		if c.Provisioning.IsScaleset() && p.ScaleSet == "" {
 			// Without this the pool would start, hold a session against nothing,
 			// and never receive an assignment. Fail at startup instead.
@@ -602,6 +675,40 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("pools[%q] and pools[%q] share scale_set %q; each pool needs its own", prev, p.Name, p.ScaleSet)
 			}
 			seen[p.ScaleSet] = p.Name
+		}
+	}
+	return nil
+}
+
+func validateContainerConfig(p *Pool) error {
+	cfg := p.Container
+	switch {
+	case cfg.CPUs < 0:
+		return fmt.Errorf("pools[%q].container.cpus must be >= 0", p.Name)
+	case int64(cfg.CPUs) > maxCPUCount:
+		return fmt.Errorf("pools[%q].container.cpus overflows the backend CPU representation", p.Name)
+	case cfg.MemoryMB < 0:
+		return fmt.Errorf("pools[%q].container.memory_mb must be >= 0", p.Name)
+	case int64(cfg.MemoryMB) > maxMemoryMiB:
+		return fmt.Errorf("pools[%q].container.memory_mb overflows bytes", p.Name)
+	case cfg.MemorySwapMB < 0:
+		return fmt.Errorf("pools[%q].container.memory_swap_mb must be >= 0", p.Name)
+	case int64(cfg.MemorySwapMB) > maxMemoryMiB:
+		return fmt.Errorf("pools[%q].container.memory_swap_mb overflows bytes", p.Name)
+	case cfg.MemorySwapMB != 0 && cfg.MemoryMB == 0:
+		return fmt.Errorf("pools[%q].container.memory_swap_mb requires memory_mb", p.Name)
+	case cfg.MemorySwapMB != 0 && cfg.MemorySwapMB < cfg.MemoryMB:
+		return fmt.Errorf("pools[%q].container.memory_swap_mb must be >= memory_mb", p.Name)
+	case p.Backend == "qemu" && cfg.configured():
+		return fmt.Errorf("pools[%q].container settings are unsupported for backend=qemu; use qemu.cpus and qemu.mem_mb", p.Name)
+	case p.OS == "windows" && cfg.MemorySwapMB != 0:
+		return fmt.Errorf("pools[%q].container.memory_swap_mb is unsupported for Windows containers", p.Name)
+	case p.Backend == "containerd" && len(cfg.DNS) != 0:
+		return fmt.Errorf("pools[%q].container.dns is unsupported by nerdctl on Windows", p.Name)
+	}
+	for _, server := range cfg.DNS {
+		if net.ParseIP(server) == nil {
+			return fmt.Errorf("pools[%q].container.dns entry %q must be an IP address", p.Name, server)
 		}
 	}
 	return nil
