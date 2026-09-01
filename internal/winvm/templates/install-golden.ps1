@@ -68,7 +68,7 @@ try {
     # real git (incremental fetch + the dotgit-cache bundle seed) instead of the
     # REST API full-archive download, and so `run:` steps and the job hook can run
     # git. Prepended to the machine PATH so every process (runner, hook, job) sees it.
-    $gitUrl = 'https://github.com/git-for-windows/git/releases/download/v2.54.0.windows.1/MinGit-2.54.0-64-bit.zip'
+    $gitUrl = '__MINGIT_URL__'
     FetchOrStage 'mingit.zip' $gitUrl C:\mingit.zip SHA256 '__MINGIT_SHA256__'
     Expand-Archive C:\mingit.zip C:\mingit -Force
     Remove-Item C:\mingit.zip

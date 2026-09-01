@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
+	imageversions "github.com/GerardSmit/multirunner/images"
 	"gopkg.in/yaml.v3"
 )
 
@@ -197,21 +199,43 @@ type Pool struct {
 // publishedFlavors lists the per-OS image flavors CI builds and pushes as tags
 // on gerardsmit/multirunner-runner-<os>. A pool's image_tier naming one of these
 // resolves to the published tag; unknown tiers fall back to a local :dev build.
-var publishedFlavors = map[string]map[string]string{
-	"linux": {
-		"native-build": "native-build",
-		"node":         "node",
-		"dotnet":       "dotnet",
-		"rust":         "rust",
-		"go":           "go",
-	},
-	"windows": {
-		"node":          "node",
-		"dotnet":        "dotnet",
-		"buildtools":    "buildtools",
-		"buildtools:17": "buildtools-17",
-		"buildtools:18": "buildtools-18",
-	},
+var publishedFlavors = newPublishedFlavors()
+
+// newPublishedFlavors builds the flavor table, deriving the per-line Build Tools
+// entries from the embedded image manifest so adding a release line there is the
+// only edit needed.
+func newPublishedFlavors() map[string]map[string]string {
+	windows := map[string]string{
+		"node":       "node",
+		"dotnet":     "dotnet",
+		"buildtools": "buildtools",
+	}
+	// Docker tags cannot contain a second colon, so image_tier buildtools:<line>
+	// maps to the :buildtools-<line> tag CI pushes for that manifest line.
+	for _, line := range imageversions.MustEmbedded().BuildTools.ReleaseLines() {
+		windows["buildtools:"+line] = "buildtools-" + line
+	}
+	return map[string]map[string]string{
+		"linux": {
+			"native-build": "native-build",
+			"node":         "node",
+			"dotnet":       "dotnet",
+			"rust":         "rust",
+			"go":           "go",
+		},
+		"windows": windows,
+	}
+}
+
+// validImageTiers lists the tiers accepted for an OS: minimal, then the
+// published flavors sorted.
+func validImageTiers(goos string) []string {
+	tiers := make([]string, 0, len(publishedFlavors[goos])+1)
+	for tier := range publishedFlavors[goos] {
+		tiers = append(tiers, tier)
+	}
+	sort.Strings(tiers)
+	return append([]string{"minimal"}, tiers...)
 }
 
 // ImageRef resolves the container image for a pool, in priority order:
@@ -233,6 +257,28 @@ func (p Pool) ImageRef() string {
 		return "gerardsmit/multirunner-runner-" + p.OS + ":" + tag
 	}
 	return "multirunner/runner-" + p.OS + "-" + tier + ":dev"
+}
+
+// validateImageTier rejects a tier that has no published flavor for the pool's
+// OS and cannot be expressed as a local :dev build either, because it carries a
+// character a Docker tag may not contain. Left unchecked those tiers only fail
+// at launch time, as an "invalid reference format" from the daemon that names no
+// pool and wastes a JIT runner registration. An unknown tier without such a
+// character keeps falling back to a local build — a supported dev workflow.
+func (p Pool) validateImageTier() error {
+	if p.Image != "" || p.Backend == "qemu" {
+		return nil
+	}
+	tier := p.ImageTier
+	if tier == "" || tier == "minimal" || publishedFlavors[p.OS][tier] != "" {
+		return nil
+	}
+	if !strings.ContainsAny(tier, ":/@") {
+		return nil
+	}
+	return fmt.Errorf("pools[%q].image_tier %q is not published for os=%s and cannot be built locally "+
+		"(a tier used as an image tag may not contain ':', '/' or '@'); valid tiers: %s",
+		p.Name, tier, p.OS, strings.Join(validImageTiers(p.OS), ", "))
 }
 
 // ToolCachePath is the hostedtoolcache directory for the pool's OS.
@@ -528,6 +574,9 @@ func (c *Config) Validate() error {
 			// Without this the pool would start, hold a session against nothing,
 			// and never receive an assignment. Fail at startup instead.
 			return fmt.Errorf("pools[%q].scale_set is required for provisioning: scaleset", p.Name)
+		}
+		if err := p.validateImageTier(); err != nil {
+			return err
 		}
 	}
 

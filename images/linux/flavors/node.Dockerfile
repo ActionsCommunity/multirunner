@@ -34,19 +34,20 @@ RUN apt-get update -y && apt-get install -y --no-install-recommends ca-certifica
     && majors="$(jq -er '.node.releases | keys[]' /tmp/image-versions.json)" \
     && test -n "$majors" || { echo "missing Node versions"; exit 1; } \
     && for major in $majors; do \
-         ver="$(jq -er --arg major "$major" '.node.releases[$major].version' /tmp/image-versions.json)"; \
-         archive="node-v${ver}-linux-${node_arch}.tar.xz"; \
-         dest="/opt/hostedtoolcache/node/${ver}/${node_arch}"; \
-         mkdir -p "$dest"; \
-         curl -fsSLO "https://nodejs.org/dist/v${ver}/${archive}"; \
-         checksum_key="linux_${node_arch}_sha256"; \
-         checksum="$(jq -er --arg major "$major" --arg key "$checksum_key" '.node.releases[$major][$key]' /tmp/image-versions.json)"; \
-         test -n "$checksum" || { echo "missing checksum for ${archive}"; exit 1; }; \
-         echo "${checksum}  ${archive}" | sha256sum --check -; \
-         tar -xJf "$archive" -C "$dest" --strip-components=1; \
-         rm "$archive"; \
-         test -x "$dest/bin/node"; \
-         touch "/opt/hostedtoolcache/node/${ver}/${node_arch}.complete"; \
+         ver="$(jq -er --arg major "$major" '.node.releases[$major].version' /tmp/image-versions.json)" \
+         && archive="node-v${ver}-linux-${node_arch}.tar.xz" \
+         && dest="/opt/hostedtoolcache/node/${ver}/${node_arch}" \
+         && mkdir -p "$dest" \
+         && curl -fsSLO "https://nodejs.org/dist/v${ver}/${archive}" \
+         && checksum_key="linux_${node_arch}_sha256" \
+         && checksum="$(jq -er --arg major "$major" --arg key "$checksum_key" '.node.releases[$major][$key]' /tmp/image-versions.json)" \
+         && test -n "$checksum" \
+         && echo "${checksum}  ${archive}" | sha256sum --check - \
+         && tar -xJf "$archive" -C "$dest" --strip-components=1 \
+         && rm "$archive" \
+         && test -x "$dest/bin/node" \
+         && touch "/opt/hostedtoolcache/node/${ver}/${node_arch}.complete" \
+         || { echo "Node ${ver} install failed"; exit 1; }; \
        done \
     && dir="/opt/hostedtoolcache/node/${default_version}/${node_arch}" \
     && ln -sf "$dir/bin/node" /usr/local/bin/node \

@@ -35,7 +35,7 @@ RUN $manifest = Get-Content C:/image-versions.json -Raw | ConvertFrom-Json; \
       $archive = 'C:/dotnet-sdk-' + $channel.Name + '.zip'; \
       Invoke-WebRequest -Uri ('https://builds.dotnet.microsoft.com/dotnet/Sdk/{0}/dotnet-sdk-{0}-win-x64.zip' -f $release.version) -OutFile $archive; \
       if ((Get-FileHash $archive -Algorithm SHA512).Hash -ne $release.windows_x64_sha512) { throw ('dotnet SDK checksum mismatch for channel ' + $channel.Name) }; \
-      Expand-Archive -Path $archive -DestinationPath $env:DOTNET_ROOT; \
+      Expand-Archive -Path $archive -DestinationPath $env:DOTNET_ROOT -Force; \
       Remove-Item -Force $archive; \
     }; \
     Remove-Item -Force C:/image-versions.json

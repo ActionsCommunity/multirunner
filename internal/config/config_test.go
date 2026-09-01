@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	imageversions "github.com/GerardSmit/multirunner/images"
 )
 
 func writeConfig(t *testing.T, body string) string {
@@ -231,6 +233,70 @@ func TestImageRef(t *testing.T) {
 		if got := p.ImageRef(); got != c.want {
 			t.Errorf("ImageRef(os=%s tier=%s explicit=%s) = %q, want %q", c.os, c.tier, c.explicit, got, c.want)
 		}
+	}
+}
+
+func TestImageRefBuildToolsLinesFollowManifest(t *testing.T) {
+	for _, line := range imageversions.MustEmbedded().BuildTools.ReleaseLines() {
+		p := Pool{OS: "windows", ImageTier: "buildtools:" + line}
+		want := "gerardsmit/multirunner-runner-windows:buildtools-" + line
+		if got := p.ImageRef(); got != want {
+			t.Errorf("ImageRef(buildtools:%s) = %q, want %q", line, got, want)
+		}
+	}
+}
+
+func TestValidateRejectsUnbuildableImageTier(t *testing.T) {
+	cases := map[string]struct {
+		os, tier string
+	}{
+		"published windows line on a linux pool": {"linux", "buildtools:17"},
+		"unknown build tools line":               {"windows", "buildtools:19"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			p := writeConfig(t, `
+github: {scope: org, owner: o}
+auth: {pat: x}
+pools: [{name: broken-pool, os: `+tc.os+`, image_tier: "`+tc.tier+`", docker: {host: h}}]`)
+			_, err := Load(p)
+			if err == nil {
+				t.Fatalf("expected validation error for tier %q on os=%s", tc.tier, tc.os)
+			}
+			for _, want := range []string{"broken-pool", tc.tier, "minimal"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not mention %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+func TestValidateAllowsLocalDevImageTier(t *testing.T) {
+	p := writeConfig(t, `
+github: {scope: org, owner: o}
+auth: {pat: x}
+pools: [{name: dev-pool, os: linux, image_tier: custom, docker: {host: h}}]`)
+	c, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v (a colon-free unknown tier must keep the local :dev fallback)", err)
+	}
+	if got := c.Pools[0].ImageRef(); got != "multirunner/runner-linux-custom:dev" {
+		t.Errorf("ImageRef = %q", got)
+	}
+}
+
+func TestValidateAllowsPublishedBuildToolsTier(t *testing.T) {
+	p := writeConfig(t, `
+github: {scope: org, owner: o}
+auth: {pat: x}
+pools: [{name: win-pool, os: windows, image_tier: "buildtools:17", docker: {host: h}}]`)
+	c, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := c.Pools[0].ImageRef(); got != "gerardsmit/multirunner-runner-windows:buildtools-17" {
+		t.Errorf("ImageRef = %q", got)
 	}
 }
 

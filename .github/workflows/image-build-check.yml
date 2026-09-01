@@ -173,9 +173,14 @@ jobs:
           docker run --rm --entrypoint cmd $B:node   /c "where node && where npm && node --version"
           docker run --rm --entrypoint cmd $B:dotnet /c "where dotnet && dotnet --list-sdks && node --version"
           NODE_VERSIONS="$(node -e "const v=require('./images/versions.json'); console.log(Object.values(v.node.releases).map(r => r.version).join(' '))")"
+          # One assertion per cmd invocation: cmd folds an `&&` chain after
+          # `if not exist X exit 1` into the IF body, so chained checks never
+          # run when the first path exists.
           for version in $NODE_VERSIONS; do
             docker run --rm --entrypoint cmd $B:node /s /c \
-              "if not exist C:/hostedtoolcache/windows/node/$version/x64/node.exe exit 1 && if not exist C:/hostedtoolcache/windows/node/$version/x64.complete exit 1"
+              "if not exist C:/hostedtoolcache/windows/node/$version/x64/node.exe exit 1"
+            docker run --rm --entrypoint cmd $B:node /s /c \
+              "if not exist C:/hostedtoolcache/windows/node/$version/x64.complete exit 1"
           done
 
           # Docker's default escape character is `\`, so an unescaped
@@ -313,5 +318,10 @@ jobs:
             -t "$B:buildtools" .
           docker run --rm --entrypoint powershell "$B:buildtools" -NoProfile -Command \
             "& 'C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe' -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath"
+          # Separate cmd invocations: chaining `&&` after `if not ... exit 1`
+          # puts the whole chain inside the IF body, so the dev-cmd checks
+          # would only ever run on the failure branch.
           docker run --rm --entrypoint cmd "$B:buildtools" /s /c \
-            "if not \"%VSBUILDTOOLS%\"==\"C:\BuildTools\" exit 1 && call \"%VSBUILDTOOLS%\Common7\Tools\VsDevCmd.bat\" && where cl && msbuild -version"
+            "if not \"%VSBUILDTOOLS%\"==\"C:\BuildTools\" exit 1"
+          docker run --rm --entrypoint cmd "$B:buildtools" /s /c \
+            "call \"%VSBUILDTOOLS%\Common7\Tools\VsDevCmd.bat\" && where cl && msbuild -version"

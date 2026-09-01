@@ -72,15 +72,35 @@ func firstExisting(dir string, names []string) string {
 	return ""
 }
 
+// kvmAvailable reports whether this host can actually hand out KVM. Opening the
+// device is the check that matters: /dev/kvm is typically root:kvm 0660, so its
+// mere existence says nothing about whether this process may use it, and
+// containers or cloud VMs without nested virtualization have no node at all.
+// QEMU does not degrade on `-accel kvm` there, it refuses to start.
+// Overridable so accelerator selection stays testable off a KVM host.
+var kvmAvailable = func() bool {
+	f, err := os.OpenFile("/dev/kvm", os.O_RDWR, 0)
+	if err != nil {
+		return false
+	}
+	_ = f.Close()
+	return true
+}
+
 // DetectAccel picks the QEMU accelerator for this backend's x86-64 Windows
 // guest. Hardware virtualization requires the host and guest CPU architectures
-// to match, so ARM hosts use QEMU's cross-architecture TCG emulation.
+// to match, so ARM hosts use QEMU's cross-architecture TCG emulation, and an
+// amd64 host only gets a hardware accelerator when that accelerator is actually
+// usable. WHPX and HVF have no equivalent cheap probe, so they stay optimistic.
 func DetectAccel(goos, goarch string) string {
 	if goarch != "amd64" {
 		return "tcg"
 	}
 	switch goos {
 	case "linux":
+		if !kvmAvailable() {
+			return "tcg"
+		}
 		return "kvm"
 	case "windows":
 		return "whpx"

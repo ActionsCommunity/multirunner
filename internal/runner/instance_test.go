@@ -242,7 +242,13 @@ func TestRunOnceTerminatesPartialLaunchBeforeDeregistering(t *testing.T) {
 	}
 }
 
-func TestRunOnceKeepsRegistrationWhenPartialLaunchKillFails(t *testing.T) {
+// TestRunOnceDeregistersWhenPartialLaunchKillFails is the regression test for a
+// permanent registration leak: a failed launch whose cleanup kill also failed
+// (an unreachable daemon answers with a transport error, not a not-found) used
+// to return before deregistering. Nothing retries that cleanup and the pool
+// mints a new runner name per attempt, so the JIT registration stayed on GitHub
+// forever. Both failures must still be surfaced.
+func TestRunOnceDeregistersWhenPartialLaunchKillFails(t *testing.T) {
 	gh, deletes := jitServer(t, http.StatusNoContent)
 	handle := &stubHandle{killErr: errors.New("daemon unreachable")}
 	_, err := RunOnce(context.Background(), gh,
@@ -252,8 +258,11 @@ func TestRunOnceKeepsRegistrationWhenPartialLaunchKillFails(t *testing.T) {
 		!strings.Contains(err.Error(), "daemon unreachable") {
 		t.Fatalf("RunOnce error = %v, want launch and kill failures", err)
 	}
-	if got := deletes(); len(got) != 0 {
-		t.Errorf("deletes = %v, ambiguous live runner registration must be preserved", got)
+	if !handle.killed {
+		t.Error("a failed launch must still attempt termination")
+	}
+	if got := deletes(); len(got) != 1 || !strings.HasSuffix(got[0], "/repos/o/r/actions/runners/42") {
+		t.Errorf("deletes = %v, want the registration reclaimed even when the kill failed", got)
 	}
 }
 

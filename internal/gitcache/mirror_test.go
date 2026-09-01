@@ -300,6 +300,62 @@ func TestLocalGitEnvOmitsCredentials(t *testing.T) {
 	}
 }
 
+// GitHub App auth leaves the mirror PAT empty, so the unauthenticated manager is
+// a normal configuration — not a degenerate one. Scrubbing must still happen.
+func TestLocalGitEnvOmitsCredentialsWithoutToken(t *testing.T) {
+	t.Setenv("GIT_CONFIG_COUNT", "2")
+	t.Setenv("GIT_CONFIG_KEY_0", "safe.bareRepository")
+	t.Setenv("GIT_CONFIG_VALUE_0", "explicit")
+	t.Setenv("GIT_CONFIG_KEY_1", "http.https://github.com/.extraHeader")
+	t.Setenv("GIT_CONFIG_VALUE_1", "Authorization: bearer inherited")
+
+	m := &Manager{
+		baseURL: "https://github.com",
+		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	env := resolveEnv(m.localGitEnv())
+	if got := env["GIT_CONFIG_COUNT"]; got != "1" {
+		t.Fatalf("GIT_CONFIG_COUNT = %q, want only safe inherited config", got)
+	}
+	if got := env["GIT_CONFIG_KEY_0"]; got != "safe.bareRepository" {
+		t.Errorf("GIT_CONFIG_KEY_0 = %q, want safe.bareRepository", got)
+	}
+	// The dropped entry must be absent outright, not shadowed by a lower count.
+	if _, ok := env["GIT_CONFIG_KEY_1"]; ok {
+		t.Error("inherited Authorization entry survived in the environment")
+	}
+	for key, value := range env {
+		if strings.Contains(strings.ToLower(key+"="+value), "authorization:") {
+			t.Fatalf("local git environment contains credentials in %s", key)
+		}
+	}
+}
+
+// Without a token there is no credential to protect, so an inherited URL rewrite
+// stays in force rather than being silently dropped.
+func TestGitEnvWithoutTokenKeepsUrlRewrite(t *testing.T) {
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "url.https://mirror.invalid/.insteadOf")
+	t.Setenv("GIT_CONFIG_VALUE_0", "https://github.com/")
+
+	m := &Manager{
+		baseURL: "https://github.com",
+		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	env := resolveEnv(m.gitEnv())
+	if got := env["GIT_CONFIG_COUNT"]; got != "1" {
+		t.Fatalf("GIT_CONFIG_COUNT = %q, want 1", got)
+	}
+	if got := env["GIT_CONFIG_KEY_0"]; got != "url.https://mirror.invalid/.insteadOf" {
+		t.Errorf("GIT_CONFIG_KEY_0 = %q, want the inherited rewrite", got)
+	}
+	for key, value := range env {
+		if strings.Contains(strings.ToUpper(key+"="+value), "AUTHORIZATION") {
+			t.Fatalf("unauthenticated environment gained an auth header in %s", key)
+		}
+	}
+}
+
 func TestGitEnvDropsInheritedAuthorizationAndRewrite(t *testing.T) {
 	t.Setenv("GIT_CONFIG_COUNT", "3")
 	t.Setenv("GIT_CONFIG_KEY_0", "safe.bareRepository")

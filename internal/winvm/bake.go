@@ -256,18 +256,17 @@ func resolveToolPlan(tools []string) (bakeToolPlan, error) {
 		case "dotnet":
 			channels := []string{}
 			if version == "" {
-				for channel, release := range imageVersionManifest.DotNet.Channels {
-					if (release.SupportPhase == "active" || release.SupportPhase == "maintenance") && release.WindowsX64SHA512 != "" {
-						channels = append(channels, channel)
-					}
-				}
+				// The bare selector follows the manifest's target assignment: a
+				// channel carried only by the Windows container images must not be
+				// baked into every golden. Exact selectors below stay explicit.
+				channels = imageVersionManifest.DotNet.ChannelsForTarget(imageversions.DotNetTargetQEMUWindows)
 			} else {
 				channels = []string{version + ".0"}
 			}
 			for _, channel := range channels {
 				release, ok := imageVersionManifest.DotNet.Channels[channel]
 				if !ok || release.WindowsX64SHA512 == "" || (release.SupportPhase != "active" && release.SupportPhase != "maintenance") {
-					return bakeToolPlan{}, fmt.Errorf("unsupported stable .NET major %q", version)
+					return bakeToolPlan{}, fmt.Errorf("unsupported stable .NET major %q", strings.TrimSuffix(channel, ".0"))
 				}
 				dotnet[channel] = true
 				canonical["dotnet:"+strings.TrimSuffix(channel, ".0")] = true
@@ -627,6 +626,7 @@ func AutounattendFiles(runnerVersion, runnerSHA256, adminPassword string, tools 
 	install = strings.ReplaceAll(install, "__NODE_INSTALLS__", bakeNodeInstallScript(plan.Node))
 	install = strings.ReplaceAll(install, "__GO_URL__", bakeGoURL())
 	install = strings.ReplaceAll(install, "__GO_SHA256__", bakeGoSHA256)
+	install = strings.ReplaceAll(install, "__MINGIT_URL__", minGitURL)
 	install = strings.ReplaceAll(install, "__MINGIT_SHA256__", minGitSHA256)
 	install = strings.ReplaceAll(install, "__DOTNET_INSTALLS__", bakeDotNetInstallScript(plan.DotNet))
 	install = strings.ReplaceAll(install, "__BUILDTOOLS_INSTALLS__", bakeBuildToolsInstallScript(plan.BuildTools))

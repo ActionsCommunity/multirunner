@@ -243,13 +243,16 @@ func (m *Manager) localGitEnv() []string {
 }
 
 func (m *Manager) buildGitEnv(includeAuth bool) []string {
+	// Auth is only attached when a token exists; without one there is nothing to
+	// protect against a URL rewrite, so inherited rewrites stay usable.
+	authenticated := includeAuth && m.token != ""
+
 	env := append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
-	if m.token == "" {
-		return env
-	}
 	// Rebuilt entries are appended below. Remove the inherited indexed variables
 	// first so dropped credentials are absent from the subprocess environment,
-	// not merely hidden behind a smaller last-wins GIT_CONFIG_COUNT.
+	// not merely hidden behind a smaller last-wins GIT_CONFIG_COUNT. This runs
+	// even without a token so an inherited Authorization header never reaches a
+	// subprocess that has no use for it.
 	env = stripIndexedGitConfig(env)
 
 	count := 0
@@ -274,7 +277,7 @@ func (m *Manager) buildGitEnv(includeAuth bool) []string {
 			continue
 		}
 		lowerKey := strings.ToLower(key)
-		if includeAuth && strings.HasPrefix(lowerKey, "url.") &&
+		if authenticated && strings.HasPrefix(lowerKey, "url.") &&
 			(strings.HasSuffix(lowerKey, ".insteadof") || strings.HasSuffix(lowerKey, ".pushinsteadof")) {
 			m.logger.Warn("ignoring inherited git URL rewrite while authenticated", "key", key)
 			continue
@@ -287,7 +290,7 @@ func (m *Manager) buildGitEnv(includeAuth bool) []string {
 		entries = append(entries, entry{key: key, value: value})
 	}
 
-	if includeAuth {
+	if authenticated {
 		hdr := "AUTHORIZATION: basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:"+m.token))
 		base := strings.TrimRight(m.baseURL, "/") + "/"
 		entries = append(entries, entry{key: "http." + base + ".extraHeader", value: hdr})

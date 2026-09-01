@@ -24,13 +24,14 @@ RUN arch="$(dpkg --print-architecture)" \
        esac \
     && channels="$(jq -er '.dotnet.channels | to_entries[] | select(.value.targets | index("linux")) | .key' /tmp/image-versions.json)" \
     && for channel in $channels; do \
-         version="$(jq -er --arg channel "$channel" '.dotnet.channels[$channel].version' /tmp/image-versions.json)"; \
-         sha="$(jq -er --arg channel "$channel" --arg key "linux_${dotnet_arch}_sha512" '.dotnet.channels[$channel][$key]' /tmp/image-versions.json)"; \
-         archive="dotnet-sdk-${version}-linux-${dotnet_arch}.tar.gz"; \
-         curl -fsSLo "/tmp/${archive}" "https://builds.dotnet.microsoft.com/dotnet/Sdk/${version}/${archive}"; \
-         echo "${sha}  /tmp/${archive}" | sha512sum --check -; \
-         tar -xzf "/tmp/${archive}" -C "${DOTNET_ROOT}"; \
-         rm "/tmp/${archive}"; \
+         version="$(jq -er --arg channel "$channel" '.dotnet.channels[$channel].version' /tmp/image-versions.json)" \
+         && sha="$(jq -er --arg channel "$channel" --arg key "linux_${dotnet_arch}_sha512" '.dotnet.channels[$channel][$key]' /tmp/image-versions.json)" \
+         && archive="dotnet-sdk-${version}-linux-${dotnet_arch}.tar.gz" \
+         && curl -fsSLo "/tmp/${archive}" "https://builds.dotnet.microsoft.com/dotnet/Sdk/${version}/${archive}" \
+         && echo "${sha}  /tmp/${archive}" | sha512sum --check - \
+         && tar -xzf "/tmp/${archive}" -C "${DOTNET_ROOT}" \
+         && rm "/tmp/${archive}" \
+         || { echo ".NET SDK ${channel} install failed"; exit 1; }; \
        done \
     && rm /tmp/image-versions.json \
     && chmod -R a+rX "${DOTNET_ROOT}"

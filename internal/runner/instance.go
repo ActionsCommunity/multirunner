@@ -55,15 +55,19 @@ func RunOnce(ctx context.Context, gh *github.Client, be backend.Backend, spec Sp
 		Index:            spec.Index,
 	})
 	if err != nil {
+		launchErr := fmt.Errorf("launch: %w", err)
 		if handle != nil {
-			// A non-nil handle means Launch could not prove the instance is absent.
-			// Preserve its registration unless termination is confirmed.
+			// A non-nil handle means Launch could not prove the instance is absent,
+			// so terminate it before reclaiming the registration.
 			if killErr := terminate(ctx, handle); killErr != nil {
-				return -1, errors.Join(fmt.Errorf("launch: %w", err), fmt.Errorf("kill runner: %w", killErr))
+				launchErr = errors.Join(launchErr, fmt.Errorf("kill runner: %w", killErr))
 			}
 		}
+		// Deregister even when termination failed: nothing retries this cleanup and
+		// the caller launches under a fresh runner name, so a kept registration
+		// would leak on GitHub forever.
 		deregister(ctx, gh, jit.Runner.ID, spec.Name, logger)
-		return -1, fmt.Errorf("launch: %w", err)
+		return -1, launchErr
 	}
 
 	logger.Info("runner launched", "name", spec.Name, "container", short(handle.ID()), "runner_id", jit.Runner.ID)

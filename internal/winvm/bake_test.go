@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	imageversions "github.com/GerardSmit/multirunner/images"
 )
 
 func TestAutounattendFiles(t *testing.T) {
@@ -34,8 +36,13 @@ func TestAutounattendFiles(t *testing.T) {
 		t.Error("tools list not substituted")
 	}
 	wants := []string{
-		runnerDigest, minGitSHA256,
+		runnerDigest, minGitURL, minGitSHA256,
 		bakeGoURL(), bakeGoSHA256,
+	}
+	// The URL and the digest must come from the same manifest entry, or the
+	// in-guest fallback download can never satisfy the hash check.
+	if !strings.Contains(minGitURL, minGitVersion) {
+		t.Errorf("MinGit URL %q does not carry manifest version %q", minGitURL, minGitVersion)
 	}
 	plan, err := resolveToolPlan([]string{"node", "dotnet", "buildtools"})
 	if err != nil {
@@ -191,9 +198,20 @@ func TestVersionedGoldenToolSelectors(t *testing.T) {
 	if script := bakeNodeInstallScript(exactNode.Node); strings.Contains(script, imageVersionManifest.Node.Releases["22"].Version) || !strings.Contains(script, imageVersionManifest.Node.Releases["24"].Version) {
 		t.Fatal("exact Node install script did not select only Node 24")
 	}
+	targeted, err := resolveToolPlan([]string{"dotnet"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantChannels := imageVersionManifest.DotNet.ChannelsForTarget(imageversions.DotNetTargetQEMUWindows)
+	if got, want := strings.Join(targeted.DotNet, ","), strings.Join(wantChannels, ","); got != want {
+		t.Fatalf("bare .NET selector = %q, want the qemu-windows channels %q", got, want)
+	}
 	artifacts := bakeDotNetArtifacts(plan.DotNet)
-	if len(artifacts) != 3 {
-		t.Fatalf("got %d stable .NET artifacts, want 3", len(artifacts))
+	if len(artifacts) != len(plan.DotNet) {
+		t.Fatalf("got %d .NET artifacts, want %d", len(artifacts), len(plan.DotNet))
+	}
+	if len(bakeDotNetArtifacts(targeted.DotNet)) != len(wantChannels) {
+		t.Fatalf("bare .NET selector baked %d artifacts, want %d", len(bakeDotNetArtifacts(targeted.DotNet)), len(wantChannels))
 	}
 	if script := bakeDotNetInstallScript(plan.DotNet); !strings.Contains(script, "dotnet-10-0.zip") || !strings.Contains(script, imageVersionManifest.DotNet.Channels["10.0"].WindowsX64SHA512) {
 		t.Fatal("generated install script did not include .NET 10")
