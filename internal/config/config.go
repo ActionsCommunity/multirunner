@@ -253,7 +253,7 @@ type QEMU struct {
 // runner is launched via nerdctl; isolation auto-detects (process on Server,
 // hyperv on client) when left empty.
 type Containerd struct {
-	Address   string `yaml:"address"`   // containerd pipe (default \\.\pipe\containerd-multirunner)
+	Address   string `yaml:"address"`   // containerd pipe (default \\.\pipe\containerd-containerd)
 	Nerdctl   string `yaml:"nerdctl"`   // path to nerdctl.exe ("" => from PATH)
 	Namespace string `yaml:"namespace"` // containerd namespace (default "multirunner")
 	Isolation string `yaml:"isolation"` // process | hyperv | auto (default)
