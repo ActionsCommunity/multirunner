@@ -195,7 +195,7 @@ Flavor layering differs by OS. Linux uses `dotnet`/`rust` ⊃ `node` ⊃
 `native-build` and `go` ⊃ `native-build`. Windows uses `dotnet` ⊃ `node`, while
 `buildtools` is a separate branch. Each Build Tools major is a separate image;
 the unqualified flavor aliases the `default_line` in `images/versions.json`.
-The Node flavor caches every declared active LTS major on both operating
+The Node flavor caches every declared LTS major on both operating
 systems; the manifest `default_major` is exposed on `PATH`, and
 `actions/setup-node` selects another cached major without downloading it.
 The SDK channels assigned to Linux, Windows
@@ -213,16 +213,20 @@ versions, vendor checksums, and support/EOL dates. `native-build` has no separat
 upstream pin; its rolling Ubuntu packages are refreshed and validated by the
 weekly image build even when no maintenance PR is needed.
 
-Node's official release schedule is used to add a major automatically on the day
-it becomes LTS; non-LTS and future-LTS releases are ignored, and `default_major`
+Node's `supported-lts` track keeps every LTS major until its end-of-life,
+including majors that have moved to Maintenance LTS. Node's official release
+schedule is used to add a major automatically on the day it becomes LTS; non-LTS
+and future-LTS releases are ignored, and `default_major`
 remains an explicit choice. The .NET releases index is used to discover new
 active or maintenance LTS/STS channels. Because upstream cannot decide which
 multirunner image should carry a .NET channel, discoveries are written to
 `dotnet.unassigned_supported_channels` and fail the image policy check until a
 maintainer moves each channel under `dotnet.channels` and assigns any combination
 of `linux`, `windows-container`, and `qemu-windows` targets. Preview and EOL .NET
-channels are ignored. Declared Node and .NET lines fail the updater at EOL so
-removing support remains an explicit decision.
+channels are ignored. A declared Node or .NET line that has passed its EOL date
+is still refreshed — upstream simply stops publishing patches — but the updater
+annotates the run with a warning and the image policy check fails, so removing
+support remains an explicit decision.
 
 Dockerfiles and QEMU golden bakes consume the JSON directly; the only generated
 duplicates are the two Docker `ARG BASE` defaults, which must exist before a
@@ -306,8 +310,9 @@ hardware virtualization, especially while baking the golden image.
 multirunner bake --iso WinServer2022Eval.iso --golden /var/lib/multirunner/golden.qcow2
 # bake toolchains into the golden (the VM equivalent of container flavors):
 multirunner bake --iso WinServer2022Eval.iso --golden golden.qcow2 --tools dotnet,node,buildtools
-# exact, combinable selectors are also supported:
-multirunner bake --iso WinServer2022Eval.iso --golden golden.qcow2 --tools dotnet:10,buildtools:17,buildtools:18
+# exact, combinable selectors are also supported (two Build Tools lines are two
+# full Visual Studio installs, so raise --disk-gb well above the 40 GB default):
+multirunner bake --iso WinServer2022Eval.iso --golden golden.qcow2 --disk-gb 120 --tools dotnet:10,buildtools:17,buildtools:18
 # optionally reject an ISO that does not match the licensed media you selected:
 multirunner bake --iso WinServer2022.iso --iso-sha256 <sha256> --golden golden.qcow2
 ```
@@ -315,12 +320,17 @@ multirunner bake --iso WinServer2022.iso --iso-sha256 <sha256> --golden golden.q
 The QEMU backend boots the baked golden image and **ignores `image`/`image_tier`**
 (those only apply to container backends — multirunner warns if you set them on a
 qemu pool). To give a VM runner toolchains, bake them in with `--tools`
-(`dotnet` = every stable supported SDK channel; `dotnet:8`, `dotnet:9`, and
-`dotnet:10` select exact majors; `node` = every active LTS major while
-`node:22` and `node:24` select exact majors; `buildtools` selects the manifest
-default; `buildtools:17` and `buildtools:18` are exact and may be combined).
+(`dotnet` = the SDK channels carrying the `qemu-windows` target in
+`images/versions.json`, minus any that have reached EOL; `dotnet:8`, `dotnet:9`,
+and `dotnet:10` select exact majors and fail if that major is no longer
+supported; `node` = every declared LTS major while `node:22` and `node:24` select
+exact majors; `buildtools` selects the manifest `default_line`; `buildtools:17`
+and `buildtools:18` are exact and may be combined — each line is a full Visual
+Studio install, so combining them needs a larger `--disk-gb` than the 40 GB
+default and roughly doubles the bake's install budget).
 List the same tools
 under `qemu.tools` so an auto-rebuild reuses them; changing the set re-bakes.
+Invalid selectors are rejected at config load.
 Built-in bakes pin and verify the runner, MinGit, Node, Go, .NET SDKs, and Visual
 Studio Build Tools. The Windows ISO content and every selected payload identity
 are part of the golden fingerprint. Downloads are checked before execution or

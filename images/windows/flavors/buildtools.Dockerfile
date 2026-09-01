@@ -49,7 +49,7 @@ RUN $manifest = (Get-Content C:/image-versions.json -Raw | ConvertFrom-Json).bui
     if ([string]::IsNullOrWhiteSpace($env:TEMP)) { throw 'TEMP is empty; refusing cleanup' }; \
     $tempPath = [IO.Path]::GetFullPath($env:TEMP).TrimEnd('\'); \
     $allowedTempPaths = @('C:\Users\ContainerAdministrator\AppData\Local\Temp', 'C:\Windows\Temp'); \
-    if ($tempPath -notin $allowedTempPaths) { throw (\"unexpected TEMP path; refusing cleanup: $tempPath\") }; \
+    if ($tempPath -notin $allowedTempPaths) { throw ('unexpected TEMP path; refusing cleanup: {0}' -f $tempPath) }; \
     Get-ChildItem -LiteralPath $tempPath -Force | Remove-Item -Recurse -Force
 
 # vswhere.exe is installed by the VS Installer bootstrapper (not the workload) at

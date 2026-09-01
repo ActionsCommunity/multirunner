@@ -154,6 +154,7 @@ jobs:
     runs-on: windows-2025
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/wait-for-docker
 
       - uses: docker/login-action@v3
         with:

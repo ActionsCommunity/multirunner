@@ -77,7 +77,11 @@ func (m *Manager) EnsureMirror(ctx context.Context, repoSlug string) (string, er
 	lock := m.repoLock(repoSlug)
 	lock.Lock()
 	defer lock.Unlock()
+	return m.ensureMirrorLocked(ctx, repoSlug)
+}
 
+// ensureMirrorLocked is EnsureMirror for callers that already hold the repo lock.
+func (m *Manager) ensureMirrorLocked(ctx context.Context, repoSlug string) (string, error) {
 	path := m.MirrorPath(repoSlug)
 	cloneURL := m.cloneURL(repoSlug)
 
@@ -106,20 +110,21 @@ func (m *Manager) touch(mirrorPath string) {
 	_ = os.WriteFile(filepath.Join(mirrorPath, lastUsedFile), nil, 0o644)
 }
 
-// lastUsed returns when a mirror was last touched, falling back to the mirror
-// directory's own mtime if the marker is missing (older mirrors).
-func lastUsed(mirrorPath string) time.Time {
-	if fi, err := os.Stat(filepath.Join(mirrorPath, lastUsedFile)); err == nil {
-		return fi.ModTime()
+// lastUsed returns when a mirror was last touched. Every clone, fetch, and
+// bundle writes the marker, so a bare repository without one was not created by
+// this manager; the second result is false and the caller must leave it alone.
+func lastUsed(mirrorPath string) (time.Time, bool) {
+	fi, err := os.Stat(filepath.Join(mirrorPath, lastUsedFile))
+	if err != nil {
+		return time.Time{}, false
 	}
-	if fi, err := os.Stat(mirrorPath); err == nil {
-		return fi.ModTime()
-	}
-	return time.Time{}
+	return fi.ModTime(), true
 }
 
 // Sweep removes bare mirrors not used within maxAge. maxAge <= 0 disables it.
-// Returns the number of mirrors removed.
+// Only mirrors carrying this manager's last-used marker are candidates: the
+// cache root may be shared with bare repositories the operator keeps for other
+// reasons, and those are never deleted. Returns the number of mirrors removed.
 func (m *Manager) Sweep(ctx context.Context, maxAge time.Duration) (int, error) {
 	if maxAge <= 0 {
 		return 0, nil
@@ -133,14 +138,28 @@ func (m *Manager) Sweep(ctx context.Context, maxAge time.Duration) (int, error) 
 		if !info.IsDir() || !strings.HasSuffix(path, ".git") || !mirrorExists(path) {
 			return nil
 		}
-		if lastUsed(path).Before(cutoff) {
+		used, owned := lastUsed(path)
+		if !owned {
+			m.logger.Debug("skipping bare repository not created by the mirror cache", "path", path)
+			return filepath.SkipDir
+		}
+		if used.Before(cutoff) {
 			lock := m.repoLock(m.slugFor(path))
 			lock.Lock()
-			rmErr := os.RemoveAll(path)
+			// Re-check under the lock: a job may have refreshed the mirror
+			// between the walk and the removal.
+			used, owned = lastUsed(path)
+			stale := owned && used.Before(cutoff)
+			var rmErr error
+			if stale {
+				rmErr = os.RemoveAll(path)
+			}
 			lock.Unlock()
-			if rmErr != nil {
+			switch {
+			case !stale:
+			case rmErr != nil:
 				m.logger.Warn("mirror sweep remove failed", "path", path, "err", rmErr)
-			} else {
+			default:
 				m.logger.Info("mirror swept (stale)", "path", path)
 				removed++
 			}
@@ -164,13 +183,15 @@ func (m *Manager) slugFor(mirrorPath string) string {
 // objects, no GitHub bandwidth) and re-points origin at GitHub so checkout
 // fetches only the delta. The bundle carries objects only — no credentials.
 func (m *Manager) Bundle(ctx context.Context, repoSlug string, w io.Writer) error {
-	path, err := m.EnsureMirror(ctx, repoSlug)
-	if err != nil {
-		return err
-	}
+	// Hold the repo lock across the refresh and the bundle so a concurrent
+	// sweep cannot remove the mirror in between.
 	lock := m.repoLock(repoSlug)
 	lock.Lock()
 	defer lock.Unlock()
+	path, err := m.ensureMirrorLocked(ctx, repoSlug)
+	if err != nil {
+		return err
+	}
 	cmd := exec.CommandContext(ctx, "git", "--git-dir="+path, "bundle", "create", "-", "--all")
 	// Bundle creation is entirely local. Do not expose the mirror PAT to a
 	// subprocess that cannot use it.
@@ -231,7 +252,10 @@ func (m *Manager) git(ctx context.Context, gitDir string, args ...string) error 
 // a dense, validated list before the credential is appended. URL rewrites are
 // excluded because they could redirect the configured GitHub URL to another
 // host after authentication was attached. Inherited Authorization headers are
-// also excluded to prevent duplicate credentials.
+// also excluded to prevent duplicate credentials. GIT_CONFIG_PARAMETERS is the
+// other environment channel Git reads at the same precedence (it is how `git -c`
+// reaches subprocesses); it is dropped outright because its contents cannot be
+// filtered the same way.
 func (m *Manager) gitEnv() []string {
 	return m.buildGitEnv(true)
 }
@@ -261,7 +285,8 @@ func (m *Manager) buildGitEnv(includeAuth bool) []string {
 		if err != nil || parsed < 0 {
 			m.logger.Warn("ignoring unusable GIT_CONFIG_COUNT", "value", raw)
 		} else if parsed > maxInheritedGitConfigEntries {
-			m.logger.Warn("ignoring oversized inherited git config", "count", parsed, "max", maxInheritedGitConfigEntries)
+			m.logger.Warn("truncating oversized inherited git config", "count", parsed, "max", maxInheritedGitConfigEntries)
+			count = maxInheritedGitConfigEntries
 		} else {
 			count = parsed
 		}
@@ -272,6 +297,10 @@ func (m *Manager) buildGitEnv(includeAuth bool) []string {
 	for i := 0; i < count; i++ {
 		key, keyOK := os.LookupEnv(fmt.Sprintf("GIT_CONFIG_KEY_%d", i))
 		value, valueOK := os.LookupEnv(fmt.Sprintf("GIT_CONFIG_VALUE_%d", i))
+		if !keyOK && !valueOK {
+			m.logger.Warn("inherited git config ends before GIT_CONFIG_COUNT", "index", i, "count", count)
+			break
+		}
 		if !keyOK || !valueOK || strings.TrimSpace(key) == "" {
 			m.logger.Warn("ignoring incomplete inherited git config", "index", i)
 			continue
@@ -304,12 +333,17 @@ func (m *Manager) buildGitEnv(includeAuth bool) []string {
 	return env
 }
 
+// stripIndexedGitConfig removes every environment channel through which Git
+// reads configuration: the indexed GIT_CONFIG_COUNT/KEY/VALUE list and
+// GIT_CONFIG_PARAMETERS. Names are compared case-insensitively because Windows
+// environment variables are, and os/exec resolves them the same way there.
 func stripIndexedGitConfig(env []string) []string {
 	out := env[:0]
 	for _, item := range env {
 		key, _, _ := strings.Cut(item, "=")
-		if key == "GIT_CONFIG_COUNT" || strings.HasPrefix(key, "GIT_CONFIG_KEY_") ||
-			strings.HasPrefix(key, "GIT_CONFIG_VALUE_") {
+		upper := strings.ToUpper(key)
+		if upper == "GIT_CONFIG_COUNT" || upper == "GIT_CONFIG_PARAMETERS" ||
+			strings.HasPrefix(upper, "GIT_CONFIG_KEY_") || strings.HasPrefix(upper, "GIT_CONFIG_VALUE_") {
 			continue
 		}
 		out = append(out, item)

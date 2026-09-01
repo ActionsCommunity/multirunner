@@ -77,6 +77,51 @@ pools:
 	}
 }
 
+func TestLoadRejectsUnknownQEMUToolSelectors(t *testing.T) {
+	// bake_iso is deliberately absent: without load-time validation a typo here
+	// is never reported at all, because no rebuild ever resolves the selectors.
+	for name, tools := range map[string]string{
+		"unknown node major": `[node:23]`,
+		"unknown kind":       `[nodejs]`,
+		"trailing colon":     `[buildtools:]`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := writeConfig(t, `
+github: {scope: org, owner: myorg}
+auth: {pat: ghp_x}
+pools:
+  - name: windows-vm
+    os: windows
+    backend: qemu
+    qemu:
+      golden: golden.qcow2
+      tools: `+tools+"\n")
+			_, err := Load(p)
+			if err == nil {
+				t.Fatalf("tools %s should fail config load", tools)
+			}
+			if !strings.Contains(err.Error(), "windows-vm") || !strings.Contains(err.Error(), "qemu.tools") {
+				t.Fatalf("error should name the pool and field: %v", err)
+			}
+		})
+	}
+
+	p := writeConfig(t, `
+github: {scope: org, owner: myorg}
+auth: {pat: ghp_x}
+pools:
+  - name: windows-vm
+    os: windows
+    backend: qemu
+    qemu:
+      golden: golden.qcow2
+      tools: [dotnet, "node:24", "buildtools:17", "buildtools:18"]
+`)
+	if _, err := Load(p); err != nil {
+		t.Fatalf("valid selectors rejected: %v", err)
+	}
+}
+
 func TestValidateErrors(t *testing.T) {
 	cases := map[string]string{
 		"repo without repo": `

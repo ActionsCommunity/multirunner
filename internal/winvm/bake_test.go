@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -132,25 +133,234 @@ func TestToolsHash(t *testing.T) {
 }
 
 func TestToolsHashFingerprintsEveryPayloadIdentity(t *testing.T) {
-	artifacts, err := bakeArtifacts("", "", []string{"node", "go", "dotnet", "buildtools"})
+	tools := []string{"node", "go", "dotnet", "buildtools"}
+	artifacts, err := bakeArtifacts("", "", tools)
 	if err != nil {
 		t.Fatal(err)
 	}
-	base := toolsHashResolved([]string{"node", "go", "dotnet", "buildtools"}, "iso-digest", artifacts)
+	files, err := AutounattendFiles(DefaultRunnerVersion, "", toolsHashAdminPassword, tools)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := toolsHashResolved(tools, "iso-digest", artifacts, files)
 	for i, artifact := range artifacts {
 		if artifact.Version == "" {
 			t.Errorf("%s has no exact version identity", artifact.Name)
 		}
 		changed := append([]bakeArtifact(nil), artifacts...)
 		changed[i].Digest = strings.Repeat("f", len(artifact.Digest))
-		if got := toolsHashResolved([]string{"node", "go", "dotnet", "buildtools"}, "iso-digest", changed); got == base {
+		if got := toolsHashResolved(tools, "iso-digest", changed, files); got == base {
 			t.Errorf("%s digest did not affect ToolsHash", artifact.Name)
 		}
 		changed = append([]bakeArtifact(nil), artifacts...)
 		changed[i].Version += ".changed"
-		if got := toolsHashResolved([]string{"node", "go", "dotnet", "buildtools"}, "iso-digest", changed); got == base {
+		if got := toolsHashResolved(tools, "iso-digest", changed, files); got == base {
 			t.Errorf("%s version did not affect ToolsHash", artifact.Name)
 		}
+	}
+	for name := range files {
+		mutated := map[string]string{}
+		for key, value := range files {
+			mutated[key] = value
+		}
+		mutated[name] += "\n# changed\n"
+		if got := toolsHashResolved(tools, "iso-digest", artifacts, mutated); got == base {
+			t.Errorf("rendered %s did not affect ToolsHash", name)
+		}
+	}
+}
+
+// The rendered install script decides which Node major lands on PATH and which
+// Build Tools line VSBUILDTOOLS points at. Neither is visible in the canonical
+// selectors, the artifact identities, or the raw templates.
+func TestToolsHashTracksManifestDefaults(t *testing.T) {
+	iso := filepath.Join(t.TempDir(), "windows.iso")
+	if err := os.WriteFile(iso, []byte("iso"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hash := func(tools ...string) string {
+		t.Helper()
+		got, err := ToolsHash(BakeOptions{WindowsISO: iso, Tools: tools})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+
+	other := 0
+	for major := range imageVersionManifest.Node.Releases {
+		value, err := strconv.Atoi(major)
+		if err != nil {
+			t.Fatalf("invalid Node major %q", major)
+		}
+		if value != imageVersionManifest.Node.DefaultMajor {
+			other = value
+		}
+	}
+	if other == 0 {
+		t.Skip("manifest declares a single Node major")
+	}
+	before := hash("node")
+	savedMajor := imageVersionManifest.Node.DefaultMajor
+	t.Cleanup(func() { imageVersionManifest.Node.DefaultMajor = savedMajor })
+	imageVersionManifest.Node.DefaultMajor = other
+	if after := hash("node"); after == before {
+		t.Errorf("node.default_major %d -> %d did not change ToolsHash (%s)", savedMajor, other, after)
+	}
+	imageVersionManifest.Node.DefaultMajor = savedMajor
+
+	otherLine := ""
+	for line := range imageVersionManifest.BuildTools.Lines {
+		if line != imageVersionManifest.BuildTools.DefaultLine {
+			otherLine = line
+		}
+	}
+	if otherLine == "" {
+		return
+	}
+	beforeTools := hash("buildtools:17", "buildtools:18")
+	savedLine := imageVersionManifest.BuildTools.DefaultLine
+	t.Cleanup(func() { imageVersionManifest.BuildTools.DefaultLine = savedLine })
+	imageVersionManifest.BuildTools.DefaultLine = otherLine
+	if after := hash("buildtools:17", "buildtools:18"); after == beforeTools {
+		t.Errorf("buildtools.default_line %q -> %q did not change ToolsHash", savedLine, otherLine)
+	}
+	imageVersionManifest.BuildTools.DefaultLine = savedLine
+}
+
+func TestToolsHashIgnoresAdminPassword(t *testing.T) {
+	iso := filepath.Join(t.TempDir(), "windows.iso")
+	if err := os.WriteFile(iso, []byte("iso"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	first, err := ToolsHash(BakeOptions{WindowsISO: iso, AdminPassword: "One!1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := ToolsHash(BakeOptions{WindowsISO: iso, AdminPassword: "Two!2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != second {
+		t.Error("rotating the admin password must not force a golden rebuild")
+	}
+}
+
+func TestBakeTimeoutScalesWithToolPlan(t *testing.T) {
+	timeout := func(tools ...string) time.Duration {
+		t.Helper()
+		o := BakeOptions{Tools: tools}
+		o.defaults()
+		return o.Timeout
+	}
+	if got := timeout(); got != bakeBaseTimeout {
+		t.Errorf("minimal bake timeout = %s, want %s", got, bakeBaseTimeout)
+	}
+	if got, want := timeout("node"), bakeToolchainTimeout; got != want {
+		t.Errorf("node bake timeout = %s, want %s", got, want)
+	}
+	if got, want := timeout("buildtools"), bakeBaseTimeout+bakeBuildToolsTimeout; got != want {
+		t.Errorf("single Build Tools bake timeout = %s, want %s", got, want)
+	}
+	both := timeout("buildtools:17", "buildtools:18")
+	if want := bakeBaseTimeout + 2*bakeBuildToolsTimeout; both != want {
+		t.Errorf("combined Build Tools bake timeout = %s, want %s", both, want)
+	}
+	if single := timeout("buildtools:17"); both <= single {
+		t.Errorf("combining Build Tools lines did not extend the timeout (%s vs %s)", both, single)
+	}
+	if got := timeout("buildtools:17", "buildtools:18", "dotnet", "node", "go"); got != both {
+		t.Errorf("toolchain floor lowered the Build Tools timeout: %s", got)
+	}
+	explicit := BakeOptions{Tools: []string{"buildtools"}, Timeout: 3 * time.Minute}
+	explicit.defaults()
+	if explicit.Timeout != 3*time.Minute {
+		t.Errorf("explicit Timeout override = %s, want 3m0s", explicit.Timeout)
+	}
+}
+
+func TestBareDotNetSelectorSkipsUnsupportedChannels(t *testing.T) {
+	channels := imageVersionManifest.DotNet.ChannelsForTarget(imageversions.DotNetTargetQEMUWindows)
+	if len(channels) < 2 {
+		t.Skip("need at least two qemu-windows channels")
+	}
+	saved := imageVersionManifest.DotNet.Channels
+	t.Cleanup(func() { imageVersionManifest.DotNet.Channels = saved })
+	withPhase := func(eol ...string) {
+		replaced := make(map[string]imageversions.DotNetChannel, len(saved))
+		for channel, release := range saved {
+			for _, name := range eol {
+				if channel == name {
+					release.SupportPhase = "eol"
+				}
+			}
+			replaced[channel] = release
+		}
+		imageVersionManifest.DotNet.Channels = replaced
+	}
+
+	withPhase(channels[0])
+	plan, err := resolveToolPlan([]string{"dotnet"})
+	if err != nil {
+		t.Fatalf("bare dotnet selector must survive an EOL channel: %v", err)
+	}
+	for _, channel := range plan.DotNet {
+		if channel == channels[0] {
+			t.Errorf("EOL channel %q was still baked", channel)
+		}
+	}
+	if len(plan.DotNet) != len(channels)-1 {
+		t.Errorf("bare dotnet selector resolved %v, want the remaining %d channels", plan.DotNet, len(channels)-1)
+	}
+	// An exact selector stays strict: silently dropping it would ship a golden
+	// without the SDK the config asked for.
+	if _, err := resolveToolPlan([]string{"dotnet:" + dotNetChannelMajor(channels[0])}); err == nil {
+		t.Error("exact selector for an EOL channel should fail")
+	}
+
+	withPhase(channels...)
+	if _, err := resolveToolPlan([]string{"dotnet"}); err == nil {
+		t.Error("bare dotnet selector should fail when no channel is supported")
+	}
+}
+
+func TestToolSelectorRejectsEmptyVersion(t *testing.T) {
+	for _, selector := range []string{"node:", "buildtools:", "go:", "dotnet:"} {
+		_, err := resolveToolPlan([]string{selector})
+		if err == nil {
+			t.Errorf("selector %q should fail", selector)
+			continue
+		}
+		if !strings.Contains(err.Error(), "empty version") {
+			t.Errorf("selector %q error = %v, want an empty-version message", selector, err)
+		}
+	}
+}
+
+func TestDotNetSelectorMatchesChannelMajorNumerically(t *testing.T) {
+	saved := imageVersionManifest.DotNet.Channels
+	t.Cleanup(func() { imageVersionManifest.DotNet.Channels = saved })
+	replaced := make(map[string]imageversions.DotNetChannel, len(saved)+1)
+	for channel, release := range saved {
+		replaced[channel] = release
+	}
+	base := saved[imageVersionManifest.DotNet.ChannelsForTarget(imageversions.DotNetTargetQEMUWindows)[0]]
+	base.SupportPhase = "active"
+	replaced["41.1"] = base
+	imageVersionManifest.DotNet.Channels = replaced
+
+	plan, err := resolveToolPlan([]string{"dotnet:41"})
+	if err != nil {
+		t.Fatalf("dotnet:41 should match channel 41.1: %v", err)
+	}
+	if got, want := strings.Join(plan.DotNet, ","), "41.1"; got != want {
+		t.Errorf("resolved channels = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(plan.Canonical, ","), "dotnet:41"; got != want {
+		t.Errorf("canonical selector = %q, want %q", got, want)
+	}
+	if _, err := resolveToolPlan([]string{"dotnet:41.1"}); err == nil {
+		t.Error("a dotted .NET selector should not resolve")
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GerardSmit/multirunner/internal/config"
 	"github.com/GerardSmit/multirunner/internal/winvm"
@@ -442,6 +443,42 @@ func TestWarnNoSelfHostedWorkflowsSkipsNonRepoScope(t *testing.T) {
 		out := captureStdout(t, func() { warnNoSelfHostedWorkflows(context.Background(), cfg) })
 		if out != "" {
 			t.Errorf("scope=%s produced output: %q", scope, out)
+		}
+	}
+}
+
+func TestRemoteCheckBudgetScalesWithRepoWaves(t *testing.T) {
+	cases := []struct {
+		repos int
+		want  time.Duration
+	}{
+		{0, remoteCheckTimeout},
+		{1, remoteCheckTimeout},
+		{repoCheckConcurrency * 4, remoteCheckTimeout},
+		{repoCheckConcurrency*4 + 1, 5 * remoteRepoCheckTimeout},
+		{repoCheckConcurrency * 10, 10 * remoteRepoCheckTimeout},
+	}
+	for _, tc := range cases {
+		if got := remoteCheckBudget(tc.repos); got != tc.want {
+			t.Errorf("remoteCheckBudget(%d) = %v, want %v", tc.repos, got, tc.want)
+		}
+	}
+}
+
+func TestTCGReasonNamesTheActualCause(t *testing.T) {
+	cases := []struct {
+		detected     bool
+		goos, goarch string
+		want         string
+	}{
+		{false, "linux", "amd64", "qemu.accel is set to tcg"},
+		{true, "darwin", "arm64", "x86-64 hardware acceleration requires an x86-64 host"},
+		{true, "linux", "amd64", "/dev/kvm is missing or not accessible to this user"},
+		{true, "freebsd", "amd64", "no hardware accelerator is available on this host"},
+	}
+	for _, tc := range cases {
+		if got := tcgReason(tc.detected, tc.goos, tc.goarch); got != tc.want {
+			t.Errorf("tcgReason(%v, %s, %s) = %q, want %q", tc.detected, tc.goos, tc.goarch, got, tc.want)
 		}
 	}
 }

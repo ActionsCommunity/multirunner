@@ -279,8 +279,10 @@ type nodeLifecycle struct {
 	End string `json:"end"`
 }
 
+// discoverNodeLTS declares every LTS major until its end-of-life, so a major
+// that has moved from Active LTS to Maintenance LTS stays in the manifest.
 func discoverNodeLTS(node *imageversions.Node, schedule map[string]nodeLifecycle, today string) error {
-	if node.Track != "active-lts" {
+	if node.Track != imageversions.NodeTrackSupportedLTS {
 		return fmt.Errorf("unsupported Node tracking policy %q", node.Track)
 	}
 	for version, lifecycle := range schedule {
@@ -451,11 +453,22 @@ func (u updater) refreshRust(ctx context.Context, m *imageversions.Manifest) err
 	if version == "" {
 		return errors.New("Rust channel manifest has no pkg.rust version")
 	}
-	x64, _, err := u.download(ctx, "https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init.sha256")
+	// Pin rustup itself: the unversioned "dist" path is mutable, so a pinned
+	// digest against it breaks the image build on every rustup release.
+	stable, _, err := u.download(ctx, "https://static.rust-lang.org/rustup/release-stable.toml")
+	if err != nil {
+		return fmt.Errorf("rustup release channel: %w", err)
+	}
+	rustupVersion := rustupReleaseVersion(stable)
+	if rustupVersion == "" {
+		return errors.New("rustup release channel has no version")
+	}
+	archive := "https://static.rust-lang.org/rustup/archive/" + rustupVersion + "/"
+	x64, _, err := u.download(ctx, archive+"x86_64-unknown-linux-gnu/rustup-init.sha256")
 	if err != nil {
 		return fmt.Errorf("rustup x64 checksum: %w", err)
 	}
-	arm64, _, err := u.download(ctx, "https://static.rust-lang.org/rustup/dist/aarch64-unknown-linux-gnu/rustup-init.sha256")
+	arm64, _, err := u.download(ctx, archive+"aarch64-unknown-linux-gnu/rustup-init.sha256")
 	if err != nil {
 		return fmt.Errorf("rustup arm64 checksum: %w", err)
 	}
@@ -465,6 +478,7 @@ func (u updater) refreshRust(ctx context.Context, m *imageversions.Manifest) err
 		return errors.New("rustup checksum response is empty")
 	}
 	m.Rust.Version = version
+	m.Rust.RustupVersion = rustupVersion
 	m.Rust.RustupX64SHA256 = x64Fields[0]
 	m.Rust.RustupARM64SHA256 = arm64Fields[0]
 	return nil
@@ -505,12 +519,16 @@ func (u updater) refreshBuildTools(ctx context.Context, m *imageversions.Manifes
 	return nil
 }
 
+// supported keeps refreshing an entry past its EOL date — upstream simply stops
+// publishing patches — but annotates the run so the weekly refresh still lands
+// while the maintainer decides whether to drop the line. The image policy check
+// fails the build separately.
 func (u updater) supported(name, eol string) error {
 	if eol == "" {
 		return fmt.Errorf("%s has no EOL date", name)
 	}
 	if eol < u.today {
-		return fmt.Errorf("%s reached end of life on %s; update the declared support policy intentionally", name, eol)
+		fmt.Printf("::warning title=End-of-life dependency declared::%s reached end of life on %s; remove it from images/versions.json or retain it intentionally\n", name, eol)
 	}
 	return nil
 }
@@ -693,6 +711,24 @@ func rustVersion(body []byte) string {
 			}
 			return strings.Trim(value, "\"")
 		}
+	}
+	return ""
+}
+
+// rustupReleaseVersion reads the top-level `version = '1.29.1'` key from
+// release-stable.toml, which quotes values with single quotes.
+func rustupReleaseVersion(body []byte) string {
+	scanner := bufio.NewScanner(bytes.NewReader(body))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if strings.HasPrefix(line, "[") {
+			return ""
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok || strings.TrimSpace(key) != "version" {
+			continue
+		}
+		return strings.Trim(strings.TrimSpace(value), "'\"")
 	}
 	return ""
 }

@@ -32,7 +32,7 @@
     "strategy": "rolling packages are refreshed and validated on each image build"
   },
   "node": {
-    "track": "active-lts",
+    "track": "supported-lts",
     "default_major": 22,
     "releases": {
       "22": {
@@ -108,6 +108,7 @@
   "rust": {
     "channel": "stable",
     "version": "1.98.0",
+    "rustup_version": "1.29.1",
     "rustup_x64_sha256": "dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71",
     "rustup_arm64_sha256": "15f6e4ce9f583b929c996c91562bad6d4454f3281de858b02cdfdef615fac433"
   },

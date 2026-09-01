@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	imageversions "github.com/GerardSmit/multirunner/images"
+	"github.com/GerardSmit/multirunner/internal/winvm"
 	"gopkg.in/yaml.v3"
 )
 
@@ -563,6 +564,11 @@ func (c *Config) Validate() error {
 		if p.Backend == "qemu" {
 			if p.QEMU.Golden == "" {
 				return fmt.Errorf("pools[%q].qemu.golden is required for backend: qemu", p.Name)
+			}
+			// Without this a typo'd selector is only caught when an auto-rebuild
+			// runs, and never at all when bake_iso is unset.
+			if err := winvm.ValidateToolSelectors(p.QEMU.Tools); err != nil {
+				return fmt.Errorf("pools[%q].qemu.tools: %w", p.Name, err)
 			}
 		} else if p.Docker.Host == "" {
 			return fmt.Errorf("pools[%q].docker.host is required", p.Name)

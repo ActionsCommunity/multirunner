@@ -14,7 +14,9 @@ ENV DOTNET_ROOT=/usr/local/dotnet \
 ENV PATH=${DOTNET_ROOT}:${DOTNET_ROOT}/tools:${PATH}
 COPY images/versions.json /tmp/image-versions.json
 # Pin the exact SDK archives and verify the SHA512 values from Microsoft's
-# release metadata before extracting them.
+# release metadata before extracting them. Channels are extracted oldest first
+# because every SDK shares one DOTNET_ROOT: the last-extracted `dotnet` host and
+# hostfxr win, and only the newest host can run every installed SDK.
 RUN arch="$(dpkg --print-architecture)" \
     && mkdir -p "${DOTNET_ROOT}" \
     && case "$arch" in \
@@ -22,7 +24,7 @@ RUN arch="$(dpkg --print-architecture)" \
          arm64) dotnet_arch=arm64 ;; \
          *) echo "unsupported arch: $arch" && exit 1 ;; \
        esac \
-    && channels="$(jq -er '.dotnet.channels | to_entries[] | select(.value.targets | index("linux")) | .key' /tmp/image-versions.json)" \
+    && channels="$(jq -er '.dotnet.channels | to_entries | map(select(.value.targets | index("linux"))) | sort_by(.key | split(".") | map(tonumber)) | .[].key' /tmp/image-versions.json)" \
     && for channel in $channels; do \
          version="$(jq -er --arg channel "$channel" '.dotnet.channels[$channel].version' /tmp/image-versions.json)" \
          && sha="$(jq -er --arg channel "$channel" --arg key "linux_${dotnet_arch}_sha512" '.dotnet.channels[$channel][$key]' /tmp/image-versions.json)" \

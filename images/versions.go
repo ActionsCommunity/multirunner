@@ -65,6 +65,10 @@ type NativeBuild struct {
 	Strategy      string `json:"strategy"`
 }
 
+// NodeTrackSupportedLTS declares that the manifest carries every LTS major until
+// its end-of-life, which includes majors that have moved to Maintenance LTS.
+const NodeTrackSupportedLTS = "supported-lts"
+
 type Node struct {
 	Track        string                 `json:"track"`
 	DefaultMajor int                    `json:"default_major"`
@@ -140,6 +144,7 @@ type Go struct {
 type Rust struct {
 	Channel           string `json:"channel"`
 	Version           string `json:"version"`
+	RustupVersion     string `json:"rustup_version"`
 	RustupX64SHA256   string `json:"rustup_x64_sha256"`
 	RustupARM64SHA256 string `json:"rustup_arm64_sha256"`
 }
@@ -245,7 +250,7 @@ func (m Manifest) Validate() error {
 			return fmt.Errorf("%s digest: %w", name, err)
 		}
 	}
-	if m.Minimal.Runner.Version == "" || m.Minimal.MinGit.Version == "" || m.Minimal.MinGit.URL == "" || m.Minimal.PowerShell.Version == "" || m.Go.Version == "" || m.Rust.Channel == "" || m.Rust.Version == "" {
+	if m.Minimal.Runner.Version == "" || m.Minimal.MinGit.Version == "" || m.Minimal.MinGit.URL == "" || m.Minimal.PowerShell.Version == "" || m.Go.Version == "" || m.Rust.Channel == "" || m.Rust.Version == "" || m.Rust.RustupVersion == "" {
 		return fmt.Errorf("resolved tool versions and URLs are required")
 	}
 	for major, r := range m.Node.Releases {
@@ -312,7 +317,7 @@ func (m Manifest) ValidatePolicy() error {
 	if len(m.Node.Releases) == 0 {
 		return fmt.Errorf("at least one Node major is required")
 	}
-	if m.Node.Track != "active-lts" {
+	if m.Node.Track != NodeTrackSupportedLTS {
 		return fmt.Errorf("unsupported Node tracking policy %q", m.Node.Track)
 	}
 	if _, ok := m.Node.DefaultRelease(); !ok {

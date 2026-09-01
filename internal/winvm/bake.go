@@ -228,6 +228,9 @@ func resolveToolPlan(tools []string) (bakeToolPlan, error) {
 		version := ""
 		if len(parts) == 2 {
 			version = parts[1]
+			if version == "" {
+				return bakeToolPlan{}, fmt.Errorf("tool selector %q has an empty version; drop the colon to use the default", selector)
+			}
 		}
 		switch kind {
 		case "node":
@@ -254,22 +257,32 @@ func resolveToolPlan(tools []string) (bakeToolPlan, error) {
 			canonical[kind] = true
 			kinds[kind] = true
 		case "dotnet":
-			channels := []string{}
 			if version == "" {
 				// The bare selector follows the manifest's target assignment: a
 				// channel carried only by the Windows container images must not be
-				// baked into every golden. Exact selectors below stay explicit.
-				channels = imageVersionManifest.DotNet.ChannelsForTarget(imageversions.DotNetTargetQEMUWindows)
+				// baked into every golden. An assigned channel is allowed to reach
+				// EOL in the manifest, so unsupported ones are skipped here rather
+				// than failing every existing config on the EOL date; an exact
+				// selector below still errors.
+				added := 0
+				for _, channel := range imageVersionManifest.DotNet.ChannelsForTarget(imageversions.DotNetTargetQEMUWindows) {
+					if !bakeableDotNetChannel(imageVersionManifest.DotNet.Channels[channel]) {
+						continue
+					}
+					dotnet[channel] = true
+					canonical["dotnet:"+dotNetChannelMajor(channel)] = true
+					added++
+				}
+				if added == 0 {
+					return bakeToolPlan{}, fmt.Errorf("no supported .NET channel is assigned to the golden image; select an exact major")
+				}
 			} else {
-				channels = []string{version + ".0"}
-			}
-			for _, channel := range channels {
-				release, ok := imageVersionManifest.DotNet.Channels[channel]
-				if !ok || release.WindowsX64SHA512 == "" || (release.SupportPhase != "active" && release.SupportPhase != "maintenance") {
-					return bakeToolPlan{}, fmt.Errorf("unsupported stable .NET major %q", strings.TrimSuffix(channel, ".0"))
+				channel, ok := dotNetChannelForMajor(version)
+				if !ok || !bakeableDotNetChannel(imageVersionManifest.DotNet.Channels[channel]) {
+					return bakeToolPlan{}, fmt.Errorf("unsupported stable .NET major %q", version)
 				}
 				dotnet[channel] = true
-				canonical["dotnet:"+strings.TrimSuffix(channel, ".0")] = true
+				canonical["dotnet:"+dotNetChannelMajor(channel)] = true
 			}
 			kinds[kind] = true
 		case "buildtools":
@@ -295,6 +308,53 @@ func resolveToolPlan(tools []string) (bakeToolPlan, error) {
 		BuildTools: sortedVersionKeys(buildtools),
 	}
 	return plan, nil
+}
+
+// ValidateToolSelectors reports whether every golden tool selector resolves, so
+// a typo in a pool's qemu.tools fails at config load instead of at bake time (or
+// never, when the pool has no bake_iso).
+func ValidateToolSelectors(tools []string) error {
+	_, err := resolveToolPlan(tools)
+	return err
+}
+
+// dotNetChannelMajor returns the major component of a manifest channel key
+// ("8.0" -> "8").
+func dotNetChannelMajor(channel string) string {
+	return strings.SplitN(channel, ".", 2)[0]
+}
+
+// dotNetChannelForMajor resolves a `dotnet:<major>` selector by comparing the
+// numeric major of each manifest channel key, rather than fabricating a
+// "<major>.0" key that a channel such as "8.1" could never match. When a major
+// carries several channels the highest minor wins.
+func dotNetChannelForMajor(major string) (string, bool) {
+	want, err := strconv.Atoi(major)
+	if err != nil {
+		return "", false
+	}
+	best, bestMinor := "", -1
+	for channel := range imageVersionManifest.DotNet.Channels {
+		got, err := strconv.Atoi(dotNetChannelMajor(channel))
+		if err != nil || got != want {
+			continue
+		}
+		minor := 0
+		if parts := strings.SplitN(channel, ".", 2); len(parts) == 2 {
+			if value, err := strconv.Atoi(parts[1]); err == nil {
+				minor = value
+			}
+		}
+		if minor > bestMinor {
+			best, bestMinor = channel, minor
+		}
+	}
+	return best, best != ""
+}
+
+func bakeableDotNetChannel(release imageversions.DotNetChannel) bool {
+	return release.WindowsX64SHA512 != "" &&
+		(release.SupportPhase == "active" || release.SupportPhase == "maintenance")
 }
 
 func sortedKeys(values map[string]bool) []string {
@@ -400,37 +460,47 @@ func ToolsHash(o BakeOptions) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	artifacts, err := bakeArtifactsForPlan(o.RunnerVersion, o.RunnerSHA256, plan)
+	runnerVersion := o.RunnerVersion
+	if runnerVersion == "" {
+		runnerVersion = DefaultRunnerVersion
+	}
+	artifacts, err := bakeArtifactsForPlan(runnerVersion, o.RunnerSHA256, plan)
 	if err != nil {
 		return "", err
 	}
-	return toolsHashResolved(plan.Canonical, isoDigest, artifacts), nil
+	files, err := AutounattendFiles(runnerVersion, o.RunnerSHA256, toolsHashAdminPassword, o.Tools)
+	if err != nil {
+		return "", err
+	}
+	return toolsHashResolved(plan.Canonical, isoDigest, artifacts, files), nil
 }
 
-func toolsHashResolved(tools []string, isoDigest string, artifacts []bakeArtifact) string {
+// toolsHashAdminPassword stands in for the real administrator password while
+// fingerprinting, so rotating the password does not force a golden rebuild.
+const toolsHashAdminPassword = "__GOLDEN_FINGERPRINT_PASSWORD__"
+
+// toolsHashResolved hashes the *rendered* provisioning files rather than the raw
+// templates: manifest policy such as node.default_major or
+// buildtools.default_line changes what the guest installs and puts on PATH
+// without changing any template byte or artifact identity.
+func toolsHashResolved(tools []string, isoDigest string, artifacts []bakeArtifact, files map[string]string) string {
 	norm := normalizeTools(tools)
 	h := sha256.New()
-	_, _ = io.WriteString(h, "golden-inputs:v3\n")
+	_, _ = io.WriteString(h, "golden-inputs:v4\n")
 	_, _ = io.WriteString(h, "windows-iso:sha256="+isoDigest+"\n")
 	_, _ = io.WriteString(h, "tools="+strings.Join(norm, ",")+"\n")
 	for _, artifact := range artifacts {
 		_, _ = fmt.Fprintf(h, "artifact=%s|%s|%s|%s|%s\n",
 			artifact.Name, artifact.Version, artifact.URL, artifact.Algorithm, strings.ToLower(artifact.Digest))
 	}
-
-	for _, name := range []string{
-		"autounattend.xml",
-		"githook.ps1",
-		"install-golden.ps1",
-		"setupcomplete.cmd",
-		"startup.ps1",
-	} {
-		data, err := templatesFS.ReadFile("templates/" + name)
-		if err != nil {
-			panic("embedded golden template missing: " + name)
-		}
+	names := make([]string, 0, len(files))
+	for name := range files {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
 		_, _ = io.WriteString(h, name+"\x00")
-		_, _ = h.Write(data)
+		_, _ = io.WriteString(h, files[name])
 	}
 	return "golden:" + hex.EncodeToString(h.Sum(nil)[:8])
 }
@@ -511,7 +581,32 @@ type BakeOptions struct {
 	OVMFCode         string        // UEFI firmware code (auto-detected if empty)
 	OVMFVarsTemplate string        // UEFI vars template to copy
 	VNCWeb           string        // if set (host:port), serve a noVNC viewer to watch the install
-	Timeout          time.Duration // max install wall-clock before the bake kills a hung guest (default 45m)
+	Timeout          time.Duration // max install wall-clock before the bake kills a hung guest (default: derived from Tools)
+}
+
+const (
+	// bakeBaseTimeout covers Windows Setup plus the runner and MinGit staging.
+	bakeBaseTimeout = 45 * time.Minute
+	// bakeBuildToolsTimeout is charged per requested Build Tools line: each one is
+	// an independent multi-GB Visual Studio install inside the guest, fetched over
+	// user-mode networking, so combined lines add up instead of sharing a budget.
+	bakeBuildToolsTimeout = 90 * time.Minute
+	// bakeToolchainTimeout is the floor once any .NET/Node/Go payload is selected.
+	bakeToolchainTimeout = 75 * time.Minute
+)
+
+// bakeTimeoutForPlan derives the install deadline from the resolved tool plan.
+func bakeTimeoutForPlan(plan bakeToolPlan) time.Duration {
+	timeout := bakeBaseTimeout + time.Duration(len(plan.BuildTools))*bakeBuildToolsTimeout
+	for _, kind := range plan.Kinds {
+		switch kind {
+		case "dotnet", "node", "go":
+			if timeout < bakeToolchainTimeout {
+				timeout = bakeToolchainTimeout
+			}
+		}
+	}
+	return timeout
 }
 
 func (o *BakeOptions) defaults() {
@@ -537,18 +632,11 @@ func (o *BakeOptions) defaults() {
 		o.MaxRearms = 5
 	}
 	if o.Timeout <= 0 {
-		o.Timeout = 45 * time.Minute
-		// Toolchains add large in-guest downloads/installs over the slow SLIRP
-		// network; VS Build Tools especially. Give the install more headroom.
-		for _, t := range normalizeTools(o.Tools) {
-			switch strings.SplitN(t, ":", 2)[0] {
-			case "buildtools":
-				o.Timeout = 120 * time.Minute
-			case "dotnet", "node", "go":
-				if o.Timeout < 75*time.Minute {
-					o.Timeout = 75 * time.Minute
-				}
-			}
+		o.Timeout = bakeBaseTimeout
+		// A selector list that does not resolve fails in Prepare; until then the
+		// bare base budget is enough.
+		if plan, err := resolveToolPlan(o.Tools); err == nil {
+			o.Timeout = bakeTimeoutForPlan(plan)
 		}
 	}
 	if o.Accel == "" {

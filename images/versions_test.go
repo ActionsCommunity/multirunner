@@ -20,10 +20,17 @@ func TestEmbeddedManifest(t *testing.T) {
 	if len(m.DotNet.ChannelsForTarget(DotNetTargetQEMUWindows)) == 0 {
 		t.Fatal("no .NET channel targets QEMU")
 	}
-	if m.BuildTools.DefaultLine != "18" || len(m.BuildTools.ReleaseLines()) != 2 {
-		t.Fatalf("Build Tools policy = default %q, lines %v", m.BuildTools.DefaultLine, m.BuildTools.ReleaseLines())
+	if m.Rust.RustupVersion == "" {
+		t.Fatal("rustup version is unpinned")
 	}
-	for _, line := range []string{"17", "18"} {
+	lines := m.BuildTools.ReleaseLines()
+	if len(lines) == 0 {
+		t.Fatal("no Build Tools release lines are declared")
+	}
+	if _, ok := m.BuildTools.DefaultRelease(); !ok {
+		t.Fatalf("Build Tools default line %q is not declared", m.BuildTools.DefaultLine)
+	}
+	for _, line := range lines {
 		if release := m.BuildTools.Lines[line]; release.ReleaseLine != line || release.Version == "" {
 			t.Fatalf("Build Tools %s is unresolved: %#v", line, release)
 		}

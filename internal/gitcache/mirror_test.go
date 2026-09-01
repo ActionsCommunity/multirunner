@@ -13,15 +13,23 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func mustGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
+	// Point global config at an empty file so a developer's signing or hook
+	// settings cannot break the fixture commits.
+	emptyConfig := filepath.Join(t.TempDir(), "gitconfig")
+	if err := os.WriteFile(emptyConfig, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(),
 		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.com",
 		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@example.com",
+		"GIT_CONFIG_GLOBAL="+emptyConfig, "GIT_CONFIG_NOSYSTEM=1",
 	)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -130,12 +138,13 @@ func forceExplicitBareRepository(t *testing.T) {
 }
 
 // resolveEnv collapses an environment slice into a map using the last-wins
-// duplicate semantics that os/exec applies.
+// duplicate semantics that os/exec applies. Keys are upper-cased because
+// Windows resolves environment names case-insensitively.
 func resolveEnv(env []string) map[string]string {
 	out := map[string]string{}
 	for _, kv := range env {
 		if i := strings.IndexByte(kv, '='); i > 0 {
-			out[kv[:i]] = kv[i+1:]
+			out[strings.ToUpper(kv[:i])] = kv[i+1:]
 		}
 	}
 	return out
@@ -259,17 +268,91 @@ func TestGitEnvIgnoresBogusCount(t *testing.T) {
 	}
 }
 
-func TestGitEnvIgnoresOversizedInheritedConfig(t *testing.T) {
+func TestGitEnvClampsOversizedInheritedConfig(t *testing.T) {
+	// A huge count must not drive a huge allocation, but the entries that do
+	// exist within the clamp (such as a hardening setting) must survive.
 	t.Setenv("GIT_CONFIG_COUNT", "1000000000")
+	t.Setenv("GIT_CONFIG_KEY_0", "safe.bareRepository")
+	t.Setenv("GIT_CONFIG_VALUE_0", "explicit")
 
 	m := &Manager{token: "test-token", logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	env := resolveEnv(m.gitEnv())
 
-	if got := env["GIT_CONFIG_COUNT"]; got != "1" {
-		t.Errorf("GIT_CONFIG_COUNT = %q, want only the scoped auth entry", got)
+	if got := env["GIT_CONFIG_COUNT"]; got != "2" {
+		t.Errorf("GIT_CONFIG_COUNT = %q, want the inherited entry plus the scoped auth entry", got)
 	}
-	if got := env["GIT_CONFIG_KEY_0"]; got != "http./.extraHeader" {
-		t.Errorf("GIT_CONFIG_KEY_0 = %q, want scoped extraHeader", got)
+	if got := env["GIT_CONFIG_KEY_0"]; got != "safe.bareRepository" {
+		t.Errorf("GIT_CONFIG_KEY_0 = %q, want inherited safe.bareRepository", got)
+	}
+	if got := env["GIT_CONFIG_KEY_1"]; got != "http./.extraHeader" {
+		t.Errorf("GIT_CONFIG_KEY_1 = %q, want scoped extraHeader", got)
+	}
+}
+
+func TestGitEnvDropsInheritedConfigParameters(t *testing.T) {
+	// GIT_CONFIG_PARAMETERS is read by git at the same precedence as the
+	// indexed list, so an inherited rewrite there would bypass the filter.
+	t.Setenv("GIT_CONFIG_PARAMETERS", "'url.https://evil.example/.insteadof=https://github.com/'")
+
+	m := &Manager{token: "test-token", baseURL: "https://github.com", logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	for name, env := range map[string][]string{"gitEnv": m.gitEnv(), "localGitEnv": m.localGitEnv()} {
+		if _, ok := resolveEnv(env)["GIT_CONFIG_PARAMETERS"]; ok {
+			t.Errorf("%s: GIT_CONFIG_PARAMETERS survived into the subprocess environment", name)
+		}
+	}
+}
+
+func TestStripIndexedGitConfigIsCaseInsensitive(t *testing.T) {
+	env := []string{
+		"PATH=/bin",
+		"git_config_count=1",
+		"Git_Config_Key_0=http.https://github.com/.extraHeader",
+		"GIT_CONFIG_VALUE_0=Authorization: bearer inherited",
+		"git_config_parameters='x=y'",
+		"GIT_TERMINAL_PROMPT=0",
+	}
+	got := stripIndexedGitConfig(env)
+	want := []string{"PATH=/bin", "GIT_TERMINAL_PROMPT=0"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("stripIndexedGitConfig = %q, want %q", got, want)
+	}
+}
+
+func TestSweepSkipsBareRepositoriesItDidNotCreate(t *testing.T) {
+	base := setupSourceRepo(t)
+	mirrorRoot := t.TempDir()
+	m, err := New(mirrorRoot, base, "", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	mirror, err := m.EnsureMirror(ctx, "repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreign := filepath.Join(mirrorRoot, "archive.git")
+	mustGit(t, mirrorRoot, "init", "--bare", foreign)
+
+	old := time.Now().Add(-48 * time.Hour)
+	for _, p := range []string{filepath.Join(mirror, lastUsedFile), foreign} {
+		if err := os.Chtimes(p, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	removed, err := m.Sweep(ctx, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 1 {
+		t.Errorf("removed = %d, want only the stale mirror", removed)
+	}
+	if mirrorExists(mirror) {
+		t.Error("stale mirror was not swept")
+	}
+	if !mirrorExists(foreign) {
+		t.Error("bare repository without the last-used marker was deleted")
 	}
 }
 

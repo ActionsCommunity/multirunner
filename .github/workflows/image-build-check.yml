@@ -9,6 +9,7 @@ on:
     paths:
       - "images/**"
       - ".gitattributes"
+      - ".github/actions/**"
       - ".github/workflows/image-build-check.yml"
       - ".github/workflows/images.yml"
       - ".github/workflows/update-image-versions.yml"
@@ -26,7 +27,30 @@ jobs:
 
       - name: Discover Build Tools release lines
         id: buildtools-lines
-        run: echo "lines=$(jq -c '.buildtools.lines | keys' images/versions.json)" >> "$GITHUB_OUTPUT"
+        run: |
+          set -euo pipefail
+          lines=$(jq -c '.buildtools.lines | keys' images/versions.json)
+          # Without this, a jq failure produces an empty matrix and every
+          # Build Tools image silently goes unbuilt.
+          printf '%s' "$lines" | jq -e 'type == "array" and length > 0' >/dev/null
+          echo "lines=$lines" >> "$GITHUB_OUTPUT"
+
+      - name: Reject end-of-life Node majors and .NET channels
+        run: |
+          set -euo pipefail
+          today=$(date -u +%F)
+          expired=$(jq -r --arg today "$today" '
+            [ (.node.releases   | to_entries[] | select(.value.eol < $today) | "Node major \(.key) reached end of life on \(.value.eol)"),
+              (.dotnet.channels | to_entries[] | select(.value.eol < $today) | ".NET channel \(.key) reached end of life on \(.value.eol)")
+            ] | .[]' images/versions.json)
+          if [ -z "$expired" ]; then
+            echo "All declared Node majors and .NET channels are supported"
+            exit 0
+          fi
+          while IFS= read -r entry; do
+            echo "::error title=End-of-life runtime declared::$entry. Remove it from images/versions.json, or retain it explicitly by extending the declared eol date."
+          done <<< "$expired"
+          exit 1
 
       - name: Require image targets for newly supported .NET channels
         run: |
@@ -148,6 +172,7 @@ jobs:
     runs-on: windows-2025
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/wait-for-docker
 
       # Windows images are large, so keep this job to the Node/.NET branch.
       # Build Tools release lines run on separate clean runners below because
@@ -305,6 +330,8 @@ jobs:
           $free = (Get-PSDrive -Name C).Free
           Write-Host ("Free disk after cleanup: {0:N1} GB" -f ($free / 1GB))
           if ($free -lt 35GB) { throw 'less than 35 GB free after guarded cleanup' }
+
+      - uses: ./.github/actions/wait-for-docker
 
       - name: Build minimal and assert Build Tools ${{ matrix.line }}
         shell: bash

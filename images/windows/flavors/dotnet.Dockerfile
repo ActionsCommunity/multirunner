@@ -26,9 +26,12 @@ ENV DOTNET_NOLOGO=1
 ENV DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1
 
 # Install every SDK assigned to the Windows container target and verify each
-# archive against Microsoft's published SHA512 before extraction.
+# archive against Microsoft's published SHA512 before extraction. Channels are
+# extracted oldest first because every SDK shares one DOTNET_ROOT: the
+# last-extracted dotnet.exe and hostfxr win, and only the newest host can run
+# every installed SDK.
 RUN $manifest = Get-Content C:/image-versions.json -Raw | ConvertFrom-Json; \
-    $channels = @($manifest.dotnet.channels.PSObject.Properties | Where-Object { $_.Value.targets -contains 'windows-container' }); \
+    $channels = @($manifest.dotnet.channels.PSObject.Properties | Where-Object { $_.Value.targets -contains 'windows-container' } | Sort-Object { [version]$_.Name }); \
     if ($channels.Count -eq 0) { throw 'no .NET channel targets the Windows container' }; \
     foreach ($channel in $channels) { \
       $release = $channel.Value; \

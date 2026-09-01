@@ -45,13 +45,26 @@ func TestRustVersion(t *testing.T) {
 	}
 }
 
+func TestRustupReleaseVersion(t *testing.T) {
+	manifest := "schema-version = '1'\nversion = '1.29.1'\n"
+	if got := rustupReleaseVersion([]byte(manifest)); got != "1.29.1" {
+		t.Fatalf("rustupReleaseVersion = %q", got)
+	}
+	if got := rustupReleaseVersion([]byte("schema-version = '1'\n")); got != "" {
+		t.Fatalf("missing version = %q", got)
+	}
+}
+
 func TestSupported(t *testing.T) {
 	u := updater{today: "2026-09-01"}
 	if err := u.supported("tool", "2026-09-01"); err != nil {
 		t.Fatalf("EOL date itself should remain supported: %v", err)
 	}
-	if err := u.supported("tool", "2026-08-31"); err == nil {
-		t.Fatal("past EOL unexpectedly accepted")
+	if err := u.supported("tool", "2026-08-31"); err != nil {
+		t.Fatalf("past EOL must warn, not abort the refresh: %v", err)
+	}
+	if err := u.supported("tool", ""); err == nil {
+		t.Fatal("missing EOL date unexpectedly accepted")
 	}
 }
 
@@ -72,7 +85,7 @@ func TestGitHubAssetDigest(t *testing.T) {
 
 func TestDiscoverNodeLTS(t *testing.T) {
 	node := imageversions.Node{
-		Track:    "active-lts",
+		Track:    imageversions.NodeTrackSupportedLTS,
 		Releases: map[string]imageversions.NodeRelease{"24": {}},
 	}
 	schedule := map[string]nodeLifecycle{
