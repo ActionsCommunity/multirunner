@@ -246,13 +246,13 @@ func (p Pool) DockerSocketPath() string {
 	return "/var/run/docker.sock"
 }
 
-// QEMU configures the VM backend (Windows runners on a Linux/KVM host).
+// QEMU configures the x86-64 Windows VM backend.
 type QEMU struct {
 	Golden  string `yaml:"golden"`   // path to the golden qcow2 (built by `multirunner bake`)
 	WorkDir string `yaml:"work_dir"` // where per-job overlays/ISOs are written
 	MemMB   int    `yaml:"mem_mb"`
 	CPUs    int    `yaml:"cpus"`
-	Accel   string `yaml:"accel"` // "" = auto (kvm/whpx/hvf)
+	Accel   string `yaml:"accel"` // "" = auto (hardware acceleration on x86-64; TCG on ARM)
 	// Housekeeping (golden eval license + rebuilds):
 	BakeISO       string   `yaml:"bake_iso"`        // Windows ISO for rebuilds (enables auto-rebuild)
 	BakeISOSHA256 string   `yaml:"bake_iso_sha256"` // optional expected SHA256 of bake_iso

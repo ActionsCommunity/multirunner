@@ -20,7 +20,7 @@ type Options struct {
 	WorkDir string // where per-job overlays/ISOs are written
 	MemMB   int
 	CPUs    int
-	Accel   string // "" = auto-detect (kvm/whpx/hvf)
+	Accel   string // "" = auto-detect (kvm/whpx/hvf on x86-64, tcg on ARM)
 	QEMUBin string // qemu-system-x86_64 (default looked up on PATH)
 	ImgBin  string // qemu-img (default looked up on PATH)
 }
@@ -50,7 +50,7 @@ func NewBackend(opt Options) (*Backend, error) {
 	}
 	accel := opt.Accel
 	if accel == "" {
-		accel = DetectAccel(runtime.GOOS)
+		accel = DetectAccel(runtime.GOOS, runtime.GOARCH)
 	}
 	code, _ := DetectOVMF(opt.QEMUBin)
 	sweepOrphans(opt.WorkDir)

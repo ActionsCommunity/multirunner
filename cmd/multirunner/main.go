@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -260,7 +261,7 @@ func bakeCmd() *cobra.Command {
 		Long: `Build (or rebuild) the golden Windows Server Core qcow2 used by qemu pools:
 creates a base disk, boots the Windows installer unattended, installs the runner
 + boot task + cache patch, then powers off. Needs QEMU and a Windows Server ISO.
-Run on a Linux/KVM host (or any host with QEMU + hardware accel).
+Uses hardware acceleration on x86-64 hosts and TCG software emulation on ARM.
 
 --prepare-only creates the base disk + autounattend ISO and prints the QEMU
 command without running it (for manual/observed installs).`,
@@ -426,6 +427,19 @@ func runOrchestrator(ctx context.Context, configPath string, interactive, instal
 	logger := newLogger(cfg.Log)
 	for _, warn := range cfg.Warnings() {
 		logger.Warn(warn)
+	}
+	for _, pc := range cfg.Pools {
+		if pc.Backend != "qemu" {
+			continue
+		}
+		accel := pc.QEMU.Accel
+		if accel == "" {
+			accel = winvm.DetectAccel(runtime.GOOS, runtime.GOARCH)
+		}
+		if accel == "tcg" {
+			logger.Warn("QEMU Windows guest is using software CPU emulation; x86-64 hardware acceleration requires an x86-64 host",
+				"pool", pc.Name, "host_os", runtime.GOOS, "host_arch", runtime.GOARCH)
+		}
 	}
 
 	// Build the GitHub client provider. For scope=repos, create a per-repo

@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -217,6 +218,14 @@ func TestBakeQEMUArgs(t *testing.T) {
 	}
 	if strings.Contains(got, "-no-reboot") {
 		t.Error("bake must NOT use -no-reboot (Windows Setup reboots mid-install)")
+	}
+}
+
+func TestBakeDefaultsUseHostCompatibleAccel(t *testing.T) {
+	var opts BakeOptions
+	opts.defaults()
+	if want := DetectAccel(runtime.GOOS, runtime.GOARCH); opts.Accel != want {
+		t.Fatalf("default accel = %q, want %q", opts.Accel, want)
 	}
 }
 

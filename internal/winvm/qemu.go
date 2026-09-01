@@ -35,7 +35,7 @@ type LaunchOpts struct {
 	JITISOPath string // config ISO carrying the JIT blob
 	MemMB      int
 	CPUs       int
-	Accel      string // "" = auto-detect for the host OS
+	Accel      string // "" = tcg; callers normally resolve host-compatible auto mode
 	Firmware   Firmware
 }
 
@@ -72,10 +72,13 @@ func firstExisting(dir string, names []string) string {
 	return ""
 }
 
-// DetectAccel picks the QEMU accelerator for the host OS. KVM on Linux, WHPX on
-// Windows (the Windows Hypervisor Platform — coexists with WSL2/Podman, no
-// nested virt), HVF on macOS, else software emulation (tcg, unusably slow).
-func DetectAccel(goos string) string {
+// DetectAccel picks the QEMU accelerator for this backend's x86-64 Windows
+// guest. Hardware virtualization requires the host and guest CPU architectures
+// to match, so ARM hosts use QEMU's cross-architecture TCG emulation.
+func DetectAccel(goos, goarch string) string {
+	if goarch != "amd64" {
+		return "tcg"
+	}
 	switch goos {
 	case "linux":
 		return "kvm"

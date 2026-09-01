@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -322,7 +323,7 @@ func (o *BakeOptions) defaults() {
 		}
 	}
 	if o.Accel == "" {
-		o.Accel = "" // resolved by caller/runtime; bake uses tcg fallback if empty
+		o.Accel = DetectAccel(runtime.GOOS, runtime.GOARCH)
 	}
 	if o.QEMUBin == "" {
 		o.QEMUBin = "qemu-system-x86_64"

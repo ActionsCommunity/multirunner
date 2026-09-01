@@ -125,7 +125,7 @@ pools:
       work_dir: "/var/lib/multirunner/vm"
       mem_mb: 4096
       cpus: 2
-      accel: ""                  # "" = auto: kvm (Linux) / whpx (Windows) / hvf (macOS)
+      accel: ""                  # auto: x64 uses kvm/whpx/hvf; ARM uses slower x86 TCG emulation
       # bake_iso enables automatic rebuilds. Its content is always part of the
       # golden fingerprint; set bake_iso_sha256 to also reject unexpected media.
       # bake_iso: "/var/lib/multirunner/WinServer2022.iso"

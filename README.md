@@ -31,7 +31,7 @@ One small binary. One config file. No Kubernetes, no control plane.
 |---|---|
 | **Linux runners** | Docker **or** Podman (docker-compatible API). |
 | **Windows runners (containers)** | Native Windows containers via **containerd + runhcs** — no Docker Desktop. |
-| **Windows runners on a Linux host** | Run Windows as **QEMU VMs** from a baked golden image. |
+| **Windows runners in QEMU VMs** | Run Windows from a baked golden image on Linux, Windows, or macOS. |
 | **Mix Linux + Windows** | Multiple pools, different OSes, one orchestrator. |
 | **Self-hosted Actions cache** | Built-in v2 cache server — `actions/cache` stays on your host. |
 | **Git mirror cache** | Local bare mirror; `actions/checkout` fetches only the delta. |
@@ -195,7 +195,7 @@ Flavor layering differs by OS. Linux uses `dotnet`/`rust` ⊃ `node` ⊃
 containers, and QEMU are declared in `images/versions.json`; Windows SDK
 archives include the WindowsDesktop packs. Windows jobs needing Node/.NET plus
 native MSVC tooling therefore need a custom image derived from `buildtools`, or a
-[QEMU golden VM](#windows-runners-on-a-linux-host-qemu-vm). Full Visual Studio
+[QEMU golden VM](#windows-runners-with-qemu). Full Visual Studio
 (IDE) also requires a golden VM. A custom `image_tier:` you build yourself
 resolves to a local `multirunner/runner-<os>-<tier>:dev` tag.
 
@@ -285,11 +285,15 @@ because custom-label and matrix expressions may not contain that literal;
 authentication, permission, timeout, and truncated-tree failures still make
 doctor exit non-zero instead of reporting an incomplete preflight as ready.
 
-### Windows runners on a Linux host (QEMU VM)
+### Windows runners with QEMU
 
-No Windows host? Run Windows runners as **VMs** on your Linux/KVM box. Bake a
-golden **Server Core** image once; each job boots a clean copy-on-write overlay,
-reads its JIT config from an attached ISO, runs one job, and powers off.
+Run Windows runners as **VMs** with QEMU. Bake a golden **Server Core** image
+once; each job boots a clean copy-on-write overlay, reads its JIT config from an
+attached ISO, runs one job, and powers off. Acceleration is selected from the
+host automatically: KVM on x86-64 Linux, WHPX on x86-64 Windows, and HVF on
+Intel macOS. The guest is x86-64, so ARM hosts—including Apple Silicon—use TCG
+software emulation. That path is supported but substantially slower than native
+hardware virtualization, especially while baking the golden image.
 
 ```sh
 multirunner bake --iso WinServer2022Eval.iso --golden /var/lib/multirunner/golden.qcow2
@@ -323,7 +327,7 @@ pools:
       work_dir: /var/lib/multirunner/run
       mem_mb: 4096
       cpus: 2
-      accel: kvm           # kvm (Linux) | whpx (Windows) | hvf (macOS) | "" auto
+      accel: ""            # auto: x64 kvm/whpx/hvf; ARM uses x86 TCG emulation
       bake_iso: /var/lib/multirunner/WinServer2022.iso
       bake_iso_sha256: "<sha256>"   # optional expected digest; ISO is always fingerprinted
       tools: [dotnet, node, buildtools]   # bake these into the golden on rebuild
