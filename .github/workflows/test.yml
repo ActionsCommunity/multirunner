@@ -6,6 +6,9 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   # Unit tests + vet on every supported OS.
   unit:
@@ -54,6 +57,87 @@ jobs:
             CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build ./...
           done
 
+  conformance-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: pnpm/action-setup@f520eceda224fe1a4aed5a2a27a194379a409996 # v6
+        with:
+          package_json_file: testdata/conformance/node/package.json
+          run_install: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22.23.2
+          cache: pnpm
+          cache-dependency-path: testdata/conformance/node/pnpm-lock.yaml
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.10.11"
+          enable-cache: true
+          cache-dependency-glob: testdata/conformance/python/uv.lock
+      - name: Validate workflows and fixtures
+        run: |
+          set -euo pipefail
+          go test ./testdata/conformance/... -count=1
+          pnpm --dir testdata/conformance/node install --frozen-lockfile
+          pnpm --dir testdata/conformance/node test
+          (
+            cd testdata/conformance/python
+            uv run --locked python -m unittest discover -s tests
+          )
+
+  conformance-windows:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@f520eceda224fe1a4aed5a2a27a194379a409996 # v6
+        with:
+          package_json_file: testdata/conformance/node/package.json
+          run_install: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22.23.2
+          cache: pnpm
+          cache-dependency-path: testdata/conformance/node/pnpm-lock.yaml
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
+        with:
+          dotnet-version: 10.0.400
+          cache: true
+          cache-dependency-path: testdata/conformance/dotnet/**/packages.lock.json
+      - name: Validate Node and .NET fixtures
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          pnpm --dir testdata/conformance/node install --frozen-lockfile
+          pnpm --dir testdata/conformance/node test
+          dotnet restore testdata/conformance/dotnet/Conformance.slnx --locked-mode
+          dotnet restore testdata/conformance/dotnet/src/Conformance/Conformance.csproj `
+            --runtime win-x64 --locked-mode
+          dotnet build testdata/conformance/dotnet/Conformance.slnx `
+            --configuration Release --no-restore
+          dotnet test testdata/conformance/dotnet/Conformance.slnx `
+            --configuration Release --no-build --no-restore
+          dotnet publish testdata/conformance/dotnet/src/Conformance/Conformance.csproj `
+            --configuration Release --runtime win-x64 --self-contained true `
+            --no-restore --output "$env:RUNNER_TEMP/conformance-publish"
+          $output = & "$env:RUNNER_TEMP/conformance-publish/Conformance.exe"
+          if ($output -ne 'ActionsCommunity/multirunner:windows:ok') {
+              throw "unexpected published artifact output: $output"
+          }
+
   # Linux container backend against the runner's real Docker daemon.
   docker-integration:
     runs-on: ubuntu-latest
@@ -68,16 +152,10 @@ jobs:
       - name: Backend integration tests (real Docker daemon)
         run: go test ./internal/backend/... -v
 
-  # ---------------------------------------------------------------------------
-  # The Windows-container (containerd) and QEMU-VM backends can't run on
-  # GitHub-hosted runners: containerd+runhcs needs a configured Windows-container
-  # host, and QEMU needs /dev/kvm (no nested virt on hosted runners). Enable
-  # these by registering a self-hosted runner with the matching labels.
-  # ---------------------------------------------------------------------------
+  # The Windows-container and QEMU backends need configured self-hosted hosts.
   qemu-integration:
-    # Needs a self-hosted Linux/KVM runner (label: qemu). Skipped otherwise.
     runs-on: [self-hosted, linux, qemu]
-    if: false   # flip to true once a self-hosted KVM runner is registered
+    if: github.event_name != 'pull_request' && vars.MR_QEMU_INTEGRATION == 'true'
     env:
       MULTIRUNNER_TEST_QEMU: "1"
       MULTIRUNNER_TEST_ACCEL: kvm
@@ -89,9 +167,8 @@ jobs:
       - run: go test ./internal/winvm/... -v
 
   windows-containers:
-    # Needs a self-hosted Windows host with containerd + runhcs (label: containerd).
     runs-on: [self-hosted, windows, containerd]
-    if: false   # flip to true once a self-hosted Windows-container runner exists
+    if: github.event_name != 'pull_request' && vars.MR_WINDOWS_CONTAINER_INTEGRATION == 'true'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5

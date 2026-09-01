@@ -4,23 +4,34 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
 
-const apiVersion = "2026-03-10"
+const (
+	apiVersion        = "2026-03-10"
+	trustedRepository = "ActionsCommunity/multirunner"
+	targetWorkflow    = "e2e-target.yml"
+	workflowName      = "e2e-linux"
+	workflowPath      = ".github/workflows/e2e-linux.yml"
+	maxTargets        = 20
+	maxQueueLimit     = 30 * time.Minute
+	maxWorkflowInput  = 255
+	runTimeout        = 30 * time.Minute
+	pollInterval      = 5 * time.Second
+)
 
 var (
 	repositoryPartPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
-	workflowPattern       = regexp.MustCompile(`^[A-Za-z0-9_.-]+\.ya?ml$`)
 	labelPattern          = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 	refPattern            = regexp.MustCompile(`^[A-Za-z0-9._/-]+$`)
+	shaPattern            = regexp.MustCompile(`^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$`)
+	windowsPipePattern    = regexp.MustCompile(`^npipe:////\./pipe/[A-Za-z0-9_.-]+$`)
 )
 
 type target struct {
@@ -30,7 +41,6 @@ type target struct {
 
 type options struct {
 	Targets           []target
-	Workflow          string
 	RunnerLabel       string
 	RunnerPrefix      string
 	FixtureRepository string
@@ -41,12 +51,24 @@ type options struct {
 	Timeout           time.Duration
 	PollInterval      time.Duration
 	ReportPath        string
+	ServerURL         string
+	APIURL            string
+	RepositoryOwner   string
+	Repository        string
+	Ref               string
+	Workflow          string
+	WorkflowRef       string
+	EventName         string
+	TrustedRef        string
+	RunID             int64
+	Backend           string
+	DockerHost        string
+	Image             string
 }
 
 type report struct {
 	Repository  string `json:"repository"`
 	RunID       int64  `json:"run_id"`
-	RunURL      string `json:"run_url"`
 	Platform    string `json:"platform"`
 	CacheMode   string `json:"cache_mode"`
 	QueueMillis int64  `json:"queue_millis"`
@@ -61,28 +83,19 @@ func main() {
 }
 
 func runCLI(args []string, out io.Writer) error {
-	if len(args) == 0 {
-		return errors.New("expected run or cleanup command")
+	if len(args) != 1 {
+		return errors.New("expected exactly one validate, run, or cleanup command")
 	}
-	token := os.Getenv("MR_CONFORMANCE_PAT")
-	if token == "" {
-		return errors.New("MR_CONFORMANCE_PAT is required")
-	}
-	baseURL := os.Getenv("GITHUB_API_URL")
-	if baseURL == "" {
-		baseURL = "https://api.github.com"
-	}
-	client := &apiClient{
-		baseURL: strings.TrimRight(baseURL, "/"),
-		token:   token,
-		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
-		},
+	opts, err := loadOptions(os.Getenv)
+	if err != nil {
+		return err
 	}
 
 	switch args[0] {
+	case "validate":
+		return nil
 	case "run":
-		opts, err := parseRunOptions(args[1:])
+		client, err := authenticatedAPIClient(opts)
 		if err != nil {
 			return err
 		}
@@ -94,70 +107,69 @@ func runCLI(args []string, out io.Writer) error {
 		}
 		return writeReport(opts.ReportPath, reports)
 	case "cleanup":
-		targets, prefix, timeout, poll, err := parseCleanupOptions(args[1:])
+		client, err := authenticatedAPIClient(opts)
 		if err != nil {
 			return err
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
-		return waitForCleanup(ctx, client, targets, prefix, poll, out)
+		return waitForCleanup(ctx, client, opts.Targets, opts.RunnerPrefix, opts.PollInterval, out)
 	default:
 		return fmt.Errorf("unknown command %q", args[0])
 	}
 }
 
-func parseRunOptions(args []string) (options, error) {
-	fs := flag.NewFlagSet("run", flag.ContinueOnError)
-	var targetsJSON string
-	var opts options
-	fs.StringVar(&targetsJSON, "targets-json", "", "JSON target array")
-	fs.StringVar(&opts.Workflow, "workflow", "runner-conformance-dispatch.yml", "target workflow file")
-	fs.StringVar(&opts.RunnerLabel, "runner-label", "", "unique runner label")
-	fs.StringVar(&opts.RunnerPrefix, "runner-prefix", "", "owned runner name prefix")
-	fs.StringVar(&opts.FixtureRepository, "fixture-repository", "", "repository containing fixtures")
-	fs.StringVar(&opts.FixtureRef, "fixture-ref", "", "fixture repository ref")
-	fs.StringVar(&opts.Platform, "platform", "", "linux or windows")
-	fs.StringVar(&opts.CacheMode, "cache-mode", "", "enabled or disabled")
-	fs.DurationVar(&opts.QueueLimit, "queue-limit", 3*time.Minute, "maximum queue latency")
-	fs.DurationVar(&opts.Timeout, "timeout", 30*time.Minute, "overall timeout")
-	fs.DurationVar(&opts.PollInterval, "poll", 5*time.Second, "poll interval")
-	fs.StringVar(&opts.ReportPath, "report", "runner-conformance-report.json", "report path")
-	if err := fs.Parse(args); err != nil {
-		return options{}, err
+func authenticatedAPIClient(opts options) (*apiClient, error) {
+	token := os.Getenv("MR_CONFORMANCE_PAT")
+	if token == "" {
+		return nil, errors.New("MR_CONFORMANCE_PAT is required")
 	}
-	targets, err := parseTargets(targetsJSON)
+	return newAPIClient(token, opts.ServerURL, opts.APIURL)
+}
+
+func loadOptions(getenv func(string) string) (options, error) {
+	targets, err := parseTargets(getenv("MR_TARGETS"))
 	if err != nil {
 		return options{}, err
 	}
-	opts.Targets = targets
+	queueLimit, err := time.ParseDuration(getenv("MR_QUEUE_LIMIT"))
+	if err != nil {
+		return options{}, fmt.Errorf("invalid MR_QUEUE_LIMIT: %w", err)
+	}
+	runID, err := strconv.ParseInt(getenv("GITHUB_RUN_ID"), 10, 64)
+	if err != nil || runID <= 0 {
+		return options{}, errors.New("GITHUB_RUN_ID must be a positive integer")
+	}
+	opts := options{
+		Targets:           targets,
+		RunnerLabel:       getenv("MR_RUNNER_LABEL"),
+		RunnerPrefix:      getenv("MR_RUNNER_PREFIX"),
+		FixtureRepository: getenv("GITHUB_REPOSITORY"),
+		FixtureRef:        getenv("GITHUB_SHA"),
+		Platform:          getenv("MR_PLATFORM"),
+		CacheMode:         getenv("MR_CACHE_MODE"),
+		QueueLimit:        queueLimit,
+		Timeout:           runTimeout,
+		PollInterval:      pollInterval,
+		ServerURL:         getenv("GITHUB_SERVER_URL"),
+		APIURL:            getenv("GITHUB_API_URL"),
+		RepositoryOwner:   getenv("GITHUB_REPOSITORY_OWNER"),
+		Repository:        getenv("GITHUB_REPOSITORY"),
+		Ref:               getenv("GITHUB_REF"),
+		Workflow:          getenv("GITHUB_WORKFLOW"),
+		WorkflowRef:       getenv("GITHUB_WORKFLOW_REF"),
+		EventName:         getenv("GITHUB_EVENT_NAME"),
+		TrustedRef:        getenv("MR_TRUSTED_REF"),
+		RunID:             runID,
+		Backend:           getenv("MR_BACKEND"),
+		DockerHost:        getenv("MR_DOCKER_HOST"),
+		Image:             getenv("MR_IMAGE"),
+	}
+	opts.ReportPath = fmt.Sprintf("runner-conformance-%s-%s.json", opts.Platform, opts.CacheMode)
 	if err := validateOptions(opts); err != nil {
 		return options{}, err
 	}
 	return opts, nil
-}
-
-func parseCleanupOptions(args []string) ([]target, string, time.Duration, time.Duration, error) {
-	fs := flag.NewFlagSet("cleanup", flag.ContinueOnError)
-	var targetsJSON, prefix string
-	var timeout, poll time.Duration
-	fs.StringVar(&targetsJSON, "targets-json", "", "JSON target array")
-	fs.StringVar(&prefix, "runner-prefix", "", "owned runner name prefix")
-	fs.DurationVar(&timeout, "timeout", 2*time.Minute, "cleanup timeout")
-	fs.DurationVar(&poll, "poll", 5*time.Second, "poll interval")
-	if err := fs.Parse(args); err != nil {
-		return nil, "", 0, 0, err
-	}
-	targets, err := parseTargets(targetsJSON)
-	if err != nil {
-		return nil, "", 0, 0, err
-	}
-	if !labelPattern.MatchString(prefix) {
-		return nil, "", 0, 0, fmt.Errorf("invalid runner prefix %q", prefix)
-	}
-	if timeout <= 0 || poll <= 0 {
-		return nil, "", 0, 0, errors.New("timeout and poll must be positive")
-	}
-	return targets, prefix, timeout, poll, nil
 }
 
 func parseTargets(raw string) ([]target, error) {
@@ -165,26 +177,25 @@ func parseTargets(raw string) ([]target, error) {
 	decoder.DisallowUnknownFields()
 	var targets []target
 	if err := decoder.Decode(&targets); err != nil {
-		return nil, fmt.Errorf("decode targets: %w", err)
+		return nil, fmt.Errorf("decode MR_TARGETS: %w", err)
 	}
 	if decoder.Decode(&struct{}{}) != io.EOF {
-		return nil, errors.New("targets JSON must contain one value")
+		return nil, errors.New("MR_TARGETS must contain one JSON value")
 	}
-	if len(targets) < 2 {
-		return nil, errors.New("at least two conformance targets are required")
+	if len(targets) < 2 || len(targets) > maxTargets {
+		return nil, fmt.Errorf("MR_TARGETS must contain between 2 and %d repositories", maxTargets)
 	}
 	seen := make(map[string]struct{}, len(targets))
-	for i := range targets {
-		parts := strings.Split(targets[i].Repository, "/")
-		if len(parts) != 2 || !repositoryPartPattern.MatchString(parts[0]) || !repositoryPartPattern.MatchString(parts[1]) {
-			return nil, fmt.Errorf("invalid target repository %q", targets[i].Repository)
+	for _, target := range targets {
+		if !validRepository(target.Repository) {
+			return nil, fmt.Errorf("invalid target repository %q", target.Repository)
 		}
-		if !validRef(targets[i].Ref) {
-			return nil, fmt.Errorf("invalid target ref %q", targets[i].Ref)
+		if !validRef(target.Ref) {
+			return nil, fmt.Errorf("invalid target ref %q", target.Ref)
 		}
-		key := strings.ToLower(targets[i].Repository)
+		key := strings.ToLower(target.Repository)
 		if _, exists := seen[key]; exists {
-			return nil, fmt.Errorf("duplicate target repository %q", targets[i].Repository)
+			return nil, fmt.Errorf("duplicate target repository %q", target.Repository)
 		}
 		seen[key] = struct{}{}
 	}
@@ -193,7 +204,7 @@ func parseTargets(raw string) ([]target, error) {
 
 func validRef(value string) bool {
 	return value != "" &&
-		len(value) <= 255 &&
+		len(value) <= maxWorkflowInput &&
 		refPattern.MatchString(value) &&
 		!strings.Contains(value, "..") &&
 		!strings.Contains(value, "//") &&
@@ -202,31 +213,86 @@ func validRef(value string) bool {
 		!strings.HasSuffix(value, ".")
 }
 
+func validRepository(value string) bool {
+	parts := strings.Split(value, "/")
+	return len(parts) == 2 &&
+		validRepositoryPart(parts[0], 39) &&
+		validRepositoryPart(parts[1], 100)
+}
+
+func validRepositoryPart(value string, maxLength int) bool {
+	return value != "" &&
+		len(value) <= maxLength &&
+		value != "." &&
+		value != ".." &&
+		repositoryPartPattern.MatchString(value)
+}
+
+func validLabel(value string) bool {
+	return value != "" && len(value) <= maxWorkflowInput && labelPattern.MatchString(value)
+}
+
 func validateOptions(opts options) error {
-	if !workflowPattern.MatchString(opts.Workflow) {
-		return fmt.Errorf("invalid workflow file %q", opts.Workflow)
-	}
-	if !labelPattern.MatchString(opts.RunnerLabel) || !labelPattern.MatchString(opts.RunnerPrefix) {
+	if !validLabel(opts.RunnerLabel) || !validLabel(opts.RunnerPrefix) {
 		return errors.New("runner label and prefix must use letters, digits, dots, underscores, or hyphens")
 	}
-	parts := strings.Split(opts.FixtureRepository, "/")
-	if len(parts) != 2 || !repositoryPartPattern.MatchString(parts[0]) || !repositoryPartPattern.MatchString(parts[1]) {
-		return fmt.Errorf("invalid fixture repository %q", opts.FixtureRepository)
+	if !validRepository(opts.FixtureRepository) {
+		return fmt.Errorf("invalid GITHUB_REPOSITORY %q", opts.FixtureRepository)
 	}
 	if !validRef(opts.FixtureRef) {
-		return fmt.Errorf("invalid fixture ref %q", opts.FixtureRef)
+		return fmt.Errorf("invalid GITHUB_SHA %q", opts.FixtureRef)
 	}
 	if opts.Platform != "linux" && opts.Platform != "windows" {
-		return fmt.Errorf("invalid platform %q", opts.Platform)
+		return fmt.Errorf("invalid MR_PLATFORM %q", opts.Platform)
 	}
 	if opts.CacheMode != "enabled" && opts.CacheMode != "disabled" {
-		return fmt.Errorf("invalid cache mode %q", opts.CacheMode)
+		return fmt.Errorf("invalid MR_CACHE_MODE %q", opts.CacheMode)
 	}
-	if opts.QueueLimit <= 0 || opts.Timeout <= 0 || opts.PollInterval <= 0 {
-		return errors.New("queue limit, timeout, and poll must be positive")
+	if opts.QueueLimit <= 0 || opts.QueueLimit > maxQueueLimit {
+		return errors.New("MR_QUEUE_LIMIT is outside the supported range")
 	}
-	if opts.ReportPath == "" {
-		return errors.New("report path is required")
+	if _, err := validatedAPIBase(opts.ServerURL, opts.APIURL); err != nil {
+		return err
+	}
+	if !repositoryPartPattern.MatchString(opts.RepositoryOwner) {
+		return errors.New("invalid GITHUB_REPOSITORY_OWNER")
+	}
+	if opts.Repository != trustedRepository ||
+		!validRepository(opts.Repository) ||
+		!strings.EqualFold(strings.SplitN(opts.Repository, "/", 2)[0], opts.RepositoryOwner) {
+		return errors.New("GITHUB_REPOSITORY is not the trusted repository or owner")
+	}
+	if opts.Repository != opts.FixtureRepository {
+		return errors.New("fixture repository must be the trusted workflow repository")
+	}
+	if !strings.HasPrefix(opts.TrustedRef, "refs/heads/") ||
+		!validRef(strings.TrimPrefix(opts.TrustedRef, "refs/heads/")) ||
+		opts.Ref != opts.TrustedRef {
+		return errors.New("GITHUB_REF is not the configured trusted branch")
+	}
+	if !shaPattern.MatchString(opts.FixtureRef) {
+		return errors.New("GITHUB_SHA must be a 40 or 64 character hexadecimal commit identifier")
+	}
+	if opts.Workflow != workflowName {
+		return fmt.Errorf("unexpected GITHUB_WORKFLOW %q", opts.Workflow)
+	}
+	expectedWorkflowRef := opts.Repository + "/" + workflowPath + "@" + opts.Ref
+	if opts.WorkflowRef != expectedWorkflowRef {
+		return errors.New("GITHUB_WORKFLOW_REF does not identify the trusted workflow and ref")
+	}
+	if opts.EventName != "schedule" && opts.EventName != "workflow_dispatch" {
+		return fmt.Errorf("untrusted GITHUB_EVENT_NAME %q", opts.EventName)
+	}
+	if opts.Platform == "linux" {
+		if opts.Backend != "docker" ||
+			opts.DockerHost != "unix:///var/run/docker.sock" ||
+			opts.Image != "gerardsmit/multirunner-runner-linux:node" {
+			return errors.New("Linux backend, host, or image is outside the conformance allowlist")
+		}
+	} else if opts.Backend != "containerd" ||
+		!windowsPipePattern.MatchString(opts.DockerHost) ||
+		opts.Image != "gerardsmit/multirunner-runner-windows:dotnet" {
+		return errors.New("Windows backend, host, or image is outside the conformance allowlist")
 	}
 	return nil
 }

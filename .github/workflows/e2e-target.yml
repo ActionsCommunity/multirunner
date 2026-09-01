@@ -1,17 +1,246 @@
-# E2E workload — runs ONLY on a multirunner-provisioned self-hosted runner.
-# Dispatched by the e2e-linux workflow; never runs on GitHub-hosted runners.
+# Install this workflow unchanged in every repository in MR_CONFORMANCE_TARGETS.
+# It is dispatch-only and receives no secret. The trusted orchestrator supplies a
+# validated runner label, fixture repository, and trusted repository revision.
 name: e2e-target
 
 on:
   workflow_dispatch:
+    inputs:
+      platform:
+        required: true
+        type: choice
+        options: [linux, windows]
+      runner_label:
+        required: true
+        type: string
+      runner_prefix:
+        required: true
+        type: string
+      fixture_repository:
+        required: true
+        type: string
+      fixture_ref:
+        required: true
+        type: string
+      cache_namespace:
+        required: true
+        type: choice
+        options: [enabled, disabled]
+
+permissions:
+  contents: read
 
 jobs:
-  run:
-    runs-on: [self-hosted, linux, x64]
+  linux-smoke:
+    if: >-
+      inputs.platform == 'linux' &&
+      inputs.fixture_repository == 'ActionsCommunity/multirunner' &&
+      inputs.runner_prefix == inputs.runner_label &&
+      startsWith(inputs.runner_label, 'mr-conformance-linux-')
+    runs-on: [self-hosted, linux, x64, "${{ inputs.runner_label }}"]
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - name: Prove the job ran on a multirunner runner
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: ${{ inputs.fixture_repository }}
+          ref: ${{ inputs.fixture_ref }}
+          path: source
+          persist-credentials: false
+      - name: Verify Linux provisioning boundaries
+        shell: bash
+        env:
+          RUNNER_PREFIX: ${{ inputs.runner_prefix }}
         run: |
-          echo "runner: $RUNNER_NAME"
-          echo "os: $(uname -a)"
-          test -f README.md && echo "checkout OK"
+          set -euo pipefail
+          [[ "$RUNNER_NAME" == "$RUNNER_PREFIX"* ]]
+          test "$(id -u)" -ne 0
+          test ! -S /var/run/docker.sock
+          test -f source/testdata/conformance/node/package.json
+      - uses: pnpm/action-setup@f520eceda224fe1a4aed5a2a27a194379a409996 # v6
+        with:
+          package_json_file: source/testdata/conformance/node/package.json
+          run_install: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22.23.2
+          cache: pnpm
+          cache-dependency-path: source/testdata/conformance/node/pnpm-lock.yaml
+      - name: Test Node and pnpm fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          pnpm --dir source/testdata/conformance/node install --frozen-lockfile
+          pnpm --dir source/testdata/conformance/node test
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.10.11"
+          enable-cache: true
+          cache-dependency-glob: source/testdata/conformance/python/uv.lock
+      - name: Test Python and uv fixture
+        working-directory: source/testdata/conformance/python
+        run: uv run --locked python -m unittest discover -s tests
+      - name: Create Linux artifact evidence
+        shell: bash
+        run: |
+          printf 'runner=%s\nplatform=linux\ncache=%s\n' \
+            "$RUNNER_NAME" "${{ inputs.cache_namespace }}" > conformance-linux.txt
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: linux-${{ inputs.cache_namespace }}-${{ github.run_id }}
+          path: conformance-linux.txt
+          if-no-files-found: error
+
+  linux-cache-save:
+    if: inputs.platform == 'linux'
+    needs: linux-smoke
+    runs-on: [self-hosted, linux, x64, "${{ inputs.runner_label }}"]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        id: cache
+        with:
+          path: ${{ runner.temp }}/multirunner-conformance
+          key: multirunner-${{ inputs.cache_namespace }}-${{ github.run_id }}
+      - name: Seed cache entry
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${{ steps.cache.outputs.cache-hit }}" != "true"
+          mkdir -p "$RUNNER_TEMP/multirunner-conformance"
+          printf '%s\n' "${{ github.run_id }}" > "$RUNNER_TEMP/multirunner-conformance/run-id"
+
+  linux-cache-restore:
+    if: inputs.platform == 'linux'
+    needs: linux-cache-save
+    runs-on: [self-hosted, linux, x64, "${{ inputs.runner_label }}"]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        id: cache
+        with:
+          path: ${{ runner.temp }}/multirunner-conformance
+          key: multirunner-${{ inputs.cache_namespace }}-${{ github.run_id }}
+          fail-on-cache-miss: true
+      - name: Verify cache restore
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${{ steps.cache.outputs.cache-hit }}" = "true"
+          test "$(cat "$RUNNER_TEMP/multirunner-conformance/run-id")" = "${{ github.run_id }}"
+
+  windows-smoke:
+    if: >-
+      inputs.platform == 'windows' &&
+      inputs.fixture_repository == 'ActionsCommunity/multirunner' &&
+      inputs.runner_prefix == inputs.runner_label &&
+      startsWith(inputs.runner_label, 'mr-conformance-windows-')
+    runs-on: [self-hosted, windows, x64, "${{ inputs.runner_label }}"]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: ${{ inputs.fixture_repository }}
+          ref: ${{ inputs.fixture_ref }}
+          path: source
+          persist-credentials: false
+      - name: Verify Windows provisioning
+        shell: pwsh
+        env:
+          RUNNER_PREFIX: ${{ inputs.runner_prefix }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:RUNNER_NAME.StartsWith($env:RUNNER_PREFIX, [StringComparison]::Ordinal)) {
+              throw "runner name does not use the owned prefix"
+          }
+          if (-not (Test-Path source/testdata/conformance/dotnet/Conformance.slnx)) {
+              throw "checkout did not provide the .NET fixture"
+          }
+      - uses: pnpm/action-setup@f520eceda224fe1a4aed5a2a27a194379a409996 # v6
+        with:
+          package_json_file: source/testdata/conformance/node/package.json
+          run_install: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22.23.2
+          cache: pnpm
+          cache-dependency-path: source/testdata/conformance/node/pnpm-lock.yaml
+      - name: Test Node and pnpm fixture
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          pnpm --dir source/testdata/conformance/node install --frozen-lockfile
+          pnpm --dir source/testdata/conformance/node test
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
+        with:
+          dotnet-version: 10.0.400
+          cache: true
+          cache-dependency-path: source/testdata/conformance/dotnet/**/packages.lock.json
+      - name: Restore, build, test, publish, and execute .NET fixture
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Resolve-Path source/testdata/conformance/dotnet
+          dotnet restore "$root/Conformance.slnx" --locked-mode
+          dotnet restore "$root/src/Conformance/Conformance.csproj" --runtime win-x64 --locked-mode
+          dotnet build "$root/Conformance.slnx" --configuration Release --no-restore
+          dotnet test "$root/Conformance.slnx" --configuration Release --no-build --no-restore
+          dotnet publish "$root/src/Conformance/Conformance.csproj" `
+            --configuration Release --runtime win-x64 --self-contained true `
+            --no-restore --output "$env:RUNNER_TEMP/conformance-publish"
+          $output = & "$env:RUNNER_TEMP/conformance-publish/Conformance.exe"
+          if ($output -ne 'ActionsCommunity/multirunner:windows:ok') {
+              throw "unexpected published artifact output: $output"
+          }
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: windows-${{ inputs.cache_namespace }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/conformance-publish
+          if-no-files-found: error
+
+  windows-cache-save:
+    if: inputs.platform == 'windows'
+    needs: windows-smoke
+    runs-on: [self-hosted, windows, x64, "${{ inputs.runner_label }}"]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        id: cache
+        with:
+          path: ${{ runner.temp }}/multirunner-conformance
+          key: multirunner-${{ inputs.cache_namespace }}-${{ github.run_id }}
+      - name: Seed cache entry
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ('${{ steps.cache.outputs.cache-hit }}' -eq 'true') {
+              throw "unique cache key already existed"
+          }
+          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP/multirunner-conformance" | Out-Null
+          '${{ github.run_id }}' | Set-Content "$env:RUNNER_TEMP/multirunner-conformance/run-id"
+
+  windows-cache-restore:
+    if: inputs.platform == 'windows'
+    needs: windows-cache-save
+    runs-on: [self-hosted, windows, x64, "${{ inputs.runner_label }}"]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        id: cache
+        with:
+          path: ${{ runner.temp }}/multirunner-conformance
+          key: multirunner-${{ inputs.cache_namespace }}-${{ github.run_id }}
+          fail-on-cache-miss: true
+      - name: Verify cache restore
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ('${{ steps.cache.outputs.cache-hit }}' -ne 'true') {
+              throw "cache restore did not report a hit"
+          }
+          $runID = Get-Content "$env:RUNNER_TEMP/multirunner-conformance/run-id"
+          if ($runID -ne '${{ github.run_id }}') {
+              throw "cache restored unexpected content"
+          }
