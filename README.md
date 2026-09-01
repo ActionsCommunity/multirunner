@@ -35,30 +35,32 @@ One small binary. One config file. No Kubernetes, no control plane.
 | **Mix Linux + Windows** | Multiple pools, different OSes, one orchestrator. |
 | **Self-hosted Actions cache** | Built-in v2 cache server — `actions/cache` stays on your host. |
 | **Git mirror cache** | Local bare mirror; `actions/checkout` fetches only the delta. |
-| **Autoscaling** | Keep N warm, or scale on demand (polling or webhook). |
+| **Autoscaling** | Keep N warm, scale on demand (polling or webhook), or let GitHub drive capacity through runner scale sets. |
 | **Runs as a service** | Windows SCM, Linux systemd, macOS launchd. |
 | **Metrics** | Prometheus endpoint + health check. |
 | **Housekeeping** | Cache + mirror garbage collection, automatic. |
 
-Every backend above (Linux containers, Windows containers, Windows VMs) is
-validated end-to-end against a real GitHub repo — including real toolchains
-(`actions/checkout`, `actions/setup-dotnet`, `dotnet build`) and `actions/cache`
-save/restore against the local server.
+The Linux Docker backend is validated end-to-end against a real GitHub repo,
+including real toolchains (`actions/checkout`, `actions/setup-dotnet`,
+`dotnet build`) and `actions/cache` save/restore against the local server.
+Windows container images receive build and smoke checks in CI. Integration jobs
+for containerd and QEMU are included for suitable self-hosted infrastructure.
 
 ---
 
 ## How it works
 
-For each runner slot, multirunner:
+In `pool` and `autoscale` modes, multirunner:
 
 1. Calls GitHub's `generate-jitconfig` (repo / repos / org / enterprise scope) for a
    single-use registration.
-2. Launches a clean runner — a container or a VM — that runs the **stock GitHub
+2. Launches a clean runner, either a container or a VM, that runs the **stock GitHub
    runner** with that JIT config.
 3. The runner takes exactly one job, then deregisters itself (ephemeral).
 4. multirunner notices it exited and immediately starts a fresh one.
 
-It runs the official `actions/runner` binary unchanged — nothing is reimplemented,
+In `scaleset` mode, GitHub's scale-set session supplies the JIT config and desired
+runner count instead. Every mode runs the official `actions/runner` binary unchanged,
 so jobs behave exactly as on GitHub-hosted runners.
 
 ---
@@ -370,7 +372,7 @@ git_cache:
 ## Autoscaling
 
 ```yaml
-provisioning: pool       # pool | autoscale
+provisioning: pool       # pool | autoscale | scaleset
 ```
 
 - **`pool`** (default) — keep N runners warm per pool. Zero inbound; works behind
@@ -381,6 +383,61 @@ provisioning: pool       # pool | autoscale
   - **Webhook** (low-latency) — set `webhook.listen` to receive `workflow_job`
     events (needs a reachable URL; use a tunnel like smee.io / cloudflared).
     Signatures verified with `webhook.secret`.
+- **`scaleset`** — let GitHub decide. A [runner scale set][scaleset] holds a
+  long-poll session open and reports the desired runner count, which is the same
+  mechanism actions-runner-controller uses.
+
+### Runner scale sets
+
+In the other two modes multirunner decides when to launch. In `scaleset` mode it
+does not: GitHub reports how many runners the scale set should have and
+multirunner provisions to that number. That buys three things:
+
+- Assignments arrive in seconds, with no poll interval to tune.
+- No inbound endpoint, so it stays NAT-safe like `pool`.
+- Demand is the queue depth GitHub computes for the scale set, rather than one
+  inferred from job events. The host also advertises real capacity, so GitHub
+  knows when it is saturated instead of having requests dropped.
+
+Runners still come from the same backends, because the session hands back the
+same encoded JIT config used by the other provisioning modes. Docker,
+containerd, Podman and QEMU all work unchanged.
+
+```yaml
+provisioning: scaleset
+
+github:
+  scope: repo          # repo | org | enterprise (a scale set binds to one target)
+  owner: my-org
+  repo: my-repo
+
+pools:
+  - name: linux-pool
+    os: linux
+    size: 4            # also the maximum capacity advertised to GitHub
+    scale_set: multirunner-linux
+    runner_group: Default
+    labels: [self-hosted, linux, x64]
+
+  - name: windows-pool
+    os: windows
+    size: 2
+    scale_set: multirunner-windows
+    labels: [self-hosted, windows, x64]
+```
+
+Each pool needs its own `scale_set`, because a scale set carries one label set
+and therefore one runner OS. Names are reused across restarts, so restarting
+multirunner does not churn registrations or strand queued jobs. Target a scale
+set from a workflow the same way as any other runner:
+
+```yaml
+jobs:
+  build:
+    runs-on: [self-hosted, linux, x64]
+```
+
+[scaleset]: https://github.com/actions/scaleset
 
 ---
 
@@ -417,13 +474,14 @@ Set `metrics.listen` (e.g. `127.0.0.1:9090`) to expose:
 
 Built with cobra — `multirunner <command> --help` for details; `--config` is global.
 
-```
+```text
 multirunner [run]                   run the orchestrator (default)
 multirunner connect --org <org>     create + install a GitHub App, write auth to config
 multirunner doctor                  check daemons + container mode, no runners
 multirunner detect                  scan a repo, recommend image flavors + pools
 multirunner bake                    build a golden Windows VM image (qemu backend)
 multirunner install-containerd      install the Windows-container stack (elevates)
+multirunner install-windows-daemon  install the Windows Docker daemon (elevates)
 multirunner service ...             install | uninstall | start | stop | restart
 multirunner completion <shell>      shell completion script
 ```
@@ -444,7 +502,7 @@ GOOS=darwin  GOARCH=arm64 go build -o multirunner        ./cmd/multirunner
 
 ## Layout
 
-```
+```text
 cmd/multirunner    orchestrator + CLI
 cmd/cacheserver    standalone cache server
 internal/config    config schema + loader
@@ -452,6 +510,7 @@ internal/github    JIT client (repo/org/enterprise, PAT/App)
 internal/backend   container backends (Docker/Podman, containerd Windows)
 internal/winvm     QEMU Windows-VM backend + golden bake
 internal/pool      per-OS ephemeral pool + reprovision loop
+internal/scaleset  runner scale-set sessions + lifecycle management
 internal/cache     self-hosted v2 cache server
 internal/gitcache  host git mirror manager
 images/            runner + cacheserver Dockerfiles

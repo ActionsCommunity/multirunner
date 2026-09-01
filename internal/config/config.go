@@ -27,11 +27,21 @@ const (
 	ProvisioningPool      Provisioning = "pool"
 	ProvisioningAutoscale Provisioning = "autoscale"
 	ProvisioningWebhook   Provisioning = "webhook" // alias for autoscale (kept for compatibility)
+	// ProvisioningScaleset lets GitHub drive capacity through a runner scale
+	// set. Unlike pool and autoscale, the decision is not made here: a
+	// long-poll session reports the desired runner count, which is the same
+	// mechanism actions-runner-controller uses.
+	ProvisioningScaleset Provisioning = "scaleset"
 )
 
 // IsAutoscale reports whether the provisioning mode scales on demand.
 func (p Provisioning) IsAutoscale() bool {
 	return p == ProvisioningAutoscale || p == ProvisioningWebhook
+}
+
+// IsScaleset reports whether GitHub drives capacity through a scale set.
+func (p Provisioning) IsScaleset() bool {
+	return p == ProvisioningScaleset
 }
 
 // Config is the root configuration.
@@ -162,6 +172,13 @@ type Pool struct {
 	Docker                 Docker     `yaml:"docker"`
 	ToolCache              ToolCache  `yaml:"tool_cache"`
 	MaxConsecutiveFailures int        `yaml:"max_consecutive_failures"`
+	// ScaleSet names the runner scale set that feeds this pool when
+	// provisioning is "scaleset". Each pool needs its own, because a scale set
+	// carries one set of labels and therefore one runner OS.
+	ScaleSet string `yaml:"scale_set"`
+	// RunnerGroup is the runner group the scale set is created in. Empty means
+	// the default group.
+	RunnerGroup string `yaml:"runner_group"`
 }
 
 // publishedFlavors lists the per-OS image flavors CI builds and pushes as tags
@@ -236,7 +253,7 @@ type QEMU struct {
 // runner is launched via nerdctl; isolation auto-detects (process on Server,
 // hyperv on client) when left empty.
 type Containerd struct {
-	Address   string `yaml:"address"`   // containerd pipe (default \\.\pipe\containerd-multirunner)
+	Address   string `yaml:"address"`   // containerd pipe (default \\.\pipe\containerd-containerd)
 	Nerdctl   string `yaml:"nerdctl"`   // path to nerdctl.exe ("" => from PATH)
 	Namespace string `yaml:"namespace"` // containerd namespace (default "multirunner")
 	Isolation string `yaml:"isolation"` // process | hyperv | auto (default)
@@ -462,8 +479,8 @@ func (c *Config) Validate() error {
 		}
 	}
 
-	if c.Provisioning != ProvisioningPool && !c.Provisioning.IsAutoscale() {
-		return fmt.Errorf("provisioning must be pool|autoscale|webhook, got %q", c.Provisioning)
+	if c.Provisioning != ProvisioningPool && !c.Provisioning.IsAutoscale() && !c.Provisioning.IsScaleset() {
+		return fmt.Errorf("provisioning must be pool|autoscale|webhook|scaleset, got %q", c.Provisioning)
 	}
 
 	if len(c.Pools) == 0 {
@@ -491,6 +508,21 @@ func (c *Config) Validate() error {
 		}
 		if p.Size < 1 {
 			return fmt.Errorf("pools[%q].size must be >= 1", p.Name)
+		}
+		if c.Provisioning.IsScaleset() && p.ScaleSet == "" {
+			// Without this the pool would start, hold a session against nothing,
+			// and never receive an assignment. Fail at startup instead.
+			return fmt.Errorf("pools[%q].scale_set is required for provisioning: scaleset", p.Name)
+		}
+	}
+
+	if c.Provisioning.IsScaleset() {
+		seen := make(map[string]string, len(c.Pools))
+		for _, p := range c.Pools {
+			if prev, dup := seen[p.ScaleSet]; dup {
+				return fmt.Errorf("pools[%q] and pools[%q] share scale_set %q; each pool needs its own", prev, p.Name, p.ScaleSet)
+			}
+			seen[p.ScaleSet] = p.Name
 		}
 	}
 	return nil

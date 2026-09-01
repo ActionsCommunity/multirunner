@@ -132,10 +132,53 @@ github: {scope: repos, owner: o, repos: [a, O/A]}
 auth: {pat: x}
 pools: [{name: p, os: linux, docker: {host: h}}]`,
 	}
+
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {
 			if _, err := Load(writeConfig(t, body)); err == nil {
 				t.Errorf("expected validation error for %q", name)
+			}
+		})
+	}
+}
+
+func TestLoadScalesetProvisioning(t *testing.T) {
+	p := writeConfig(t, `
+github: {scope: org, owner: o}
+auth: {pat: x}
+provisioning: scaleset
+pools:
+  - {name: linux, os: linux, scale_set: linux-runners, docker: {host: h}}
+  - {name: windows, os: windows, scale_set: windows-runners, docker: {host: h2}}
+`)
+	c, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !c.Provisioning.IsScaleset() {
+		t.Fatalf("provisioning = %q, want scaleset", c.Provisioning)
+	}
+}
+
+func TestScalesetProvisioningRequiresUniqueNames(t *testing.T) {
+	cases := map[string]string{
+		"missing scale set": `
+github: {scope: org, owner: o}
+auth: {pat: x}
+provisioning: scaleset
+pools: [{name: p, os: linux, docker: {host: h}}]`,
+		"duplicate scale set": `
+github: {scope: org, owner: o}
+auth: {pat: x}
+provisioning: scaleset
+pools:
+  - {name: p1, os: linux, scale_set: shared, docker: {host: h}}
+  - {name: p2, os: linux, scale_set: shared, docker: {host: h}}`,
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Load(writeConfig(t, body)); err == nil {
+				t.Fatal("expected validation error")
 			}
 		})
 	}
