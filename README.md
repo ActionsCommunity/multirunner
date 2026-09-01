@@ -77,6 +77,36 @@ go install github.com/GerardSmit/multirunner/cmd/multirunner@latest
 Prebuilt binaries are published for **Linux, Windows, and macOS**, each in
 **x64 and ARM64**.
 
+### Copilot CLI plugin
+
+This repository includes a Copilot CLI plugin for guided host setup and
+day-two operations. From a checkout of this repository:
+
+```sh
+copilot plugin install .
+copilot plugin list
+```
+
+Reinstall the local plugin after changing or updating the checkout because
+Copilot CLI caches installed plugin contents.
+
+Ask Copilot to use one of these focused skills:
+
+| Skill | Purpose |
+|---|---|
+| `multirunner-setup` | Assess a host, install a checksum-verified release, configure it, and prove a canary job |
+| `multirunner-health` | Run a bounded, read-only service and runtime health check |
+| `multirunner-targets` | Add, remove, or validate GitHub targets with approval before writes |
+| `multirunner-troubleshoot` | Diagnose runtime, image, authentication, queue, DNS, and service failures |
+| `multirunner-update` | Upgrade verified binaries and images with rollback and canary checks |
+
+The setup and update skills use published binaries and `SHA256SUMS.txt`.
+They don't require a source build or Go toolchain. Every skill assesses
+read-only state first, preserves existing configuration, and asks before
+elevation, package installation, service changes, GitHub writes, workflow
+dispatch, or removal. Secret values and JIT configuration must never be
+shown in chat or logs.
+
 ---
 
 ## Quick start (Linux)
