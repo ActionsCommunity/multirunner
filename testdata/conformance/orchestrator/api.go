@@ -143,64 +143,74 @@ func waitForRun(
 	opts options,
 	out io.Writer,
 ) (report, error) {
+	var observedQueue *time.Duration
 	for {
-		run, err := client.workflowRun(ctx, repository, runID)
+		sleepFor := opts.PollInterval
+		run, observedAt, err := client.workflowRun(ctx, repository, runID)
 		if err != nil {
 			return report{}, err
 		}
 		fmt.Fprintf(out, "target=%s run_id=%d phase=workload status=%s conclusion=%s\n",
 			repository, runID, run.GetStatus(), run.GetConclusion())
-		if run.GetStatus() == "completed" {
-			jobs, err := client.workflowJobs(ctx, repository, runID)
+
+		completed := run.GetStatus() == "completed"
+		if completed && run.GetConclusion() != "success" {
+			return report{}, fmt.Errorf("target %s run %d concluded %s", repository, runID, run.GetConclusion())
+		}
+
+		var jobs []*githubapi.WorkflowJob
+		if observedQueue == nil || completed {
+			jobs, err = client.workflowJobs(ctx, repository, runID)
 			if err != nil {
 				return report{}, err
 			}
-			startedJobs := 0
-			for _, job := range jobs {
-				if job == nil || job.StartedAt == nil {
-					continue
-				}
-				startedJobs++
-				if !strings.HasPrefix(job.GetRunnerName(), opts.RunnerPrefix) {
-					return report{}, fmt.Errorf(
-						"target %s job %s ran on unowned runner %s",
-						repository, job.GetName(), job.GetRunnerName(),
-					)
-				}
-				fmt.Fprintf(
-					out,
-					"target=%s pool=conformance runner=%s phase=workload job=%s conclusion=%s\n",
-					repository, job.GetRunnerName(), job.GetName(), job.GetConclusion(),
-				)
-			}
-			if run.GetConclusion() != "success" {
-				return report{}, fmt.Errorf("target %s run %d concluded %s", repository, runID, run.GetConclusion())
-			}
-			if startedJobs == 0 {
-				return report{}, fmt.Errorf("target %s run %d exposed no started jobs", repository, runID)
-			}
-			queue, err := queueLatency(run.GetCreatedAt().Time, jobs)
+		}
+		if observedQueue == nil {
+			queue, started, err := observedQueueDuration(run.GetCreatedAt().Time, observedAt, jobs)
 			if err != nil {
 				return report{}, fmt.Errorf("target %s run %d: %w", repository, runID, err)
 			}
-			fmt.Fprintf(out, "target=%s run_id=%d queue_to_start_ms=%d limit_ms=%d\n",
-				repository, runID, queue.Milliseconds(), opts.QueueLimit.Milliseconds())
-			if queue > opts.QueueLimit {
-				return report{}, fmt.Errorf("target %s queue latency %s exceeded %s", repository, queue, opts.QueueLimit)
+			if !started && queue >= opts.QueueLimit {
+				return report{}, fmt.Errorf(
+					"target %s remained queued for %s, reaching limit %s",
+					repository, queue, opts.QueueLimit,
+				)
 			}
-			return report{
-				Repository:  repository,
-				RunID:       runID,
-				Platform:    opts.Platform,
-				CacheMode:   opts.CacheMode,
-				QueueMillis: queue.Milliseconds(),
-				Conclusion:  run.GetConclusion(),
-			}, nil
+			if !started && opts.QueueLimit-queue < sleepFor {
+				sleepFor = opts.QueueLimit - queue
+			}
+			if started {
+				observedQueue = &queue
+				if queue > opts.QueueLimit {
+					return report{}, fmt.Errorf(
+						"target %s queue latency %s exceeded %s",
+						repository, queue, opts.QueueLimit,
+					)
+				}
+			}
 		}
-		if err := sleep(ctx, opts.PollInterval); err != nil {
+		if completed {
+			return completedRunReport(repository, runID, run, jobs, opts, out)
+		}
+		if err := sleep(ctx, sleepFor); err != nil {
 			return report{}, fmt.Errorf("wait for run %d: %w", runID, err)
 		}
 	}
+}
+
+func observedQueueDuration(
+	createdAt time.Time,
+	observedAt time.Time,
+	jobs []*githubapi.WorkflowJob,
+) (time.Duration, bool, error) {
+	for _, job := range jobs {
+		if job != nil && job.StartedAt != nil {
+			queue, err := queueLatency(createdAt, jobs)
+			return queue, true, err
+		}
+	}
+	queue, err := durationBetween(createdAt, observedAt)
+	return queue, false, err
 }
 
 func queueLatency(createdAt time.Time, jobs []*githubapi.WorkflowJob) (time.Duration, error) {
@@ -214,13 +224,68 @@ func queueLatency(createdAt time.Time, jobs []*githubapi.WorkflowJob) (time.Dura
 			first = startedAt
 		}
 	}
-	if createdAt.IsZero() || first.IsZero() {
+	if first.IsZero() {
 		return 0, errors.New("workflow run did not expose queue timestamps")
 	}
-	if first.Before(createdAt) {
-		return 0, errors.New("first job started before the workflow run was created")
+	return durationBetween(createdAt, first)
+}
+
+func durationBetween(createdAt time.Time, observedAt time.Time) (time.Duration, error) {
+	if createdAt.IsZero() || observedAt.IsZero() {
+		return 0, errors.New("workflow run did not expose queue timestamps")
 	}
-	return first.Sub(createdAt), nil
+	if observedAt.Before(createdAt) {
+		return 0, errors.New("queue observation occurred before workflow run creation")
+	}
+	return observedAt.Sub(createdAt), nil
+}
+
+func completedRunReport(
+	repository string,
+	runID int64,
+	run *githubapi.WorkflowRun,
+	jobs []*githubapi.WorkflowJob,
+	opts options,
+	out io.Writer,
+) (report, error) {
+	startedJobs := 0
+	for _, job := range jobs {
+		if job == nil || job.StartedAt == nil {
+			continue
+		}
+		startedJobs++
+		if !strings.HasPrefix(job.GetRunnerName(), opts.RunnerPrefix) {
+			return report{}, fmt.Errorf(
+				"target %s job %s ran on unowned runner %s",
+				repository, job.GetName(), job.GetRunnerName(),
+			)
+		}
+		fmt.Fprintf(
+			out,
+			"target=%s pool=conformance runner=%s phase=workload job=%s conclusion=%s\n",
+			repository, job.GetRunnerName(), job.GetName(), job.GetConclusion(),
+		)
+	}
+	if startedJobs == 0 {
+		return report{}, fmt.Errorf("target %s run %d exposed no started jobs", repository, runID)
+	}
+	queue, err := queueLatency(run.GetCreatedAt().Time, jobs)
+	if err != nil {
+		return report{}, fmt.Errorf("target %s run %d: %w", repository, runID, err)
+	}
+	fmt.Fprintf(out, "target=%s run_id=%d queue_to_start_ms=%d limit_ms=%d\n",
+		repository, runID, queue.Milliseconds(), opts.QueueLimit.Milliseconds())
+	if queue > opts.QueueLimit {
+		return report{}, fmt.Errorf("target %s queue latency %s exceeded %s", repository, queue, opts.QueueLimit)
+	}
+	return report{
+		Repository:  repository,
+		RunID:       runID,
+		Platform:    opts.Platform,
+		CacheMode:   opts.CacheMode,
+		QueueMillis: queue.Milliseconds(),
+		Conclusion:  run.GetConclusion(),
+	}, nil
 }
 
 func waitForCleanup(
@@ -306,13 +371,31 @@ func (c *apiClient) workflowRun(
 	ctx context.Context,
 	repository string,
 	runID int64,
-) (*githubapi.WorkflowRun, error) {
+) (*githubapi.WorkflowRun, time.Time, error) {
 	owner, repo := splitRepository(repository)
-	run, _, err := c.github.Actions.GetWorkflowRunByID(ctx, owner, repo, runID)
+	run, response, err := c.github.Actions.GetWorkflowRunByID(ctx, owner, repo, runID)
 	if err != nil {
-		return nil, c.apiError(fmt.Sprintf("get run %d in %s", runID, repository), err)
+		return nil, time.Time{}, c.apiError(fmt.Sprintf("get run %d in %s", runID, repository), err)
 	}
-	return run, nil
+	observedAt, err := responseServerTime(response)
+	if err != nil {
+		return nil, time.Time{}, fmt.Errorf("get run %d in %s: %w", runID, repository, err)
+	}
+	return run, observedAt, nil
+}
+
+func responseServerTime(response *githubapi.Response) (time.Time, error) {
+	if response == nil || response.Response == nil {
+		return time.Time{}, errors.New("GitHub API response is missing")
+	}
+	observedAt, err := http.ParseTime(response.Header.Get("Date"))
+	if err != nil || observedAt.IsZero() {
+		if err == nil {
+			err = errors.New("zero timestamp")
+		}
+		return time.Time{}, fmt.Errorf("GitHub API response has invalid Date header: %w", err)
+	}
+	return observedAt, nil
 }
 
 func (c *apiClient) workflowJobs(

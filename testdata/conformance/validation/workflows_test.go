@@ -185,6 +185,17 @@ func TestConformanceActionsArePinned(t *testing.T) {
 	}
 }
 
+func TestWorkflowsRejectKnownActionTagObjectPins(t *testing.T) {
+	t.Parallel()
+	const pnpmV6TagObject = "pnpm/action-setup@f520eceda224fe1a4aed5a2a27a194379a409996"
+	for _, name := range allWorkflowNames(t) {
+		content := string(readProjectFile(t, ".github", "workflows", name))
+		if strings.Contains(content, pnpmV6TagObject) {
+			t.Errorf("%s pins pnpm/action-setup to the v6 tag object instead of its commit", name)
+		}
+	}
+}
+
 func TestConformanceMatrixCoversIssueRequirements(t *testing.T) {
 	t.Parallel()
 	main := string(readProjectFile(t, ".github", "workflows", "e2e-linux.yml"))
@@ -213,7 +224,7 @@ func TestConformanceMatrixCoversIssueRequirements(t *testing.T) {
 		"actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
 		"actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
 		"actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
-		"pnpm/action-setup@f520eceda224fe1a4aed5a2a27a194379a409996",
+		"pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86",
 		"astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d",
 		"dotnet restore",
 		"dotnet build",
