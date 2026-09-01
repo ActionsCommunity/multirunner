@@ -19,8 +19,14 @@ on:
 jobs:
   version-policy:
     runs-on: ubuntu-latest
+    outputs:
+      buildtools-lines: ${{ steps.buildtools-lines.outputs.lines }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Discover Build Tools release lines
+        id: buildtools-lines
+        run: echo "lines=$(jq -c '.buildtools.lines | keys' images/versions.json)" >> "$GITHUB_OUTPUT"
 
       - name: Require image targets for newly supported .NET channels
         run: |
@@ -143,11 +149,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Windows images are large (roughly ten GB each), so building the whole
-      # graph before testing any of it exhausts the hosted runner's disk on the
-      # buildtools layer. Build one branch, assert it, then delete its derived
-      # tags and reclaim the space before starting the next. `minimal` is kept
-      # throughout because both branches build on it.
+      # Windows images are large, so keep this job to the Node/.NET branch.
+      # Build Tools release lines run on separate clean runners below because
+      # Windows container layer deletion does not reliably return disk space.
       - name: Build minimal
         shell: bash
         run: |
@@ -181,32 +185,11 @@ jobs:
           docker run --rm --entrypoint cmd $B:dotnet /c \
             "if not \"%DOTNET_ROOT%\"==\"C:\\dotnet\" exit 1"
 
-          # Free this branch before building the next one. `minimal` survives
-          # because buildtools layers on it.
+          # Reclaim the derived branch before the minimal-image smoke tests.
           docker rmi -f $B:dotnet $B:node
           docker builder prune -af
           docker image prune -f
           df -h / || true
-
-      - name: Build and assert buildtools
-        shell: bash
-        run: |
-          set -euo pipefail
-          B=mr-check-windows
-          BUILDTOOLS_LINES="$(node -e "const v=require('./images/versions.json'); console.log(Object.keys(v.buildtools.lines).join(' '))")"
-          for line in $BUILDTOOLS_LINES; do
-            docker build -f images/windows/flavors/buildtools.Dockerfile \
-              --build-arg "PARENT=$B:minimal" \
-              --build-arg "BUILDTOOLS_LINE=$line" \
-              -t "$B:buildtools-$line" .
-            docker run --rm --entrypoint powershell "$B:buildtools-$line" -NoProfile -Command \
-              "& 'C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe' -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath"
-            docker run --rm --entrypoint cmd "$B:buildtools-$line" /s /c \
-              "if not \"%VSBUILDTOOLS%\"==\"C:\BuildTools\" exit 1 && call \"%VSBUILDTOOLS%\Common7\Tools\VsDevCmd.bat\" && where cl && msbuild -version"
-            docker rmi -f "$B:buildtools-$line"
-            docker builder prune -af
-            docker image prune -f
-          done
 
       # The cache-redirect patch must live ONLY in the sidecar. If it leaks into
       # the live DLL, ACTIONS_RESULTS_URL is unset whenever cache.enabled is false
@@ -281,3 +264,29 @@ jobs:
           # Actions, so it must resolve on PATH or `shell: pwsh` steps fail.
           docker run --rm --entrypoint cmd $B:minimal /c "where pwsh && where git"
           docker run --rm --entrypoint pwsh $B:minimal -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'
+
+  windows-buildtools:
+    name: windows-buildtools-${{ matrix.line }}
+    needs: version-policy
+    strategy:
+      fail-fast: false
+      matrix:
+        line: ${{ fromJSON(needs.version-policy.outputs.buildtools-lines) }}
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build minimal and assert Build Tools ${{ matrix.line }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          B=mr-check-windows-buildtools-${{ matrix.line }}
+          docker build -f images/windows/Dockerfile -t "$B:minimal" .
+          docker build -f images/windows/flavors/buildtools.Dockerfile \
+            --build-arg "PARENT=$B:minimal" \
+            --build-arg "BUILDTOOLS_LINE=${{ matrix.line }}" \
+            -t "$B:buildtools" .
+          docker run --rm --entrypoint powershell "$B:buildtools" -NoProfile -Command \
+            "& 'C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe' -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath"
+          docker run --rm --entrypoint cmd "$B:buildtools" /s /c \
+            "if not \"%VSBUILDTOOLS%\"==\"C:\BuildTools\" exit 1 && call \"%VSBUILDTOOLS%\Common7\Tools\VsDevCmd.bat\" && where cl && msbuild -version"
