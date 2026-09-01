@@ -51,6 +51,9 @@ func (stubBackend) Ping(context.Context) error                { return nil }
 func (stubBackend) OSType(context.Context) (string, error)    { return "linux", nil }
 func (stubBackend) EnsureImage(context.Context, string) error { return nil }
 func (b stubBackend) Launch(context.Context, backend.LaunchRequest) (backend.RunnerHandle, error) {
+	if b.handle == nil {
+		return nil, b.launchErr
+	}
 	return b.handle, b.launchErr
 }
 func (stubBackend) Close() error { return nil }
@@ -210,15 +213,47 @@ func TestRunOnceReportsDeregisterFailure(t *testing.T) {
 	}
 }
 
-func TestRunOnceDeregistersAfterLaunchFailure(t *testing.T) {
+func TestRunOnceDeregistersWhenLaunchProvesNoInstance(t *testing.T) {
 	gh, deletes := jitServer(t, http.StatusNoContent)
-	_, err := RunOnce(context.Background(), gh, stubBackend{launchErr: errors.New("partial launch")},
+	_, err := RunOnce(context.Background(), gh, stubBackend{launchErr: errors.New("create failed")},
 		Spec{Name: "mr-1", Image: "img"}, discardLogger())
-	if err == nil || !strings.Contains(err.Error(), "partial launch") {
+	if err == nil || !strings.Contains(err.Error(), "create failed") {
 		t.Fatalf("RunOnce error = %v, want launch failure", err)
 	}
 	if got := deletes(); len(got) != 1 {
-		t.Errorf("deletes = %v, want registration reclaimed after launch failure", got)
+		t.Errorf("deletes = %v, want registration reclaimed after confirmed pre-launch failure", got)
+	}
+}
+
+func TestRunOnceTerminatesPartialLaunchBeforeDeregistering(t *testing.T) {
+	gh, deletes := jitServer(t, http.StatusNoContent)
+	handle := &stubHandle{}
+	_, err := RunOnce(context.Background(), gh,
+		stubBackend{handle: handle, launchErr: errors.New("start response lost")},
+		Spec{Name: "mr-1", Image: "img"}, discardLogger())
+	if err == nil || !strings.Contains(err.Error(), "start response lost") {
+		t.Fatalf("RunOnce error = %v, want launch failure", err)
+	}
+	if !handle.killed {
+		t.Fatal("ambiguous launch must be terminated before deregistration")
+	}
+	if got := deletes(); len(got) != 1 {
+		t.Errorf("deletes = %v, want registration reclaimed after confirmed termination", got)
+	}
+}
+
+func TestRunOnceKeepsRegistrationWhenPartialLaunchKillFails(t *testing.T) {
+	gh, deletes := jitServer(t, http.StatusNoContent)
+	handle := &stubHandle{killErr: errors.New("daemon unreachable")}
+	_, err := RunOnce(context.Background(), gh,
+		stubBackend{handle: handle, launchErr: errors.New("start response lost")},
+		Spec{Name: "mr-1", Image: "img"}, discardLogger())
+	if err == nil || !strings.Contains(err.Error(), "start response lost") ||
+		!strings.Contains(err.Error(), "daemon unreachable") {
+		t.Fatalf("RunOnce error = %v, want launch and kill failures", err)
+	}
+	if got := deletes(); len(got) != 0 {
+		t.Errorf("deletes = %v, ambiguous live runner registration must be preserved", got)
 	}
 }
 

@@ -10,10 +10,13 @@ ARG PARENT=gerardsmit/multirunner-runner-windows:minimal
 FROM ${PARENT}
 
 SHELL ["powershell", "-NoProfile", "-Command", "$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue';"]
+COPY images/versions.json C:/image-versions.json
 
 # vs_buildtools.exe returns 3010 (success, reboot required) on a clean install;
 # treat 0 and 3010 as success and anything else as failure.
-RUN Invoke-WebRequest -Uri https://aka.ms/vs/17/release/vs_buildtools.exe -OutFile C:/vs_buildtools.exe; \
+RUN $v = (Get-Content C:/image-versions.json -Raw | ConvertFrom-Json).buildtools; \
+    Invoke-WebRequest -Uri $v.bootstrapper_url -OutFile C:/vs_buildtools.exe; \
+    if ((Get-FileHash C:/vs_buildtools.exe -Algorithm SHA256).Hash -ne $v.bootstrapper_sha256) { throw 'Build Tools bootstrapper checksum mismatch' }; \
     $p = Start-Process -FilePath C:/vs_buildtools.exe -Wait -PassThru -ArgumentList \
       '--quiet','--wait','--norestart','--nocache', \
       '--installPath','C:\BuildTools', \
@@ -23,8 +26,12 @@ RUN Invoke-WebRequest -Uri https://aka.ms/vs/17/release/vs_buildtools.exe -OutFi
       '--add','Microsoft.VisualStudio.Component.VC.CMake.Project', \
       '--includeRecommended'; \
     if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { throw \"vs_buildtools failed: $($p.ExitCode)\" }; \
-    Remove-Item -Force C:/vs_buildtools.exe; \
-    Remove-Item -Recurse -Force $env:TEMP/*
+    Remove-Item -Force C:/vs_buildtools.exe, C:/image-versions.json; \
+    if ([string]::IsNullOrWhiteSpace($env:TEMP)) { throw 'TEMP is empty; refusing cleanup' }; \
+    $tempPath = [IO.Path]::GetFullPath($env:TEMP).TrimEnd('\'); \
+    $allowedTempPaths = @('C:\Users\ContainerAdministrator\AppData\Local\Temp', 'C:\Windows\Temp'); \
+    if ($tempPath -notin $allowedTempPaths) { throw (\"unexpected TEMP path; refusing cleanup: $tempPath\") }; \
+    Get-ChildItem -LiteralPath $tempPath -Force | Remove-Item -Recurse -Force
 
 # vswhere.exe is installed by the VS Installer bootstrapper (not the workload) at
 # the fixed path C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe,

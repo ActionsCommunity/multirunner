@@ -126,6 +126,19 @@ func (gh GitHub) ResolvedRepos() []RepoRef {
 	return refs
 }
 
+// RepoTargets returns the concrete repositories available to repository-level
+// diagnostics for both singular and plural repository scopes.
+func (gh GitHub) RepoTargets() []RepoRef {
+	switch gh.Scope {
+	case ScopeRepo:
+		return []RepoRef{{Owner: gh.Owner, Repo: gh.Repo}}
+	case ScopeRepos:
+		return gh.ResolvedRepos()
+	default:
+		return nil
+	}
+}
+
 // Auth holds either a PAT or GitHub App credentials. PAT takes precedence when set.
 type Auth struct {
 	PAT            string `yaml:"pat"`

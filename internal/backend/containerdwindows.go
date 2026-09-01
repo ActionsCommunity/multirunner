@@ -121,7 +121,11 @@ func (b *containerdBackend) Launch(ctx context.Context, req LaunchRequest) (Runn
 
 	out, err := b.run(ctx, args...)
 	if err != nil {
-		return nil, fmt.Errorf("run container %s: %w", req.Name, err)
+		// `nerdctl run -d` can create/start the container before its process is
+		// cancelled or its response is lost. The deterministic name remains a
+		// valid cleanup handle even when no container ID was printed.
+		return &containerdHandle{b: b, name: req.Name, id: req.Name},
+			fmt.Errorf("run container %s: %w", req.Name, err)
 	}
 	id := strings.TrimSpace(out)
 	if id == "" {

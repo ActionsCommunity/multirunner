@@ -90,11 +90,14 @@ Runs identically in the foreground or under a service manager (see "service").`,
 
 	doctorC := &cobra.Command{
 		Use:   "doctor",
-		Short: "Check daemon reachability and container mode without starting runners",
+		Short: "Check daemons, repository access, and scheduling without starting runners",
 		Long: `Run preflight checks against the config: for every pool, confirm its Docker/
 Podman daemon is reachable and running in the expected container mode (a Linux
 daemon assigned to a Windows pool, or vice versa, is reported as a problem).
-Exits non-zero if any pool is misconfigured.`,
+For repo/repositories scope, also verify that Actions is enabled and perform a
+heuristic workflow scan for the self-hosted label. The heuristic can miss custom
+label and matrix expressions, but incomplete API checks still fail preflight.
+Exits non-zero if any required check is incomplete or misconfigured.`,
 		Example: "  multirunner doctor --config config.yaml",
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -811,7 +814,7 @@ func doctor(configPath string) error {
 // identical to a repo that is merely idle, which is what makes it worth calling
 // out here. Returns an error if any repo is off, so doctor exits non-zero.
 func checkActionsEnabled(ctx context.Context, cfg *config.Config) error {
-	if cfg.GitHub.Scope != config.ScopeRepos {
+	if cfg.GitHub.Scope != config.ScopeRepo && cfg.GitHub.Scope != config.ScopeRepos {
 		return nil
 	}
 	var disabled []string
@@ -830,7 +833,7 @@ func checkActionsEnabled(ctx context.Context, cfg *config.Config) error {
 	if len(disabled) > 0 {
 		fmt.Printf("\nWARNING: Actions is disabled on %d of %d configured repo(s): %s\n"+
 			"        These repos can never queue a job, so multirunner polls them for nothing.\n"+
-			"        fix: enable Actions under Settings > Actions > General, or drop them from github.repos.\n",
+			"        fix: enable Actions under Settings > Actions > General, or remove them from multirunner's GitHub scope.\n",
 			len(disabled), len(results), strings.Join(disabled, ", "))
 	}
 	if len(disabled) > 0 || len(incomplete) > 0 {
@@ -851,7 +854,7 @@ func checkActionsEnabled(ctx context.Context, cfg *config.Config) error {
 // so a miss here is possible. That is why this only ever advises and never fails
 // doctor: a false alarm on a working repo would be worse than staying quiet.
 func warnNoSelfHostedWorkflows(ctx context.Context, cfg *config.Config) error {
-	if cfg.GitHub.Scope != config.ScopeRepos {
+	if cfg.GitHub.Scope != config.ScopeRepo && cfg.GitHub.Scope != config.ScopeRepos {
 		return nil
 	}
 	var unused []string
@@ -868,7 +871,7 @@ func warnNoSelfHostedWorkflows(ctx context.Context, cfg *config.Config) error {
 	if len(unused) > 0 {
 		fmt.Printf("\nNOTE: heuristic scan found no workflow targeting a self-hosted runner in %d of %d configured repo(s): %s\n"+
 			"        multirunner polls these every interval but they can never send it a job.\n"+
-			"        fix: point a workflow at `runs-on: [self-hosted, ...]`, or drop them from github.repos.\n"+
+			"        fix: point a workflow at `runs-on: [self-hosted, ...]`, or remove them from multirunner's GitHub scope.\n"+
 			"        (custom-label and matrix runs-on forms are not detected, so verify before removing)\n",
 			len(unused), len(results), strings.Join(unused, ", "))
 	}
@@ -942,7 +945,7 @@ func runRepoChecks(
 	cfg *config.Config,
 	check func(context.Context, *github.Client) (bool, error),
 ) []repoCheckResult {
-	refs := cfg.GitHub.ResolvedRepos()
+	refs := cfg.GitHub.RepoTargets()
 	results := make([]repoCheckResult, len(refs))
 	limit := make(chan struct{}, 8)
 	var wg sync.WaitGroup

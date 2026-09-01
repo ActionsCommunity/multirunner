@@ -23,6 +23,10 @@ import (
 // lastUsedFile marks when a mirror was last cloned/fetched/bundled, for GC.
 const lastUsedFile = ".mr-lastused"
 
+// maxInheritedGitConfigEntries prevents an untrusted or corrupted environment
+// from driving an arbitrarily large allocation while auth config is rebuilt.
+const maxInheritedGitConfigEntries = 256
+
 // Manager owns the mirror directory and serializes updates per repo.
 type Manager struct {
 	root    string
@@ -168,7 +172,9 @@ func (m *Manager) Bundle(ctx context.Context, repoSlug string, w io.Writer) erro
 	lock.Lock()
 	defer lock.Unlock()
 	cmd := exec.CommandContext(ctx, "git", "--git-dir="+path, "bundle", "create", "-", "--all")
-	cmd.Env = m.gitEnv()
+	// Bundle creation is entirely local. Do not expose the mirror PAT to a
+	// subprocess that cannot use it.
+	cmd.Env = m.localGitEnv()
 	cmd.Stdout = w
 	var errb strings.Builder
 	cmd.Stderr = &errb
@@ -227,16 +233,32 @@ func (m *Manager) git(ctx context.Context, gitDir string, args ...string) error 
 // host after authentication was attached. Inherited Authorization headers are
 // also excluded to prevent duplicate credentials.
 func (m *Manager) gitEnv() []string {
+	return m.buildGitEnv(true)
+}
+
+// localGitEnv preserves safe inherited Git settings while excluding both the
+// manager's PAT and inherited Authorization headers from local-only commands.
+func (m *Manager) localGitEnv() []string {
+	return m.buildGitEnv(false)
+}
+
+func (m *Manager) buildGitEnv(includeAuth bool) []string {
 	env := append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	if m.token == "" {
 		return env
 	}
+	// Rebuilt entries are appended below. Remove the inherited indexed variables
+	// first so dropped credentials are absent from the subprocess environment,
+	// not merely hidden behind a smaller last-wins GIT_CONFIG_COUNT.
+	env = stripIndexedGitConfig(env)
 
 	count := 0
 	if raw := os.Getenv("GIT_CONFIG_COUNT"); raw != "" {
 		parsed, err := strconv.Atoi(raw)
 		if err != nil || parsed < 0 {
 			m.logger.Warn("ignoring unusable GIT_CONFIG_COUNT", "value", raw)
+		} else if parsed > maxInheritedGitConfigEntries {
+			m.logger.Warn("ignoring oversized inherited git config", "count", parsed, "max", maxInheritedGitConfigEntries)
 		} else {
 			count = parsed
 		}
@@ -252,7 +274,7 @@ func (m *Manager) gitEnv() []string {
 			continue
 		}
 		lowerKey := strings.ToLower(key)
-		if strings.HasPrefix(lowerKey, "url.") &&
+		if includeAuth && strings.HasPrefix(lowerKey, "url.") &&
 			(strings.HasSuffix(lowerKey, ".insteadof") || strings.HasSuffix(lowerKey, ".pushinsteadof")) {
 			m.logger.Warn("ignoring inherited git URL rewrite while authenticated", "key", key)
 			continue
@@ -265,9 +287,11 @@ func (m *Manager) gitEnv() []string {
 		entries = append(entries, entry{key: key, value: value})
 	}
 
-	hdr := "AUTHORIZATION: basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:"+m.token))
-	base := strings.TrimRight(m.baseURL, "/") + "/"
-	entries = append(entries, entry{key: "http." + base + ".extraHeader", value: hdr})
+	if includeAuth {
+		hdr := "AUTHORIZATION: basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:"+m.token))
+		base := strings.TrimRight(m.baseURL, "/") + "/"
+		entries = append(entries, entry{key: "http." + base + ".extraHeader", value: hdr})
+	}
 	env = append(env, fmt.Sprintf("GIT_CONFIG_COUNT=%d", len(entries)))
 	for i, item := range entries {
 		env = append(env,
@@ -275,6 +299,19 @@ func (m *Manager) gitEnv() []string {
 			fmt.Sprintf("GIT_CONFIG_VALUE_%d=%s", i, item.value))
 	}
 	return env
+}
+
+func stripIndexedGitConfig(env []string) []string {
+	out := env[:0]
+	for _, item := range env {
+		key, _, _ := strings.Cut(item, "=")
+		if key == "GIT_CONFIG_COUNT" || strings.HasPrefix(key, "GIT_CONFIG_KEY_") ||
+			strings.HasPrefix(key, "GIT_CONFIG_VALUE_") {
+			continue
+		}
+		out = append(out, item)
+	}
+	return out
 }
 
 func mirrorExists(path string) bool {

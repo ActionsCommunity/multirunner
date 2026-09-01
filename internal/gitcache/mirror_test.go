@@ -259,6 +259,47 @@ func TestGitEnvIgnoresBogusCount(t *testing.T) {
 	}
 }
 
+func TestGitEnvIgnoresOversizedInheritedConfig(t *testing.T) {
+	t.Setenv("GIT_CONFIG_COUNT", "1000000000")
+
+	m := &Manager{token: "test-token", logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	env := resolveEnv(m.gitEnv())
+
+	if got := env["GIT_CONFIG_COUNT"]; got != "1" {
+		t.Errorf("GIT_CONFIG_COUNT = %q, want only the scoped auth entry", got)
+	}
+	if got := env["GIT_CONFIG_KEY_0"]; got != "http./.extraHeader" {
+		t.Errorf("GIT_CONFIG_KEY_0 = %q, want scoped extraHeader", got)
+	}
+}
+
+func TestLocalGitEnvOmitsCredentials(t *testing.T) {
+	t.Setenv("GIT_CONFIG_COUNT", "2")
+	t.Setenv("GIT_CONFIG_KEY_0", "safe.bareRepository")
+	t.Setenv("GIT_CONFIG_VALUE_0", "explicit")
+	t.Setenv("GIT_CONFIG_KEY_1", "http.https://github.com/.extraHeader")
+	t.Setenv("GIT_CONFIG_VALUE_1", "Authorization: bearer inherited")
+
+	m := &Manager{
+		baseURL: "https://github.com",
+		token:   "manager-secret",
+		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	env := resolveEnv(m.localGitEnv())
+	if got := env["GIT_CONFIG_COUNT"]; got != "1" {
+		t.Fatalf("GIT_CONFIG_COUNT = %q, want only safe inherited config", got)
+	}
+	if got := env["GIT_CONFIG_KEY_0"]; got != "safe.bareRepository" {
+		t.Errorf("GIT_CONFIG_KEY_0 = %q, want safe.bareRepository", got)
+	}
+	for key, value := range env {
+		if strings.Contains(strings.ToLower(key+"="+value), "authorization:") ||
+			strings.Contains(value, "manager-secret") {
+			t.Fatalf("local git environment contains credentials in %s", key)
+		}
+	}
+}
+
 func TestGitEnvDropsInheritedAuthorizationAndRewrite(t *testing.T) {
 	t.Setenv("GIT_CONFIG_COUNT", "3")
 	t.Setenv("GIT_CONFIG_KEY_0", "safe.bareRepository")

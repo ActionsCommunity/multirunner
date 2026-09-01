@@ -111,6 +111,9 @@ type Backend interface {
 	// EnsureImage makes sure the runner image is present (pull if missing).
 	EnsureImage(ctx context.Context, imageRef string) error
 	// Launch starts one ephemeral runner and returns immediately with a handle.
+	// If it cannot prove that a failed launch left no live instance, it returns
+	// both a cleanup-capable handle and an error. Callers must terminate that
+	// handle before releasing the runner registration.
 	Launch(ctx context.Context, req LaunchRequest) (RunnerHandle, error)
 	// Close releases backend resources (daemon client connections).
 	Close() error

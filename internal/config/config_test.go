@@ -480,6 +480,23 @@ pools: [{name: p, os: linux, docker: {host: h}}]`)
 	}
 }
 
+func TestRepoTargetsIncludesSingularAndPluralScopes(t *testing.T) {
+	single := GitHub{Scope: ScopeRepo, Owner: "octo", Repo: "one"}.RepoTargets()
+	if len(single) != 1 || single[0] != (RepoRef{Owner: "octo", Repo: "one"}) {
+		t.Fatalf("single RepoTargets = %+v", single)
+	}
+
+	plural := GitHub{Scope: ScopeRepos, Owner: "octo", Repos: []string{"one", "other/two"}}.RepoTargets()
+	if len(plural) != 2 || plural[0] != (RepoRef{Owner: "octo", Repo: "one"}) ||
+		plural[1] != (RepoRef{Owner: "other", Repo: "two"}) {
+		t.Fatalf("plural RepoTargets = %+v", plural)
+	}
+
+	if got := (GitHub{Scope: ScopeOrg, Owner: "octo"}).RepoTargets(); got != nil {
+		t.Fatalf("organization RepoTargets = %+v, want nil", got)
+	}
+}
+
 func TestScopeReposAppAuthRejectsMixedOwners(t *testing.T) {
 	p := writeConfig(t, `
 github: {scope: repos, owner: alice, repos: [one, bob/two]}

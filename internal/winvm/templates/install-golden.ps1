@@ -159,12 +159,7 @@ try {
             }
             'dotnet' {
                 New-Item -ItemType Directory -Force C:\dotnet | Out-Null
-                FetchOrStage 'dotnet8.zip' '__DOTNET8_URL__' C:\dotnet8.zip SHA512 '__DOTNET8_SHA512__'
-                Expand-Archive C:\dotnet8.zip C:\dotnet -Force
-                Remove-Item C:\dotnet8.zip
-                FetchOrStage 'dotnet9.zip' '__DOTNET9_URL__' C:\dotnet9.zip SHA512 '__DOTNET9_SHA512__'
-                Expand-Archive C:\dotnet9.zip C:\dotnet -Force
-                Remove-Item C:\dotnet9.zip
+__DOTNET_INSTALLS__
                 [Environment]::SetEnvironmentVariable('DOTNET_ROOT', 'C:\dotnet', 'Machine')
                 [Environment]::SetEnvironmentVariable('DOTNET_CLI_TELEMETRY_OPTOUT', '1', 'Machine')
                 Add-MachinePath 'C:\dotnet'

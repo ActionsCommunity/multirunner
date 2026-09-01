@@ -11,9 +11,31 @@ on:
       - ".gitattributes"
       - ".github/workflows/image-build-check.yml"
       - ".github/workflows/images.yml"
+      - ".github/workflows/update-image-versions.yml"
+      - "cmd/update-image-versions/**"
+      - "internal/winvm/bake.go"
   workflow_dispatch:
 
 jobs:
+  version-policy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Require image targets for newly supported .NET channels
+        run: |
+          set -euo pipefail
+          count=$(jq '.dotnet.unassigned_supported_channels | length' images/versions.json)
+          if [ "$count" -eq 0 ]; then
+            echo "All supported .NET channels have image targets"
+            exit 0
+          fi
+
+          jq -r '.dotnet.unassigned_supported_channels[] |
+            "::error title=Assign .NET image targets::Channel \(.channel) is \(.release_type) / \(.support_phase), latest SDK \(.latest_sdk), EOL \(.eol). Move it into dotnet.channels and select linux, windows-container, and/or qemu-windows targets."' \
+            images/versions.json
+          exit 1
+
   linux:
     runs-on: ubuntu-latest
     steps:
@@ -50,12 +72,11 @@ jobs:
           '
           docker run --rm --entrypoint bash $B:node          -lc '
             set -eu
-            arch=$(dpkg --print-architecture); [ "$arch" = amd64 ] && arch=x64
-            version=22.23.2
-            test -x "$RUNNER_TOOL_CACHE/node/$version/$arch/bin/node"
-            test -f "$RUNNER_TOOL_CACHE/node/$version/$arch.complete"
-            test "$(stat -c %U "$RUNNER_TOOL_CACHE/node/$version/$arch")" = runner
-            "$RUNNER_TOOL_CACHE/node/$version/$arch/bin/node" --version
+            cache_dir=$(dirname "$(dirname "$(readlink -f "$(command -v node)")")")
+            test -x "$cache_dir/bin/node"
+            test -f "$cache_dir.complete"
+            test "$(stat -c %U "$cache_dir")" = runner
+            "$cache_dir/bin/node" --version
             corepack --version
           '
           docker run --rm --entrypoint bash $B:dotnet        -lc 'dotnet --list-sdks && node --version'
@@ -110,8 +131,10 @@ jobs:
           docker build --platform linux/arm64 -f images/linux/flavors/node.Dockerfile --build-arg PARENT=$B:native-build -t $B:node .
           docker run --rm --platform linux/arm64 --entrypoint bash $B:node -lc '
             set -eu
-            test -x "$RUNNER_TOOL_CACHE/node/22.23.2/arm64/bin/node"
-            test -f "$RUNNER_TOOL_CACHE/node/22.23.2/arm64.complete"
+            cache_dir=$(dirname "$(dirname "$(readlink -f "$(command -v node)")")")
+            case "$cache_dir" in */arm64) ;; *) echo "unexpected cache path: $cache_dir"; exit 1 ;; esac
+            test -x "$cache_dir/bin/node"
+            test -f "$cache_dir.complete"
             node --version
           '
 

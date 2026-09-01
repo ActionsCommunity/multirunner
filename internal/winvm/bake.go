@@ -19,47 +19,39 @@ import (
 	"strings"
 	"time"
 
+	imageversions "github.com/GerardSmit/multirunner/images"
 	"github.com/GerardSmit/multirunner/internal/vmview"
 )
 
-// DefaultRunnerVersion is the actions/runner baked into golden VMs. It is a
-// single constant because the value is a hard dependency: GitHub rejects
+// DefaultRunnerVersion is the actions/runner baked into golden VMs. It comes
+// from the embedded images/versions.json manifest because the value is a hard
+// dependency: GitHub rejects
 // runners that are too old, and a rejected runner registers, idles briefly,
 // then exits without claiming a job, which reads as a scheduling fault rather
-// than a version one. Two copies of this literal previously drifted apart, so
-// the CLI default and the option default must resolve to the same place.
-//
-// Keep this in step with RUNNER_VERSION in images/linux/Dockerfile and
-// images/windows/Dockerfile.
-const DefaultRunnerVersion = "2.337.0"
-const DefaultRunnerSHA256 = "1150692afa94e71f872017e254ea55b6eece1eece3fe7e3a6d4c93d0a1b85cfc"
+// than a version one.
+var imageVersionManifest = imageversions.MustEmbedded()
+
+var DefaultRunnerVersion = imageVersionManifest.Minimal.Runner.Version
+var DefaultRunnerSHA256 = imageVersionManifest.Minimal.Runner.WindowsX64SHA256
 
 // minGitURL is the portable Git for Windows build staged into the golden so
 // actions/checkout uses real git (incremental fetch + dotgit-cache bundle) and
-// `run:`/job-hook steps can run git. Kept in sync with install-golden.ps1.
-const minGitVersion = "2.54.0.windows.1"
-const minGitURL = "https://github.com/git-for-windows/git/releases/download/v2.54.0.windows.1/MinGit-2.54.0-64-bit.zip"
-const minGitSHA256 = "04f937e1f0918b17b9be6f2294cb2bb66e96e1d9832d1c298e2de088a1d0e668"
+// `run:`/job-hook steps can run git.
+var minGitVersion = imageVersionManifest.Minimal.MinGit.Version
+var minGitURL = imageVersionManifest.Minimal.MinGit.URL
+var minGitSHA256 = imageVersionManifest.Minimal.MinGit.SHA256
 
-// Toolchain versions baked into the golden when requested via --tools. Kept here
-// (not in the script) so the host can stage the big downloads onto the CD.
-const (
-	bakeNodeVersion = "22.23.2"
-	bakeNodeSHA256  = "1177b4137ba5adaa56354ae40f1080c7450e8ae09cecb47da459d1c52ac99f97"
-	bakeGoVersion   = "1.24.4"
-	bakeGoSHA256    = "b751a1136cb9d8a2e7ebb22c538c4f02c09b98138c7c8bfb78a54a4566c013b1"
-
-	bakeDotNet8Version = "8.0.424"
-	bakeDotNet8SHA512  = "1787ab90635c2950672ed7c6507b000e1b212ea7d9a22fcef37061344d37c64d4c4eda12b8742601eff5b45c8736485b31c55613892f240c300190e4e88a58b0"
-	bakeDotNet9Version = "9.0.317"
-	bakeDotNet9SHA512  = "9d2206253b14bdad493e08b5d843d5da1bd534f66d7a43ca1ac4fed31fd11721f5f7bfc8fa79cc3ba0370a705a0c4e7226c1ce214489d239a55580d864e9e43a"
-
-	bakeVSVersion       = "17.14.39"
-	bakeVSURL           = "https://download.visualstudio.microsoft.com/download/pr/fa619120-9c0e-47e6-bfe0-3ee96fb671b2/2aeac090a9cfb2c56474aa9a6c5817ad8cfb879539e0ed1aecec33de9fc2dc4f/vs_BuildTools.exe"
-	bakeVSSHA256        = "2aeac090a9cfb2c56474aa9a6c5817ad8cfb879539e0ed1aecec33de9fc2dc4f"
-	bakeVSChannelURL    = "https://download.visualstudio.microsoft.com/download/pr/fa619120-9c0e-47e6-bfe0-3ee96fb671b2/c26f06fe7ef8ee5381d82838bb39db61d0cb01124493eab761cdace9720e0995/VisualStudio.17.Release.chman"
-	bakeVSChannelSHA256 = "4c81e902fb7fe2acea779b828e6dc548fe0bbb693df50eda0224263c16686bdd"
-)
+// Toolchain identities baked into the golden when requested via --tools.
+var bakeNodeRelease, _ = imageVersionManifest.Node.DefaultRelease()
+var bakeNodeVersion = bakeNodeRelease.Version
+var bakeNodeSHA256 = bakeNodeRelease.WindowsX64SHA256
+var bakeGoVersion = imageVersionManifest.Go.Version
+var bakeGoSHA256 = imageVersionManifest.Go.WindowsAMD64SHA256
+var bakeVSVersion = imageVersionManifest.BuildTools.Version
+var bakeVSURL = imageVersionManifest.BuildTools.BootstrapperURL
+var bakeVSSHA256 = imageVersionManifest.BuildTools.BootstrapperSHA256
+var bakeVSChannelURL = imageVersionManifest.BuildTools.ChannelURL
+var bakeVSChannelSHA256 = imageVersionManifest.BuildTools.ChannelSHA256
 
 func bakeNodeURL() string {
 	return fmt.Sprintf("https://nodejs.org/dist/v%s/node-v%s-win-x64.zip", bakeNodeVersion, bakeNodeVersion)
@@ -70,6 +62,38 @@ func bakeGoURL() string {
 
 func bakeDotNetURL(version string) string {
 	return fmt.Sprintf("https://builds.dotnet.microsoft.com/dotnet/Sdk/%s/dotnet-sdk-%s-win-x64.zip", version, version)
+}
+
+func bakeDotNetArtifactName(channel string) string {
+	return "dotnet-" + strings.ReplaceAll(channel, ".", "-") + ".zip"
+}
+
+func bakeDotNetArtifacts() []bakeArtifact {
+	channels := imageVersionManifest.DotNet.ChannelsForTarget(imageversions.DotNetTargetQEMUWindows)
+	artifacts := make([]bakeArtifact, 0, len(channels))
+	for _, channel := range channels {
+		release := imageVersionManifest.DotNet.Channels[channel]
+		artifacts = append(artifacts, bakeArtifact{
+			Name:      bakeDotNetArtifactName(channel),
+			Version:   release.Version,
+			URL:       bakeDotNetURL(release.Version),
+			Algorithm: "SHA512",
+			Digest:    release.WindowsX64SHA512,
+		})
+	}
+	return artifacts
+}
+
+func bakeDotNetInstallScript() string {
+	var script strings.Builder
+	for _, artifact := range bakeDotNetArtifacts() {
+		_, _ = fmt.Fprintf(&script,
+			"                FetchOrStage '%s' '%s' C:\\%s SHA512 '%s'\n"+
+				"                Expand-Archive C:\\%s C:\\dotnet -Force\n"+
+				"                Remove-Item C:\\%s\n",
+			artifact.Name, artifact.URL, artifact.Name, artifact.Digest, artifact.Name, artifact.Name)
+	}
+	return strings.TrimSuffix(script.String(), "\n")
 }
 
 type bakeArtifact struct {
@@ -115,10 +139,7 @@ func bakeArtifacts(runnerVersion, runnerSHA256 string, tools []string) ([]bakeAr
 				Name: "go.zip", Version: bakeGoVersion, URL: bakeGoURL(), Algorithm: "SHA256", Digest: bakeGoSHA256,
 			})
 		case "dotnet":
-			artifacts = append(artifacts,
-				bakeArtifact{Name: "dotnet8.zip", Version: bakeDotNet8Version, URL: bakeDotNetURL(bakeDotNet8Version), Algorithm: "SHA512", Digest: bakeDotNet8SHA512},
-				bakeArtifact{Name: "dotnet9.zip", Version: bakeDotNet9Version, URL: bakeDotNetURL(bakeDotNet9Version), Algorithm: "SHA512", Digest: bakeDotNet9SHA512},
-			)
+			artifacts = append(artifacts, bakeDotNetArtifacts()...)
 		case "buildtools":
 			artifacts = append(artifacts,
 				bakeArtifact{Name: "vs_buildtools.exe", Version: bakeVSVersion, URL: bakeVSURL, Algorithm: "SHA256", Digest: bakeVSSHA256},
@@ -373,10 +394,7 @@ func AutounattendFiles(runnerVersion, runnerSHA256, adminPassword string, tools 
 	install = strings.ReplaceAll(install, "__GO_URL__", bakeGoURL())
 	install = strings.ReplaceAll(install, "__GO_SHA256__", bakeGoSHA256)
 	install = strings.ReplaceAll(install, "__MINGIT_SHA256__", minGitSHA256)
-	install = strings.ReplaceAll(install, "__DOTNET8_URL__", bakeDotNetURL(bakeDotNet8Version))
-	install = strings.ReplaceAll(install, "__DOTNET8_SHA512__", bakeDotNet8SHA512)
-	install = strings.ReplaceAll(install, "__DOTNET9_URL__", bakeDotNetURL(bakeDotNet9Version))
-	install = strings.ReplaceAll(install, "__DOTNET9_SHA512__", bakeDotNet9SHA512)
+	install = strings.ReplaceAll(install, "__DOTNET_INSTALLS__", bakeDotNetInstallScript())
 	install = strings.ReplaceAll(install, "__VS_URL__", bakeVSURL)
 	install = strings.ReplaceAll(install, "__VS_SHA256__", bakeVSSHA256)
 	install = strings.ReplaceAll(install, "__VS_CHANNEL_URL__", bakeVSChannelURL)

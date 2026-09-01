@@ -13,10 +13,9 @@
 #     -t multirunner/runner-windows:dotnet .
 ARG PARENT=gerardsmit/multirunner-runner-windows:node
 FROM ${PARENT}
-ARG DOTNET_VERSION=10.0.400
-ARG DOTNET_SHA512=9b8b88590e4da131bfd0da7aa089d0fc04d5418d5f8607ec13d55dc5a17b4399afd54d496c12657fa05c6c6546dc5eab930f26ac6c50f2d3a7712c0fb378c366
 
 SHELL ["powershell", "-NoProfile", "-Command", "$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue';"]
+COPY images/versions.json C:/image-versions.json
 
 # Backslashes are doubled because Docker's default escape character is `\`, so a
 # bare `C:\dotnet` is stored as the drive-relative `C:dotnet` and the SDK lands
@@ -26,12 +25,20 @@ ENV DOTNET_CLI_TELEMETRY_OPTOUT=1
 ENV DOTNET_NOLOGO=1
 ENV DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1
 
-# Pin the SDK archive and verify Microsoft's published SHA512 before extraction.
-RUN $archive = 'C:/dotnet-sdk.zip'; \
-    Invoke-WebRequest -Uri ('https://builds.dotnet.microsoft.com/dotnet/Sdk/{0}/dotnet-sdk-{0}-win-x64.zip' -f $env:DOTNET_VERSION) -OutFile $archive; \
-    if ((Get-FileHash $archive -Algorithm SHA512).Hash -ne $env:DOTNET_SHA512) { throw 'dotnet SDK checksum mismatch' }; \
-    Expand-Archive -Path $archive -DestinationPath $env:DOTNET_ROOT; \
-    Remove-Item -Force $archive
+# Install every SDK assigned to the Windows container target and verify each
+# archive against Microsoft's published SHA512 before extraction.
+RUN $manifest = Get-Content C:/image-versions.json -Raw | ConvertFrom-Json; \
+    $channels = @($manifest.dotnet.channels.PSObject.Properties | Where-Object { $_.Value.targets -contains 'windows-container' }); \
+    if ($channels.Count -eq 0) { throw 'no .NET channel targets the Windows container' }; \
+    foreach ($channel in $channels) { \
+      $release = $channel.Value; \
+      $archive = 'C:/dotnet-sdk-' + $channel.Name + '.zip'; \
+      Invoke-WebRequest -Uri ('https://builds.dotnet.microsoft.com/dotnet/Sdk/{0}/dotnet-sdk-{0}-win-x64.zip' -f $release.version) -OutFile $archive; \
+      if ((Get-FileHash $archive -Algorithm SHA512).Hash -ne $release.windows_x64_sha512) { throw ('dotnet SDK checksum mismatch for channel ' + $channel.Name) }; \
+      Expand-Archive -Path $archive -DestinationPath $env:DOTNET_ROOT; \
+      Remove-Item -Force $archive; \
+    }; \
+    Remove-Item -Force C:/image-versions.json
 
 RUN $p = [Environment]::GetEnvironmentVariable('PATH','Machine'); \
     [Environment]::SetEnvironmentVariable('PATH', $env:DOTNET_ROOT + ';' + $env:DOTNET_ROOT + '\tools;' + $p, 'Machine')

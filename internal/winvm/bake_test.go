@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"crypto/sha512"
 	"encoding/hex"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -32,14 +33,16 @@ func TestAutounattendFiles(t *testing.T) {
 	if !strings.Contains(install, "buildtools,dotnet,go,node") {
 		t.Error("tools list not substituted")
 	}
-	for _, want := range []string{
+	wants := []string{
 		runnerDigest, minGitSHA256,
 		bakeNodeURL(), bakeNodeSHA256,
 		bakeGoURL(), bakeGoSHA256,
-		bakeDotNetURL(bakeDotNet8Version), bakeDotNet8SHA512,
-		bakeDotNetURL(bakeDotNet9Version), bakeDotNet9SHA512,
 		bakeVSURL, bakeVSSHA256, bakeVSChannelURL, bakeVSChannelSHA256,
-	} {
+	}
+	for _, artifact := range bakeDotNetArtifacts() {
+		wants = append(wants, artifact.Name, artifact.URL, artifact.Digest)
+	}
+	for _, want := range wants {
 		if !strings.Contains(install, want) {
 			t.Errorf("provisioning identity %q missing from script", want)
 		}
@@ -123,6 +126,23 @@ func TestToolsHashFingerprintsEveryPayloadIdentity(t *testing.T) {
 		if got := toolsHashResolved([]string{"node", "go", "dotnet", "buildtools"}, "iso-digest", changed); got == base {
 			t.Errorf("%s version did not affect ToolsHash", artifact.Name)
 		}
+	}
+}
+
+func TestBakeDotNetArtifactsFollowManifestTargets(t *testing.T) {
+	original := imageVersionManifest
+	defer func() { imageVersionManifest = original }()
+	imageVersionManifest.DotNet.Channels = maps.Clone(original.DotNet.Channels)
+	release := imageVersionManifest.DotNet.Channels["10.0"]
+	release.Targets = append(release.Targets, "qemu-windows")
+	imageVersionManifest.DotNet.Channels["10.0"] = release
+
+	artifacts := bakeDotNetArtifacts()
+	if len(artifacts) != 3 {
+		t.Fatalf("got %d QEMU .NET artifacts, want 3", len(artifacts))
+	}
+	if script := bakeDotNetInstallScript(); !strings.Contains(script, "dotnet-10-0.zip") || !strings.Contains(script, release.WindowsX64SHA512) {
+		t.Fatal("generated QEMU install script did not include newly targeted channel")
 	}
 }
 

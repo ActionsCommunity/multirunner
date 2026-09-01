@@ -55,6 +55,13 @@ func RunOnce(ctx context.Context, gh *github.Client, be backend.Backend, spec Sp
 		Index:            spec.Index,
 	})
 	if err != nil {
+		if handle != nil {
+			// A non-nil handle means Launch could not prove the instance is absent.
+			// Preserve its registration unless termination is confirmed.
+			if killErr := terminate(ctx, handle); killErr != nil {
+				return -1, errors.Join(fmt.Errorf("launch: %w", err), fmt.Errorf("kill runner: %w", killErr))
+			}
+		}
 		deregister(ctx, gh, jit.Runner.ID, spec.Name, logger)
 		return -1, fmt.Errorf("launch: %w", err)
 	}

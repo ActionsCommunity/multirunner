@@ -105,13 +105,19 @@ func (b *dockerBackend) Launch(ctx context.Context, req LaunchRequest) (RunnerHa
 
 	created, err := b.cli.ContainerCreate(ctx, cfg, host, nil, nil, req.Name)
 	if err != nil {
-		return nil, fmt.Errorf("create container %s: %w", req.Name, err)
+		// A lost create response can still leave a container behind. Docker APIs
+		// accept the deterministic name anywhere an ID is accepted, so return a
+		// cleanup handle even when the daemon did not return the created ID.
+		return &dockerHandle{cli: b.cli, id: req.Name}, fmt.Errorf("create container %s: %w", req.Name, err)
 	}
+	handle := &dockerHandle{cli: b.cli, id: created.ID}
 	if err := b.cli.ContainerStart(ctx, created.ID, container.StartOptions{}); err != nil {
-		_ = b.cli.ContainerRemove(ctx, created.ID, container.RemoveOptions{Force: true})
-		return nil, fmt.Errorf("start container %s: %w", req.Name, err)
+		// The daemon may have started the container before the response was lost.
+		// Return its handle so the lifecycle owner can terminate it with a
+		// detached cleanup context before deleting the GitHub registration.
+		return handle, fmt.Errorf("start container %s: %w", req.Name, err)
 	}
-	return &dockerHandle{cli: b.cli, id: created.ID}, nil
+	return handle, nil
 }
 
 func (b *dockerBackend) Close() error { return b.cli.Close() }

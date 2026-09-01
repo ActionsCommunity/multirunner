@@ -189,11 +189,40 @@ The default `minimal` image is just the runner + git. For common toolchains, set
 | `go`           | linux   | + Go toolchain                                                 |
 | `buildtools`   | windows | + VS 2022 Build Tools (MSVC v143, Windows SDK, CMake, MSBuild) |
 
-Flavors layer on one another (`dotnet` ⊃ `node` ⊃ `native-build`), so picking the
-narrowest one that fits keeps pulls small. Full Visual Studio (IDE) isn't
-container-viable — use a [QEMU golden VM](#windows-runners-on-a-linux-host-qemu-vm)
-for that. A custom `image_tier:` you build yourself resolves to a local
-`multirunner/runner-<os>-<tier>:dev` tag.
+Flavor layering differs by OS. Linux uses `dotnet`/`rust` ⊃ `node` ⊃
+`native-build` and `go` ⊃ `native-build`. Windows uses `dotnet` ⊃ `node`, while
+`buildtools` is a separate branch. The SDK channels assigned to Linux, Windows
+containers, and QEMU are declared in `images/versions.json`; Windows SDK
+archives include the WindowsDesktop packs. Windows jobs needing Node/.NET plus
+native MSVC tooling therefore need a custom image derived from `buildtools`, or a
+[QEMU golden VM](#windows-runners-on-a-linux-host-qemu-vm). Full Visual Studio
+(IDE) also requires a golden VM. A custom `image_tier:` you build yourself
+resolves to a local `multirunner/runner-<os>-<tier>:dev` tag.
+
+The `update-image-versions` workflow checks all published image flavors weekly
+and opens one consolidated maintenance PR when anything changes. The complete
+inventory is in `images/versions.json`: base-image digests, runner and toolchain
+versions, vendor checksums, and support/EOL dates. `native-build` has no separate
+upstream pin; its rolling Ubuntu packages are refreshed and validated by the
+weekly image build even when no maintenance PR is needed.
+
+Node's official release schedule is used to add a major automatically on the day
+it becomes LTS; non-LTS and future-LTS releases are ignored, and `default_major`
+remains an explicit choice. The .NET releases index is used to discover new
+active or maintenance LTS/STS channels. Because upstream cannot decide which
+multirunner image should carry a .NET channel, discoveries are written to
+`dotnet.unassigned_supported_channels` and fail the image policy check until a
+maintainer moves each channel under `dotnet.channels` and assigns any combination
+of `linux`, `windows-container`, and `qemu-windows` targets. Preview and EOL .NET
+channels are ignored. Declared Node and .NET lines fail the updater at EOL so
+removing support remains an explicit decision.
+
+Dockerfiles and QEMU golden bakes consume the JSON directly; the only generated
+duplicates are the two Docker `ARG BASE` defaults, which must exist before a
+Dockerfile can copy the manifest. Run `go run ./cmd/update-image-versions` to
+perform the same refresh locally. The updater fills every version, EOL date, and
+checksum; adding a Node or .NET line requires no Dockerfile or QEMU template
+changes.
 
 **Routing is label-based:** give each flavor pool a distinct label and select it
 from a workflow with `runs-on`:
@@ -249,11 +278,12 @@ pools:
 ```
 
 `multirunner doctor` reports daemon reachability and catches mismatches (e.g. a
-Linux daemon assigned to a Windows pool). With `scope: repos` it also checks the
-input side, flagging two config shapes that otherwise look exactly like an idle
-day: repos with GitHub Actions switched off, and repos where no workflow targets
-a self-hosted runner. Either way the pools sit empty and nothing reports an
-error, so doctor calls them out by name.
+Linux daemon assigned to a Windows pool). With `scope: repo` or `scope: repos`
+it also checks the input side: whether GitHub Actions is enabled, and whether a
+heuristic scan finds `self-hosted` in a workflow. The workflow scan is advisory
+because custom-label and matrix expressions may not contain that literal;
+authentication, permission, timeout, and truncated-tree failures still make
+doctor exit non-zero instead of reporting an incomplete preflight as ready.
 
 ### Windows runners on a Linux host (QEMU VM)
 
@@ -274,10 +304,11 @@ The QEMU backend boots the baked golden image and **ignores `image`/`image_tier`
 qemu pool). To give a VM runner toolchains, bake them in with `--tools`
 (`dotnet`, `node`, `go`, `buildtools` = VS 2022 Build Tools). List the same tools
 under `qemu.tools` so an auto-rebuild reuses them; changing the set re-bakes.
-Built-in bakes pin and verify runner 2.337.0, MinGit 2.54.0, Node 22.23.2,
-Go 1.24.4, .NET SDKs 8.0.424 and 9.0.317, and Visual Studio Build Tools
-17.14.39. The Windows ISO content and every selected payload identity are part
-of the golden fingerprint. Downloads are checked before execution or extraction.
+Built-in bakes pin and verify the runner, MinGit, Node, Go, .NET SDKs, and Visual
+Studio Build Tools. The Windows ISO content and every selected payload identity
+are part of the golden fingerprint. Downloads are checked before execution or
+extraction, and the consolidated image-version workflow refreshes these shared
+pins alongside the container images.
 When selecting a different `--runner-version`, also provide its archive digest
 with `--runner-sha256`.
 
