@@ -261,7 +261,7 @@ type QEMU struct {
 	RunnerVersion string   `yaml:"runner_version"`  // runner version to bake
 	RunnerSHA256  string   `yaml:"runner_sha256"`   // required with a non-default runner_version
 	Licensed      bool     `yaml:"licensed"`        // real key/KMS -> skip eval housekeeping
-	Tools         []string `yaml:"tools"`           // golden selectors: dotnet[:major] | node | go | buildtools[:line]
+	Tools         []string `yaml:"tools"`           // golden selectors: dotnet[:major] | node[:major] | go | buildtools[:line]
 }
 
 // Containerd configures the containerd/runhcs Windows-container backend. The

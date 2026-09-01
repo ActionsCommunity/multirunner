@@ -141,13 +141,7 @@ try {
     foreach ($t in $tools) {
         switch ($t) {
             'node' {
-                FetchOrStage 'node.zip' '__NODE_URL__' C:\node.zip SHA256 '__NODE_SHA256__'
-                Expand-Archive C:\node.zip C:\ -Force
-                Remove-Item C:\node.zip
-                $nd = (Get-ChildItem C:\ -Directory -Filter 'node-v*-win-x64' | Select-Object -First 1).FullName
-                Rename-Item $nd C:\nodejs
-                Add-MachinePath 'C:\nodejs'
-                & C:\nodejs\corepack.cmd enable 2>$null
+__NODE_INSTALLS__
                 Mark 'node installed'
             }
             'go' {

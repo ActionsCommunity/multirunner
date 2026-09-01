@@ -43,14 +43,11 @@ var minGitURL = imageVersionManifest.Minimal.MinGit.URL
 var minGitSHA256 = imageVersionManifest.Minimal.MinGit.SHA256
 
 // Toolchain identities baked into the golden when requested via --tools.
-var bakeNodeRelease, _ = imageVersionManifest.Node.DefaultRelease()
-var bakeNodeVersion = bakeNodeRelease.Version
-var bakeNodeSHA256 = bakeNodeRelease.WindowsX64SHA256
 var bakeGoVersion = imageVersionManifest.Go.Version
 var bakeGoSHA256 = imageVersionManifest.Go.WindowsAMD64SHA256
 
-func bakeNodeURL() string {
-	return fmt.Sprintf("https://nodejs.org/dist/v%s/node-v%s-win-x64.zip", bakeNodeVersion, bakeNodeVersion)
+func bakeNodeURLForVersion(version string) string {
+	return fmt.Sprintf("https://nodejs.org/dist/v%s/node-v%s-win-x64.zip", version, version)
 }
 func bakeGoURL() string {
 	return fmt.Sprintf("https://go.dev/dl/go%s.windows-amd64.zip", bakeGoVersion)
@@ -87,6 +84,64 @@ func bakeDotNetInstallScript(channels []string) string {
 				"                Expand-Archive C:\\%s C:\\dotnet -Force\n"+
 				"                Remove-Item C:\\%s\n",
 			artifact.Name, artifact.URL, artifact.Name, artifact.Digest, artifact.Name, artifact.Name)
+	}
+	return strings.TrimSuffix(script.String(), "\n")
+}
+
+func bakeNodeArtifactName(major string) string {
+	return "node-" + major + ".zip"
+}
+
+func bakeNodeArtifacts(majors []string) []bakeArtifact {
+	artifacts := make([]bakeArtifact, 0, len(majors))
+	for _, major := range majors {
+		release := imageVersionManifest.Node.Releases[major]
+		artifacts = append(artifacts, bakeArtifact{
+			Name:      bakeNodeArtifactName(major),
+			Version:   release.Version,
+			URL:       bakeNodeURLForVersion(release.Version),
+			Algorithm: "SHA256",
+			Digest:    release.WindowsX64SHA256,
+		})
+	}
+	return artifacts
+}
+
+func bakeNodeInstallScript(majors []string) string {
+	var script strings.Builder
+	for _, major := range majors {
+		release := imageVersionManifest.Node.Releases[major]
+		archive := bakeNodeArtifactName(major)
+		temp := `C:\node-` + major
+		dest := `C:\hostedtoolcache\windows\node\` + release.Version + `\x64`
+		_, _ = fmt.Fprintf(&script,
+			"                FetchOrStage '%s' '%s' C:\\%s SHA256 '%s'\n"+
+				"                Expand-Archive C:\\%s '%s' -Force\n"+
+				"                New-Item -ItemType Directory -Force '%s' | Out-Null\n"+
+				"                Copy-Item '%s\\node-v%s-win-x64\\*' '%s' -Recurse -Force\n"+
+				"                New-Item -ItemType File -Force '%s.complete' | Out-Null\n"+
+				"                Remove-Item C:\\%s, '%s' -Recurse -Force\n",
+			archive, bakeNodeURLForVersion(release.Version), archive, release.WindowsX64SHA256,
+			archive, temp, dest, temp, release.Version, dest, dest, archive, temp)
+	}
+	selected := ""
+	defaultMajor := fmt.Sprint(imageVersionManifest.Node.DefaultMajor)
+	for _, major := range majors {
+		selected = major
+		if major == defaultMajor {
+			break
+		}
+	}
+	if selected != "" {
+		release := imageVersionManifest.Node.Releases[selected]
+		dest := `C:\hostedtoolcache\windows\node\` + release.Version + `\x64`
+		_, _ = fmt.Fprintf(&script,
+			"                [Environment]::SetEnvironmentVariable('AGENT_TOOLSDIRECTORY', 'C:\\hostedtoolcache\\windows', 'Machine')\n"+
+				"                [Environment]::SetEnvironmentVariable('RUNNER_TOOL_CACHE', 'C:\\hostedtoolcache\\windows', 'Machine')\n"+
+				"                Add-MachinePath '%s'\n"+
+				"                Add-MachinePath '%s\\node_modules\\npm\\bin'\n"+
+				"                & '%s\\corepack.cmd' enable --install-directory '%s' 2>$null\n",
+			dest, dest, dest, dest)
 	}
 	return strings.TrimSuffix(script.String(), "\n")
 }
@@ -153,6 +208,7 @@ func bakeBuildToolsInstallScript(lines []string) string {
 type bakeToolPlan struct {
 	Canonical  []string
 	Kinds      []string
+	Node       []string
 	DotNet     []string
 	BuildTools []string
 }
@@ -160,6 +216,7 @@ type bakeToolPlan struct {
 func resolveToolPlan(tools []string) (bakeToolPlan, error) {
 	canonical := map[string]bool{}
 	kinds := map[string]bool{}
+	node := map[string]bool{}
 	dotnet := map[string]bool{}
 	buildtools := map[string]bool{}
 	for _, selector := range normalizeTools(tools) {
@@ -173,9 +230,26 @@ func resolveToolPlan(tools []string) (bakeToolPlan, error) {
 			version = parts[1]
 		}
 		switch kind {
-		case "node", "go":
+		case "node":
+			majors := []string{}
+			if version == "" {
+				for major := range imageVersionManifest.Node.Releases {
+					majors = append(majors, major)
+				}
+			} else {
+				majors = []string{version}
+			}
+			for _, major := range majors {
+				if _, ok := imageVersionManifest.Node.Releases[major]; !ok {
+					return bakeToolPlan{}, fmt.Errorf("unsupported Node major %q", major)
+				}
+				node[major] = true
+				canonical["node:"+major] = true
+			}
+			kinds[kind] = true
+		case "go":
 			if version != "" {
-				return bakeToolPlan{}, fmt.Errorf("%s does not support a version selector", kind)
+				return bakeToolPlan{}, fmt.Errorf("go does not support a version selector")
 			}
 			canonical[kind] = true
 			kinds[kind] = true
@@ -217,6 +291,7 @@ func resolveToolPlan(tools []string) (bakeToolPlan, error) {
 	plan := bakeToolPlan{
 		Canonical:  sortedKeys(canonical),
 		Kinds:      sortedKeys(kinds),
+		Node:       sortedVersionKeys(node),
 		DotNet:     sortedVersionKeys(dotnet),
 		BuildTools: sortedVersionKeys(buildtools),
 	}
@@ -288,9 +363,7 @@ func bakeArtifactsForPlan(runnerVersion, runnerSHA256 string, plan bakeToolPlan)
 	for _, tool := range plan.Kinds {
 		switch tool {
 		case "node":
-			artifacts = append(artifacts, bakeArtifact{
-				Name: "node.zip", Version: bakeNodeVersion, URL: bakeNodeURL(), Algorithm: "SHA256", Digest: bakeNodeSHA256,
-			})
+			artifacts = append(artifacts, bakeNodeArtifacts(plan.Node)...)
 		case "go":
 			artifacts = append(artifacts, bakeArtifact{
 				Name: "go.zip", Version: bakeGoVersion, URL: bakeGoURL(), Algorithm: "SHA256", Digest: bakeGoSHA256,
@@ -428,7 +501,7 @@ type BakeOptions struct {
 	Accel            string // "" = auto
 	RunnerVersion    string
 	RunnerSHA256     string   // required when RunnerVersion is not DefaultRunnerVersion
-	Tools            []string // golden selectors: dotnet[:major] | node | go | buildtools[:line]
+	Tools            []string // golden selectors: dotnet[:major] | node[:major] | go | buildtools[:line]
 	AdminPassword    string
 	EvalDays         int  // 180 (server) / 90 (client)
 	MaxRearms        int  // ~5
@@ -551,8 +624,7 @@ func AutounattendFiles(runnerVersion, runnerSHA256, adminPassword string, tools 
 	}
 	install = strings.ReplaceAll(install, "__RUNNER_SHA256__", runnerSHA256)
 	install = strings.ReplaceAll(install, "__TOOLS__", strings.Join(plan.Kinds, ","))
-	install = strings.ReplaceAll(install, "__NODE_URL__", bakeNodeURL())
-	install = strings.ReplaceAll(install, "__NODE_SHA256__", bakeNodeSHA256)
+	install = strings.ReplaceAll(install, "__NODE_INSTALLS__", bakeNodeInstallScript(plan.Node))
 	install = strings.ReplaceAll(install, "__GO_URL__", bakeGoURL())
 	install = strings.ReplaceAll(install, "__GO_SHA256__", bakeGoSHA256)
 	install = strings.ReplaceAll(install, "__MINGIT_SHA256__", minGitSHA256)

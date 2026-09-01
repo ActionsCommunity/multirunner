@@ -168,6 +168,11 @@ jobs:
           # container, which is what jobs calling node/dotnet directly rely on.
           docker run --rm --entrypoint cmd $B:node   /c "where node && where npm && node --version"
           docker run --rm --entrypoint cmd $B:dotnet /c "where dotnet && dotnet --list-sdks && node --version"
+          NODE_VERSIONS="$(node -e "const v=require('./images/versions.json'); console.log(Object.values(v.node.releases).map(r => r.version).join(' '))")"
+          for version in $NODE_VERSIONS; do
+            docker run --rm --entrypoint cmd $B:node /s /c \
+              "if not exist C:/hostedtoolcache/windows/node/$version/x64/node.exe exit 1 && if not exist C:/hostedtoolcache/windows/node/$version/x64.complete exit 1"
+          done
 
           # Docker's default escape character is `\`, so an unescaped
           # `ENV X=C:\foo` silently becomes `C:foo`. Assert the real values.

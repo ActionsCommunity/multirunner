@@ -1,6 +1,6 @@
-# Windows "node" flavor: the default pinned Node.js LTS + corepack
-# (npm/pnpm/yarn) on top of the minimal runner image. Mirrors the default entry
-# from images/versions.json.
+# Windows "node" flavor: every pinned active Node.js LTS + corepack
+# (npm/pnpm/yarn) on top of the minimal runner image. The manifest default is
+# exposed on PATH; actions/setup-node can select every cached declared major.
 #
 # Node is laid down in the hosted tool cache layout instead of a plain directory
 # so `actions/setup-node` resolves it from cache rather than downloading a copy
@@ -26,21 +26,29 @@ ENV AGENT_TOOLSDIRECTORY=C:\\hostedtoolcache\\windows
 ENV RUNNER_TOOL_CACHE=C:\\hostedtoolcache\\windows
 
 RUN $manifest = Get-Content C:/image-versions.json -Raw | ConvertFrom-Json; \
-    $major = [string]$manifest.node.default_major; \
-    $release = $manifest.node.releases.PSObject.Properties[$major].Value; \
-    if (-not $release) { throw 'missing default Node release' }; \
-    $ver = $release.version; \
-    $dest = 'C:\hostedtoolcache\windows\node\' + $ver + '\x64'; \
-    $archive = 'node-v' + $ver + '-win-x64.zip'; \
-    Invoke-WebRequest -Uri ('https://nodejs.org/dist/v{0}/{1}' -f $ver, $archive) -OutFile C:/node.zip; \
-    if ((Get-FileHash C:/node.zip -Algorithm SHA256).Hash -ne $release.windows_x64_sha256) { throw 'Node archive checksum mismatch' }; \
-    Expand-Archive -Path C:/node.zip -DestinationPath C:/nodetmp; \
-    New-Item -ItemType Directory -Force -Path $dest | Out-Null; \
-    Copy-Item -Path ('C:/nodetmp/node-v{0}-win-x64/*' -f $ver) -Destination $dest -Recurse -Force; \
-    New-Item -ItemType File -Force -Path ('C:\hostedtoolcache\windows\node\{0}\x64.complete' -f $ver) | Out-Null; \
+    $defaultMajor = [string]$manifest.node.default_major; \
+    $defaultRelease = $manifest.node.releases.PSObject.Properties[$defaultMajor].Value; \
+    if (-not $defaultRelease) { throw 'missing default Node release' }; \
+    foreach ($property in $manifest.node.releases.PSObject.Properties) { \
+      $major = $property.Name; \
+      $release = $property.Value; \
+      $ver = $release.version; \
+      $dest = 'C:\hostedtoolcache\windows\node\' + $ver + '\x64'; \
+      $archive = 'node-v' + $ver + '-win-x64.zip'; \
+      $zip = 'C:/node-' + $major + '.zip'; \
+      $temp = 'C:/nodetmp-' + $major; \
+      Invoke-WebRequest -Uri ('https://nodejs.org/dist/v{0}/{1}' -f $ver, $archive) -OutFile $zip; \
+      if ((Get-FileHash $zip -Algorithm SHA256).Hash -ne $release.windows_x64_sha256) { throw ('Node {0} archive checksum mismatch' -f $major) }; \
+      Expand-Archive -Path $zip -DestinationPath $temp; \
+      New-Item -ItemType Directory -Force -Path $dest | Out-Null; \
+      Copy-Item -Path ($temp + '/node-v' + $ver + '-win-x64/*') -Destination $dest -Recurse -Force; \
+      New-Item -ItemType File -Force -Path ($dest + '.complete') | Out-Null; \
+      Remove-Item -Force $zip; \
+      Remove-Item -Recurse -Force $temp; \
+    }; \
+    $defaultDest = 'C:\hostedtoolcache\windows\node\' + $defaultRelease.version + '\x64'; \
     $p = [Environment]::GetEnvironmentVariable('PATH','Machine'); \
-    [Environment]::SetEnvironmentVariable('PATH', $dest + ';' + $dest + '\node_modules\npm\bin;' + $p, 'Machine'); \
-    & ($dest + '\corepack.cmd') enable --install-directory $dest; \
-    & ($dest + '\node.exe') --version; \
-    Remove-Item -Force C:/node.zip, C:/image-versions.json; \
-    Remove-Item -Recurse -Force C:/nodetmp
+    [Environment]::SetEnvironmentVariable('PATH', $defaultDest + ';' + $defaultDest + '\node_modules\npm\bin;' + $p, 'Machine'); \
+    & ($defaultDest + '\corepack.cmd') enable --install-directory $defaultDest; \
+    & ($defaultDest + '\node.exe') --version; \
+    Remove-Item -Force C:/image-versions.json

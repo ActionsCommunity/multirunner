@@ -195,6 +195,9 @@ Flavor layering differs by OS. Linux uses `dotnet`/`rust` ⊃ `node` ⊃
 `native-build` and `go` ⊃ `native-build`. Windows uses `dotnet` ⊃ `node`, while
 `buildtools` is a separate branch. Each Build Tools major is a separate image;
 the unqualified flavor aliases the `default_line` in `images/versions.json`.
+The Node flavor caches every declared active LTS major on both operating
+systems; the manifest `default_major` is exposed on `PATH`, and
+`actions/setup-node` selects another cached major without downloading it.
 The SDK channels assigned to Linux, Windows
 containers, and QEMU are declared in `images/versions.json`; Windows SDK
 archives include the WindowsDesktop packs. Windows jobs needing Node/.NET plus
@@ -313,8 +316,10 @@ The QEMU backend boots the baked golden image and **ignores `image`/`image_tier`
 (those only apply to container backends — multirunner warns if you set them on a
 qemu pool). To give a VM runner toolchains, bake them in with `--tools`
 (`dotnet` = every stable supported SDK channel; `dotnet:8`, `dotnet:9`, and
-`dotnet:10` select exact majors; `buildtools` selects the manifest default;
-`buildtools:17` and `buildtools:18` are exact and may be combined). List the same tools
+`dotnet:10` select exact majors; `node` = every active LTS major while
+`node:22` and `node:24` select exact majors; `buildtools` selects the manifest
+default; `buildtools:17` and `buildtools:18` are exact and may be combined).
+List the same tools
 under `qemu.tools` so an auto-rebuild reuses them; changing the set re-bakes.
 Built-in bakes pin and verify the runner, MinGit, Node, Go, .NET SDKs, and Visual
 Studio Build Tools. The Windows ISO content and every selected payload identity
@@ -338,7 +343,7 @@ pools:
       accel: ""            # auto: x64 kvm/whpx/hvf; ARM uses x86 TCG emulation
       bake_iso: /var/lib/multirunner/WinServer2022.iso
       bake_iso_sha256: "<sha256>"   # optional expected digest; ISO is always fingerprinted
-      tools: [dotnet, node, "buildtools:17", "buildtools:18"]
+      tools: [dotnet, "node:24", "buildtools:17", "buildtools:18"]
 ```
 
 Highlights:

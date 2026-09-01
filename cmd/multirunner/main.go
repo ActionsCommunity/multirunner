@@ -300,7 +300,7 @@ command without running it (for manual/observed installs).`,
 	c.Flags().StringVar(&accel, "accel", "", "QEMU accel: kvm|whpx|hvf|tcg ('' = auto)")
 	c.Flags().StringVar(&runnerVer, "runner-version", winvm.DefaultRunnerVersion, "actions/runner version to bake in")
 	c.Flags().StringVar(&runnerSHA256, "runner-sha256", "", "runner archive SHA256 (required for a non-default version)")
-	c.Flags().StringSliceVar(&tools, "tools", nil, "toolchains to bake: dotnet[:major],node,go,buildtools[:line]")
+	c.Flags().StringSliceVar(&tools, "tools", nil, "toolchains to bake: dotnet[:major],node[:major],go,buildtools[:line]")
 	c.Flags().BoolVar(&licensed, "licensed", false, "a real Windows key/KMS is configured (skip eval housekeeping)")
 	c.Flags().StringVar(&vncWeb, "vnc-web", "127.0.0.1:8090", "serve a browser VNC viewer at host:port to watch the install (empty to disable)")
 	return c

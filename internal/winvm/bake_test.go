@@ -35,14 +35,16 @@ func TestAutounattendFiles(t *testing.T) {
 	}
 	wants := []string{
 		runnerDigest, minGitSHA256,
-		bakeNodeURL(), bakeNodeSHA256,
 		bakeGoURL(), bakeGoSHA256,
 	}
-	plan, err := resolveToolPlan([]string{"dotnet", "buildtools"})
+	plan, err := resolveToolPlan([]string{"node", "dotnet", "buildtools"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, artifact := range bakeDotNetArtifacts(plan.DotNet) {
+		wants = append(wants, artifact.Name, artifact.URL, artifact.Digest)
+	}
+	for _, artifact := range bakeNodeArtifacts(plan.Node) {
 		wants = append(wants, artifact.Name, artifact.URL, artifact.Digest)
 	}
 	for _, artifact := range bakeBuildToolsArtifacts(plan.BuildTools) {
@@ -90,6 +92,16 @@ func TestToolsHash(t *testing.T) {
 	}
 	if hash(BakeOptions{Tools: []string{"node"}}) == hash(BakeOptions{Tools: []string{"go"}}) {
 		t.Error("different tools should hash differently")
+	}
+	allNodeSelectors := make([]string, 0, len(imageVersionManifest.Node.Releases))
+	for major := range imageVersionManifest.Node.Releases {
+		allNodeSelectors = append(allNodeSelectors, "node:"+major)
+	}
+	if hash(BakeOptions{Tools: []string{"node"}}) != hash(BakeOptions{Tools: allNodeSelectors}) {
+		t.Error("unqualified Node should expand to every declared LTS major")
+	}
+	if hash(BakeOptions{Tools: []string{"node:24"}}) == hash(BakeOptions{Tools: []string{"node"}}) {
+		t.Error("an exact Node selector should not hash like every Node major")
 	}
 	minimal := hash(BakeOptions{})
 	for _, tool := range []string{"node", "go", "dotnet", "buildtools"} {
@@ -143,15 +155,41 @@ func TestVersionedGoldenToolSelectors(t *testing.T) {
 	if got, want := strings.Join(defaultPlan.Canonical, ","), "buildtools:18"; got != want {
 		t.Fatalf("default Build Tools selector = %q, want %q", got, want)
 	}
-	plan, err := resolveToolPlan([]string{"dotnet", "dotnet:10", "buildtools:17", "buildtools:18"})
+	plan, err := resolveToolPlan([]string{"node", "node:24", "dotnet", "dotnet:10", "buildtools:17", "buildtools:18"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := strings.Join(plan.Canonical, ","), "buildtools:17,buildtools:18,dotnet:10,dotnet:8,dotnet:9"; got != want {
-		t.Fatalf("canonical selectors = %q, want %q", got, want)
+	wantCanonical := "buildtools:17,buildtools:18,dotnet:10,dotnet:8,dotnet:9"
+	for _, major := range plan.Node {
+		wantCanonical += ",node:" + major
+	}
+	if got := strings.Join(plan.Canonical, ","); got != wantCanonical {
+		t.Fatalf("canonical selectors = %q, want %q", got, wantCanonical)
 	}
 	if got, want := strings.Join(plan.DotNet, ","), "8.0,9.0,10.0"; got != want {
 		t.Fatalf(".NET install order = %q, want %q", got, want)
+	}
+	if len(plan.Node) != len(imageVersionManifest.Node.Releases) {
+		t.Fatalf("Node install majors = %v, want all %d declared majors", plan.Node, len(imageVersionManifest.Node.Releases))
+	}
+	nodeScript := bakeNodeInstallScript(plan.Node)
+	for _, major := range plan.Node {
+		release := imageVersionManifest.Node.Releases[major]
+		for _, want := range []string{bakeNodeArtifactName(major), release.Version, release.WindowsX64SHA256} {
+			if !strings.Contains(nodeScript, want) {
+				t.Errorf("generated Node script missing %q", want)
+			}
+		}
+	}
+	exactNode, err := resolveToolPlan([]string{"node:24"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(exactNode.Canonical, ","), "node:24"; got != want {
+		t.Fatalf("exact Node selector = %q, want %q", got, want)
+	}
+	if script := bakeNodeInstallScript(exactNode.Node); strings.Contains(script, imageVersionManifest.Node.Releases["22"].Version) || !strings.Contains(script, imageVersionManifest.Node.Releases["24"].Version) {
+		t.Fatal("exact Node install script did not select only Node 24")
 	}
 	artifacts := bakeDotNetArtifacts(plan.DotNet)
 	if len(artifacts) != 3 {
@@ -166,7 +204,7 @@ func TestVersionedGoldenToolSelectors(t *testing.T) {
 			t.Errorf("generated Build Tools script missing %q", want)
 		}
 	}
-	for _, selector := range []string{"dotnet:7", "buildtools:19", "node:22", "unknown"} {
+	for _, selector := range []string{"dotnet:7", "buildtools:19", "node:20", "go:1", "unknown"} {
 		if _, err := resolveToolPlan([]string{selector}); err == nil {
 			t.Errorf("selector %q should fail", selector)
 		}
