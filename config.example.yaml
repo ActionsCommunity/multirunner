@@ -55,6 +55,9 @@ cache:
   # URL of this cache as seen from INSIDE runner containers (host.docker.internal
   # for Docker, host.containers.internal for Podman). Injected as ACTIONS_RESULTS_URL.
   advertise_url: "http://host.docker.internal:3000"
+  # Set external_url to use an existing cache server instead of starting the
+  # embedded server. The URL must be reachable from the runner containers.
+  # external_url: "http://cache.internal:3000"
   # Optional private path token. Embedded cache generates one automatically and
   # injects it into runners; set this only when coordinating with an external
   # standalone cacheserver's --access-token.
@@ -78,6 +81,7 @@ pools:
     # or set image: to use your own. dotnet/rust already bundle Node.
     # Tip: `multirunner detect --path .` recommends flavors for a repo.
     image_tier: minimal
+    # image: "ghcr.io/my-org/custom-runner:latest"
     labels: [self-hosted, linux, x64]
     work_folder: _work
     name_prefix: multirunner
@@ -129,6 +133,7 @@ pools:
       # runner_version: "2.337.0"
       # runner_sha256 is required when runner_version is not the built-in version.
       # runner_sha256: "<64 lowercase hex characters>"
+      # licensed: true             # skip evaluation-license housekeeping for activated images
       # Toolchains baked into the golden (the VM equivalent of image_tier; qemu
       # ignores image/image_tier). Options: dotnet | node | go | buildtools.
       # Match `multirunner bake --tools ...`; changing the set forces a rebuild.
@@ -138,6 +143,13 @@ pools:
     os: windows
     size: 2
     runner_group_id: 1
+    # For containerd/runhcs, set backend: containerd and configure this block:
+    # backend: containerd
+    # containerd:
+    #   address: '\\.\pipe\containerd-containerd'
+    #   nerdctl: "nerdctl.exe"
+    #   namespace: "multirunner"
+    #   isolation: auto            # process | hyperv | auto
     # Windows image_tier options (pulled automatically):
     #   minimal (default) | node | dotnet | buildtools
     # dotnet layers on node, so it already bundles Node. buildtools layers on

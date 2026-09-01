@@ -35,30 +35,32 @@ One small binary. One config file. No Kubernetes, no control plane.
 | **Mix Linux + Windows** | Multiple pools, different OSes, one orchestrator. |
 | **Self-hosted Actions cache** | Built-in v2 cache server — `actions/cache` stays on your host. |
 | **Git mirror cache** | Local bare mirror; `actions/checkout` fetches only the delta. |
-| **Autoscaling** | Keep N warm, or scale on demand (polling or webhook). |
+| **Autoscaling** | Keep N warm, scale on demand (polling or webhook), or let GitHub drive capacity through runner scale sets. |
 | **Runs as a service** | Windows SCM, Linux systemd, macOS launchd. |
 | **Metrics** | Prometheus endpoint + health check. |
 | **Housekeeping** | Cache + mirror garbage collection, automatic. |
 
-Every backend above (Linux containers, Windows containers, Windows VMs) is
-validated end-to-end against a real GitHub repo — including real toolchains
-(`actions/checkout`, `actions/setup-dotnet`, `dotnet build`) and `actions/cache`
-save/restore against the local server.
+The Linux Docker backend is validated end-to-end against a real GitHub repo,
+including real toolchains (`actions/checkout`, `actions/setup-dotnet`,
+`dotnet build`) and `actions/cache` save/restore against the local server.
+Windows container images receive build and smoke checks in CI. Integration jobs
+for containerd and QEMU are included for suitable self-hosted infrastructure.
 
 ---
 
 ## How it works
 
-For each runner slot, multirunner:
+In `pool` and `autoscale` modes, multirunner:
 
 1. Calls GitHub's `generate-jitconfig` (repo / repos / org / enterprise scope) for a
    single-use registration.
-2. Launches a clean runner — a container or a VM — that runs the **stock GitHub
+2. Launches a clean runner, either a container or a VM, that runs the **stock GitHub
    runner** with that JIT config.
 3. The runner takes exactly one job, then deregisters itself (ephemeral).
 4. multirunner notices it exited and immediately starts a fresh one.
 
-It runs the official `actions/runner` binary unchanged — nothing is reimplemented,
+In `scaleset` mode, GitHub's scale-set session supplies the JIT config and desired
+runner count instead. Every mode runs the official `actions/runner` binary unchanged,
 so jobs behave exactly as on GitHub-hosted runners.
 
 ---
@@ -398,8 +400,8 @@ multirunner provisions to that number. That buys three things:
   knows when it is saturated instead of having requests dropped.
 
 Runners still come from the same backends, because the session hands back the
-same JIT config `generate-jitconfig` returns. docker, containerd, podman and
-QEMU all work unchanged.
+same encoded JIT config used by the other provisioning modes. Docker,
+containerd, Podman and QEMU all work unchanged.
 
 ```yaml
 provisioning: scaleset
@@ -414,6 +416,7 @@ pools:
     os: linux
     size: 4            # also the maximum capacity advertised to GitHub
     scale_set: multirunner-linux
+    runner_group: Default
     labels: [self-hosted, linux, x64]
 
   - name: windows-pool
@@ -431,7 +434,7 @@ set from a workflow the same way as any other runner:
 ```yaml
 jobs:
   build:
-    runs-on: [self-hosted, linux, x64]   # or: runs-on: multirunner-linux
+    runs-on: [self-hosted, linux, x64]
 ```
 
 [scaleset]: https://github.com/actions/scaleset
@@ -471,13 +474,14 @@ Set `metrics.listen` (e.g. `127.0.0.1:9090`) to expose:
 
 Built with cobra — `multirunner <command> --help` for details; `--config` is global.
 
-```
+```text
 multirunner [run]                   run the orchestrator (default)
 multirunner connect --org <org>     create + install a GitHub App, write auth to config
 multirunner doctor                  check daemons + container mode, no runners
 multirunner detect                  scan a repo, recommend image flavors + pools
 multirunner bake                    build a golden Windows VM image (qemu backend)
 multirunner install-containerd      install the Windows-container stack (elevates)
+multirunner install-windows-daemon  install the Windows Docker daemon (elevates)
 multirunner service ...             install | uninstall | start | stop | restart
 multirunner completion <shell>      shell completion script
 ```
@@ -498,7 +502,7 @@ GOOS=darwin  GOARCH=arm64 go build -o multirunner        ./cmd/multirunner
 
 ## Layout
 
-```
+```text
 cmd/multirunner    orchestrator + CLI
 cmd/cacheserver    standalone cache server
 internal/config    config schema + loader
@@ -506,6 +510,7 @@ internal/github    JIT client (repo/org/enterprise, PAT/App)
 internal/backend   container backends (Docker/Podman, containerd Windows)
 internal/winvm     QEMU Windows-VM backend + golden bake
 internal/pool      per-OS ephemeral pool + reprovision loop
+internal/scaleset  runner scale-set sessions + lifecycle management
 internal/cache     self-hosted v2 cache server
 internal/gitcache  host git mirror manager
 images/            runner + cacheserver Dockerfiles
