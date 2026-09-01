@@ -12,9 +12,11 @@ func TestContainerdLaunchArgsControls(t *testing.T) {
 		Name:             "runner",
 		Image:            "runner:latest",
 		EncodedJITConfig: "jit",
-		CPUCount:         2,
-		MemoryBytes:      4_294_967_296,
-		Env:              map[string]string{"Z": "last", "A": "first"},
+		Container: ContainerSettings{
+			CPUCount:    2,
+			MemoryBytes: 4_294_967_296,
+		},
+		Env: map[string]string{"Z": "last", "A": "first"},
 	}
 	got := b.launchArgs(req, req.Env)
 	want := []string{
@@ -50,15 +52,15 @@ func TestContainerdLaunchRejectsUnsupportedControlsBeforeRun(t *testing.T) {
 		want string
 	}{
 		"memory swap": {
-			req:  LaunchRequest{Name: "runner", MemoryBytes: 1024, MemorySwapBytes: 1024},
+			req:  LaunchRequest{Name: "runner", Container: ContainerSettings{MemoryBytes: 1024, MemorySwapBytes: 1024}},
 			want: "memory swap is unsupported",
 		},
 		"DNS": {
-			req:  LaunchRequest{Name: "runner", DNS: []string{"1.1.1.1"}},
+			req:  LaunchRequest{Name: "runner", Container: ContainerSettings{DNS: []string{"1.1.1.1"}}},
 			want: "DNS is unsupported",
 		},
 		"invalid DNS": {
-			req:  LaunchRequest{Name: "runner", DNS: []string{"resolver.example.com"}},
+			req:  LaunchRequest{Name: "runner", Container: ContainerSettings{DNS: []string{"resolver.example.com"}}},
 			want: "must be an IP address",
 		},
 	}

@@ -14,10 +14,12 @@ func TestDockerLaunchConfigsLinuxControls(t *testing.T) {
 		Name:             "runner",
 		Image:            "runner:latest",
 		EncodedJITConfig: "jit",
-		CPUCount:         2,
-		MemoryBytes:      4_294_967_296,
-		MemorySwapBytes:  8_589_934_592,
-		DNS:              []string{"1.1.1.1", "2001:db8::1"},
+		Container: ContainerSettings{
+			CPUCount:        2,
+			MemoryBytes:     4_294_967_296,
+			MemorySwapBytes: 8_589_934_592,
+			DNS:             []string{"1.1.1.1", "2001:db8::1"},
+		},
 	}
 
 	_, host, err := b.launchConfigs(req)
@@ -27,8 +29,8 @@ func TestDockerLaunchConfigsLinuxControls(t *testing.T) {
 	if host.NanoCPUs != 2_000_000_000 || host.CPUCount != 0 {
 		t.Errorf("CPU resources = NanoCPUs %d, CPUCount %d", host.NanoCPUs, host.CPUCount)
 	}
-	if host.Memory != req.MemoryBytes || host.MemorySwap != req.MemorySwapBytes {
-		t.Errorf("memory resources = %d/%d, want %d/%d", host.Memory, host.MemorySwap, req.MemoryBytes, req.MemorySwapBytes)
+	if host.Memory != req.Container.MemoryBytes || host.MemorySwap != req.Container.MemorySwapBytes {
+		t.Errorf("memory resources = %d/%d, want %d/%d", host.Memory, host.MemorySwap, req.Container.MemoryBytes, req.Container.MemorySwapBytes)
 	}
 	if len(host.DNS) != 2 || host.DNS[0] != "1.1.1.1" || host.DNS[1] != "2001:db8::1" {
 		t.Errorf("DNS = %v", host.DNS)
@@ -38,10 +40,12 @@ func TestDockerLaunchConfigsLinuxControls(t *testing.T) {
 func TestDockerLaunchConfigsWindowsControls(t *testing.T) {
 	b := &dockerBackend{name: "docker-windows", isolation: container.IsolationProcess}
 	req := LaunchRequest{
-		Name:        "runner",
-		CPUCount:    4,
-		MemoryBytes: 4_294_967_296,
-		DNS:         []string{"10.0.0.10"},
+		Name: "runner",
+		Container: ContainerSettings{
+			CPUCount:    4,
+			MemoryBytes: 4_294_967_296,
+			DNS:         []string{"10.0.0.10"},
+		},
 	}
 
 	_, host, err := b.launchConfigs(req)
@@ -51,7 +55,7 @@ func TestDockerLaunchConfigsWindowsControls(t *testing.T) {
 	if host.CPUCount != 4 || host.NanoCPUs != 0 {
 		t.Errorf("CPU resources = CPUCount %d, NanoCPUs %d", host.CPUCount, host.NanoCPUs)
 	}
-	if host.Memory != req.MemoryBytes || host.MemorySwap != 0 {
+	if host.Memory != req.Container.MemoryBytes || host.MemorySwap != 0 {
 		t.Errorf("memory resources = %d/%d", host.Memory, host.MemorySwap)
 	}
 	if len(host.DNS) != 1 || host.DNS[0] != "10.0.0.10" {
@@ -81,37 +85,37 @@ func TestDockerLaunchConfigsRejectsInvalidControls(t *testing.T) {
 	}{
 		"negative CPU": {
 			backend: "docker-linux",
-			req:     LaunchRequest{CPUCount: -1},
+			req:     LaunchRequest{Container: ContainerSettings{CPUCount: -1}},
 			want:    "cpu count",
 		},
 		"overflowed CPU": {
 			backend: "docker-linux",
-			req:     LaunchRequest{CPUCount: math.MaxInt64/nanoCPUsPerCPU + 1},
+			req:     LaunchRequest{Container: ContainerSettings{CPUCount: math.MaxInt64/nanoCPUsPerCPU + 1}},
 			want:    "overflows",
 		},
 		"negative memory": {
 			backend: "docker-linux",
-			req:     LaunchRequest{MemoryBytes: -1},
+			req:     LaunchRequest{Container: ContainerSettings{MemoryBytes: -1}},
 			want:    "memory",
 		},
 		"swap without memory": {
 			backend: "docker-linux",
-			req:     LaunchRequest{MemorySwapBytes: 1024},
+			req:     LaunchRequest{Container: ContainerSettings{MemorySwapBytes: 1024}},
 			want:    "requires",
 		},
 		"swap below memory": {
 			backend: "docker-linux",
-			req:     LaunchRequest{MemoryBytes: 2048, MemorySwapBytes: 1024},
+			req:     LaunchRequest{Container: ContainerSettings{MemoryBytes: 2048, MemorySwapBytes: 1024}},
 			want:    "greater than or equal",
 		},
 		"hostname DNS": {
 			backend: "docker-linux",
-			req:     LaunchRequest{DNS: []string{"resolver.example.com"}},
+			req:     LaunchRequest{Container: ContainerSettings{DNS: []string{"resolver.example.com"}}},
 			want:    "IP address",
 		},
 		"Windows swap": {
 			backend: "docker-windows",
-			req:     LaunchRequest{MemoryBytes: 1024, MemorySwapBytes: 1024},
+			req:     LaunchRequest{Container: ContainerSettings{MemoryBytes: 1024, MemorySwapBytes: 1024}},
 			want:    "unsupported",
 		},
 	}

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -44,13 +45,17 @@ func (h *stubHandle) Kill(context.Context) error { h.killed = true; return h.kil
 type stubBackend struct {
 	handle    *stubHandle
 	launchErr error
+	request   *backend.LaunchRequest
 }
 
 func (stubBackend) Name() string                              { return "stub" }
 func (stubBackend) Ping(context.Context) error                { return nil }
 func (stubBackend) OSType(context.Context) (string, error)    { return "linux", nil }
 func (stubBackend) EnsureImage(context.Context, string) error { return nil }
-func (b stubBackend) Launch(context.Context, backend.LaunchRequest) (backend.RunnerHandle, error) {
+func (b stubBackend) Launch(_ context.Context, req backend.LaunchRequest) (backend.RunnerHandle, error) {
+	if b.request != nil {
+		*b.request = req
+	}
 	if b.handle == nil {
 		return nil, b.launchErr
 	}
@@ -121,6 +126,25 @@ func jitServerWithRunnerState(t *testing.T, deleteStatus int, runnerID int64, st
 
 func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+func TestRunOnceCarriesContainerSettings(t *testing.T) {
+	gh, _ := jitServer(t, http.StatusNoContent)
+	want := backend.ContainerSettings{
+		CPUCount:        2,
+		MemoryBytes:     4_294_967_296,
+		MemorySwapBytes: 8_589_934_592,
+		DNS:             []string{"1.1.1.1"},
+	}
+	var got backend.LaunchRequest
+
+	if _, err := RunOnce(context.Background(), gh, stubBackend{handle: &stubHandle{}, request: &got},
+		Spec{Name: "mr-1", Image: "img", Container: want}, discardLogger()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if !reflect.DeepEqual(got.Container, want) {
+		t.Errorf("container settings = %+v, want %+v", got.Container, want)
+	}
 }
 
 // TestRunOnceDeregistersAfterExit is the regression test for the registration

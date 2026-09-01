@@ -87,10 +87,10 @@ func (b *containerdBackend) Launch(ctx context.Context, req LaunchRequest) (Runn
 	if err := req.validateContainerSettings(); err != nil {
 		return nil, fmt.Errorf("container %s settings: %w", req.Name, err)
 	}
-	if req.MemorySwapBytes != 0 {
+	if req.Container.MemorySwapBytes != 0 {
 		return nil, fmt.Errorf("container %s settings: memory swap is unsupported by nerdctl on Windows", req.Name)
 	}
-	if len(req.DNS) != 0 {
+	if len(req.Container.DNS) != 0 {
 		return nil, fmt.Errorf("container %s settings: DNS is unsupported by nerdctl on Windows", req.Name)
 	}
 
@@ -122,11 +122,11 @@ func (b *containerdBackend) Launch(ctx context.Context, req LaunchRequest) (Runn
 
 func (b *containerdBackend) launchArgs(req LaunchRequest, env map[string]string) []string {
 	args := []string{"run", "-d", "--name", req.Name, "--isolation", b.isolation}
-	if req.CPUCount != 0 {
-		args = append(args, "--cpus", strconv.FormatInt(req.CPUCount, 10))
+	if req.Container.CPUCount != 0 {
+		args = append(args, "--cpus", strconv.FormatInt(req.Container.CPUCount, 10))
 	}
-	if req.MemoryBytes != 0 {
-		args = append(args, "--memory", strconv.FormatInt(req.MemoryBytes, 10))
+	if req.Container.MemoryBytes != 0 {
+		args = append(args, "--memory", strconv.FormatInt(req.Container.MemoryBytes, 10))
 	}
 
 	args = append(args, "-e", "JIT_CONFIG="+req.EncodedJITConfig)
