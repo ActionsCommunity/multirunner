@@ -96,7 +96,7 @@ func (b *dockerBackend) launchConfigs(req LaunchRequest) (*container.Config, *co
 		return nil, nil, fmt.Errorf("container %s settings: %w", req.Name, err)
 	}
 	isWindows := b.name == "docker-windows"
-	if isWindows && req.MemorySwapBytes != 0 {
+	if isWindows && req.Container.MemorySwapBytes != 0 {
 		return nil, nil, fmt.Errorf("container %s settings: memory swap is unsupported by Docker on Windows", req.Name)
 	}
 
@@ -124,14 +124,14 @@ func (b *dockerBackend) launchConfigs(req LaunchRequest) (*container.Config, *co
 	host := &container.HostConfig{
 		AutoRemove: true,
 		Mounts:     toDockerMounts(req.Mounts),
-		DNS:        append([]string(nil), req.DNS...),
+		DNS:        append([]string(nil), req.Container.DNS...),
 	}
-	host.Memory = req.MemoryBytes
-	host.MemorySwap = req.MemorySwapBytes
+	host.Memory = req.Container.MemoryBytes
+	host.MemorySwap = req.Container.MemorySwapBytes
 	if isWindows {
-		host.CPUCount = req.CPUCount
+		host.CPUCount = req.Container.CPUCount
 	} else {
-		host.NanoCPUs = req.CPUCount * nanoCPUsPerCPU
+		host.NanoCPUs = req.Container.CPUCount * nanoCPUsPerCPU
 	}
 	if b.isolation != "" {
 		host.Isolation = b.isolation

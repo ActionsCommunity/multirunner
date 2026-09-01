@@ -234,7 +234,7 @@ func (c *CPUCount) UnmarshalYAML(node *yaml.Node) error {
 	return nil
 }
 
-// Mebibytes is an integer memory quantity in 1024-byte units.
+// Mebibytes is an integer memory quantity in 1,048,576-byte units.
 type Mebibytes int64
 
 // UnmarshalYAML rejects fractional and string memory values.

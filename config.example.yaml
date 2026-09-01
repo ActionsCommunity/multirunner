@@ -87,8 +87,9 @@ pools:
     name_prefix: multirunner
     container:
       cpus: 2
+      # Memory values use mebibytes (MiB).
       memory_mb: 4096
-      # Total memory plus swap. Equal to memory_mb to disable swap.
+      # Total memory plus swap in MiB. Equal to memory_mb to disable swap.
       memory_swap_mb: 4096
       dns: [1.1.1.1, 8.8.8.8]
     # Required when provisioning: scaleset. Each pool needs its own scale set,
@@ -175,6 +176,7 @@ pools:
     # Windows containers support CPU, memory, and DNS. Swap is Linux-only.
     container:
       cpus: 2
+      # Memory values use mebibytes (MiB).
       memory_mb: 4096
       dns: [1.1.1.1, 8.8.8.8]
     docker:

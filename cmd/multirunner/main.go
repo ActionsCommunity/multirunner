@@ -528,7 +528,14 @@ func runOrchestrator(ctx context.Context, configPath string, interactive, instal
 		env, mounts := poolEnvAndMounts(cfg, pc, sharedEnv, gitMgr, logger)
 		image := pc.ImageRef()
 		launchers = append(launchers, pool.NewLauncher(pc, image, be, ghProvider, env, mounts, logger, hooks))
-		scaleSetPools = append(scaleSetPools, scaleSetPool{cfg: pc, be: be, image: image, env: env, mounts: mounts})
+		scaleSetPools = append(scaleSetPools, scaleSetPool{
+			cfg:       pc,
+			be:        be,
+			image:     image,
+			env:       env,
+			mounts:    mounts,
+			container: normalizedContainerSettings(pc.Container),
+		})
 		logger.Info("pool ready", "name", pc.Name, "os", pc.OS, "size", pc.Size, "image", image,
 			"dind", pc.Docker.EnableDinD, "tool_cache", pc.ToolCache.Mode, "mounts", len(mounts))
 	}
@@ -566,11 +573,21 @@ func runOrchestrator(ctx context.Context, configPath string, interactive, instal
 // pool. It deliberately skips pool.Launcher, because in this mode the JIT
 // config comes from the scale set session rather than from generate-jitconfig.
 type scaleSetPool struct {
-	cfg    config.Pool
-	be     backend.Backend
-	image  string
-	env    map[string]string
-	mounts []backend.Mount
+	cfg       config.Pool
+	be        backend.Backend
+	image     string
+	env       map[string]string
+	mounts    []backend.Mount
+	container backend.ContainerSettings
+}
+
+func normalizedContainerSettings(cfg config.ContainerConfig) backend.ContainerSettings {
+	return backend.ContainerSettings{
+		CPUCount:        int64(cfg.CPUs),
+		MemoryBytes:     cfg.MemoryBytes(),
+		MemorySwapBytes: cfg.MemorySwapBytes(),
+		DNS:             append([]string(nil), cfg.DNS...),
+	}
 }
 
 // runScaleset holds one long-poll session per pool and provisions runners as
@@ -608,6 +625,7 @@ func runScaleset(ctx context.Context, cfg *config.Config, pools []scaleSetPool, 
 					Labels:     p.cfg.Labels,
 					Env:        p.env,
 					Mounts:     p.mounts,
+					Container:  p.container,
 					MaxRunners: p.cfg.Size,
 					OnStart: func() {
 						if hooks.OnStart != nil {
