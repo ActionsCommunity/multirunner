@@ -165,6 +165,11 @@ jobs:
 
       - name: Build + push windows runner images
         shell: bash
+        # Git Bash rewrites the `/c` and `/s` switches handed to cmd into
+        # `C:\` paths before docker.exe sees them, so cmd starts interactively,
+        # reads an empty stdin, and exits 0 without running the assertion.
+        env:
+          MSYS_NO_PATHCONV: "1"
         run: |
           set -euo pipefail
           IMG=gerardsmit/multirunner-runner-windows
