@@ -22,56 +22,22 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       buildtools-lines: ${{ steps.buildtools-lines.outputs.lines }}
-      buildtools-changed: ${{ steps.buildtools-changed.outputs.changed }}
+      linux-changed: ${{ steps.inputs.outputs.linux }}
+      windows-changed: ${{ steps.inputs.outputs.windows }}
+      buildtools-changed: ${{ steps.inputs.outputs.buildtools }}
     steps:
       - uses: actions/checkout@v4
 
-      # Each Build Tools line costs a hosted Windows runner about twenty
-      # minutes, most of it Windows layer extraction that nothing can cache.
-      # Only pay for it when an input to those images changed; manual runs
-      # and the weekly refresh (which edits versions.json) always build them.
-      - name: Detect Build Tools image input changes
-        id: buildtools-changed
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: |
-          set -euo pipefail
-          if [ "$GITHUB_EVENT_NAME" != "pull_request" ]; then
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-            echo "Not a pull request; building every Build Tools line"
-            exit 0
-          fi
-          git fetch --no-tags --depth=1 origin "$BASE_SHA"
-          inputs=(
-            images/windows/Dockerfile
-            images/windows/flavors/buildtools.Dockerfile
-            images/windows/buildtools-smoke
-            images/windows/patch-runner.ps1
-            images/windows/entrypoint.ps1
-            .gitattributes
-            .github/actions
-            .github/workflows/image-build-check.yml
-          )
-          changed=false
-          if ! git diff --quiet "$BASE_SHA" HEAD -- "${inputs[@]}"; then
-            changed=true
-            echo "Build Tools image inputs changed:"
-            git diff --name-only "$BASE_SHA" HEAD -- "${inputs[@]}"
-          else
-            # versions.json changes weekly; only its minimal/buildtools
-            # sections feed these images.
-            select='{minimal, buildtools}'
-            if ! git cat-file -e "$BASE_SHA:images/versions.json" 2>/dev/null; then
-              changed=true
-              echo "images/versions.json is new on this branch"
-            elif [ "$(git show "$BASE_SHA:images/versions.json" | jq -c "$select")" != "$(jq -c "$select" images/versions.json)" ]; then
-              changed=true
-              echo "Build Tools pins in images/versions.json changed"
-            else
-              echo "Build Tools image inputs unchanged; skipping those builds"
-            fi
-          fi
-          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+      # Windows image jobs cost a hosted runner ten to twenty minutes each,
+      # most of it Windows layer extraction that nothing can cache. Only build
+      # the targets whose inputs changed; manual runs and the weekly refresh
+      # (which edits versions.json) build everything.
+      - name: Detect changed image targets
+        id: inputs
+        uses: ./.github/actions/image-inputs-changed
+        with:
+          base-sha: ${{ github.event.pull_request.base.sha }}
+          extra-paths: .github/workflows/image-build-check.yml
 
       - name: Discover Build Tools release lines
         id: buildtools-lines
@@ -115,6 +81,8 @@ jobs:
           exit 1
 
   linux:
+    needs: version-policy
+    if: needs.version-policy.outputs.linux-changed == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -196,6 +164,8 @@ jobs:
           rm runner-worker-stock.dll runner-worker-patched.dll
 
   linux-arm64:
+    needs: version-policy
+    if: needs.version-policy.outputs.linux-changed == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -217,6 +187,8 @@ jobs:
           '
 
   windows:
+    needs: version-policy
+    if: needs.version-policy.outputs.windows-changed == 'true'
     runs-on: windows-2025
     steps:
       - uses: actions/checkout@v4

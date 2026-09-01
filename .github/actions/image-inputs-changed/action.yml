@@ -1,0 +1,102 @@
+name: Image inputs changed
+description: >-
+  Report which runner-image targets a pull request actually touches, so the
+  image validation workflow only rebuilds the images whose inputs changed.
+  Each target has a list of source paths plus the sections of the version
+  manifest it reads; a target counts as changed when either differs from the
+  pull request base. Anything other than a pull request marks every target
+  changed.
+
+inputs:
+  base-sha:
+    description: Commit to compare against; normally the pull request base.
+    required: false
+    default: ""
+  manifest:
+    description: Path of the image dependency manifest.
+    required: false
+    default: images/versions.json
+  extra-paths:
+    description: >-
+      Newline-separated paths that invalidate every target, typically the
+      calling workflow file.
+    required: false
+    default: ""
+
+outputs:
+  linux:
+    description: "true when the Linux image inputs changed"
+    value: ${{ steps.detect.outputs.linux }}
+  windows:
+    description: "true when the Windows node/dotnet image inputs changed"
+    value: ${{ steps.detect.outputs.windows }}
+  buildtools:
+    description: "true when the Windows Build Tools image inputs changed"
+    value: ${{ steps.detect.outputs.buildtools }}
+
+runs:
+  using: composite
+  steps:
+    - name: Detect changed image targets
+      id: detect
+      shell: bash
+      env:
+        BASE_SHA: ${{ inputs.base-sha }}
+        MANIFEST: ${{ inputs.manifest }}
+        EXTRA_PATHS: ${{ inputs.extra-paths }}
+      run: |
+        set -euo pipefail
+        targets=(linux windows buildtools)
+
+        if [ "$GITHUB_EVENT_NAME" != "pull_request" ] || [ -z "$BASE_SHA" ]; then
+          for target in "${targets[@]}"; do
+            echo "$target=true" >> "$GITHUB_OUTPUT"
+          done
+          echo "Not a pull request; every image target counts as changed"
+          exit 0
+        fi
+        git fetch --no-tags --depth=1 origin "$BASE_SHA"
+
+        # Paths that feed every target: line-ending policy, the local actions
+        # the jobs run, and whatever the caller adds (its own workflow file).
+        shared=(.gitattributes .github/actions)
+        while IFS= read -r line; do
+          [ -n "${line// /}" ] && shared+=("$line")
+        done <<< "$EXTRA_PATHS"
+
+        declare -A files pins
+        files[linux]="images/linux"
+        pins[linux]='del(.buildtools)'
+        files[windows]="images/windows/Dockerfile images/windows/flavors/node.Dockerfile images/windows/flavors/dotnet.Dockerfile images/windows/entrypoint.ps1 images/windows/patch-runner.ps1"
+        pins[windows]='{minimal, node, dotnet}'
+        files[buildtools]="images/windows/Dockerfile images/windows/flavors/buildtools.Dockerfile images/windows/buildtools-smoke images/windows/entrypoint.ps1 images/windows/patch-runner.ps1"
+        pins[buildtools]='{minimal, buildtools}'
+
+        manifest_new=false
+        if ! git cat-file -e "$BASE_SHA:$MANIFEST" 2>/dev/null; then
+          manifest_new=true
+        fi
+
+        for target in "${targets[@]}"; do
+          read -ra paths <<< "${files[$target]}"
+          paths+=("${shared[@]}")
+          changed=false
+          reason=""
+          diff="$(git diff --name-only "$BASE_SHA" HEAD -- "${paths[@]}")"
+          if [ -n "$diff" ]; then
+            changed=true
+            reason="changed files: $(echo "$diff" | tr '\n' ' ')"
+          elif [ "$manifest_new" = true ]; then
+            changed=true
+            reason="$MANIFEST is new on this branch"
+          elif [ "$(git show "$BASE_SHA:$MANIFEST" | jq -c "${pins[$target]}")" != "$(jq -c "${pins[$target]}" "$MANIFEST")" ]; then
+            changed=true
+            reason="pins in $MANIFEST changed"
+          fi
+          echo "$target=$changed" >> "$GITHUB_OUTPUT"
+          if [ "$changed" = true ]; then
+            echo "$target: changed ($reason)"
+          else
+            echo "$target: unchanged; its image builds will be skipped"
+          fi
+        done
