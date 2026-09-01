@@ -276,6 +276,31 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Reclaim host Visual Studio disk
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $targets = @(
+              'C:\Program Files\Microsoft Visual Studio\18\Enterprise',
+              'C:\ProgramData\Microsoft\VisualStudio\Packages'
+          )
+          foreach ($expected in $targets) {
+              $target = [IO.Path]::GetFullPath($expected).TrimEnd('\')
+              if ($target -cne $expected -or $target.Length -lt 40) {
+                  throw "unsafe cleanup target: $target"
+              }
+              if (-not (Test-Path -LiteralPath $target)) { continue }
+              $item = Get-Item -LiteralPath $target -Force
+              if (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+                  throw "cleanup target is not a real directory: $target"
+              }
+              Write-Host "Removing ephemeral runner directory $target"
+              Remove-Item -LiteralPath $target -Recurse -Force
+          }
+          $free = (Get-PSDrive -Name C).Free
+          Write-Host ("Free disk after cleanup: {0:N1} GB" -f ($free / 1GB))
+          if ($free -lt 35GB) { throw 'less than 35 GB free after guarded cleanup' }
+
       - name: Build minimal and assert Build Tools ${{ matrix.line }}
         shell: bash
         run: |
