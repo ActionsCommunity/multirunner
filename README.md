@@ -80,15 +80,21 @@ Prebuilt binaries are published for **Linux, Windows, and macOS**, each in
 ### Copilot CLI plugin
 
 This repository includes a Copilot CLI plugin for guided host setup and
-day-two operations. From a checkout of this repository:
+day-two operations. Install it directly from GitHub:
 
 ```sh
-copilot plugin install .
+copilot plugin install ActionsCommunity/multirunner
 copilot plugin list
 ```
 
-Reinstall the local plugin after changing or updating the checkout because
-Copilot CLI caches installed plugin contents.
+For plugin development, install from a local checkout:
+
+```sh
+copilot plugin install .
+```
+
+Reinstall after changing the checkout because Copilot CLI caches installed
+plugin contents.
 
 Ask Copilot to use one of these focused skills:
 
