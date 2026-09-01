@@ -5,8 +5,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 
+	imageversions "github.com/GerardSmit/multirunner/images"
+	"github.com/GerardSmit/multirunner/internal/winvm"
 	"gopkg.in/yaml.v3"
 )
 
@@ -126,6 +130,19 @@ func (gh GitHub) ResolvedRepos() []RepoRef {
 	return refs
 }
 
+// RepoTargets returns the concrete repositories available to repository-level
+// diagnostics for both singular and plural repository scopes.
+func (gh GitHub) RepoTargets() []RepoRef {
+	switch gh.Scope {
+	case ScopeRepo:
+		return []RepoRef{{Owner: gh.Owner, Repo: gh.Repo}}
+	case ScopeRepos:
+		return gh.ResolvedRepos()
+	default:
+		return nil
+	}
+}
+
 // Auth holds either a PAT or GitHub App credentials. PAT takes precedence when set.
 type Auth struct {
 	PAT            string `yaml:"pat"`
@@ -184,19 +201,43 @@ type Pool struct {
 // publishedFlavors lists the per-OS image flavors CI builds and pushes as tags
 // on gerardsmit/multirunner-runner-<os>. A pool's image_tier naming one of these
 // resolves to the published tag; unknown tiers fall back to a local :dev build.
-var publishedFlavors = map[string]map[string]bool{
-	"linux": {
-		"native-build": true,
-		"node":         true,
-		"dotnet":       true,
-		"rust":         true,
-		"go":           true,
-	},
-	"windows": {
-		"node":       true,
-		"dotnet":     true,
-		"buildtools": true,
-	},
+var publishedFlavors = newPublishedFlavors()
+
+// newPublishedFlavors builds the flavor table, deriving the per-line Build Tools
+// entries from the embedded image manifest so adding a release line there is the
+// only edit needed.
+func newPublishedFlavors() map[string]map[string]string {
+	windows := map[string]string{
+		"node":       "node",
+		"dotnet":     "dotnet",
+		"buildtools": "buildtools",
+	}
+	// Docker tags cannot contain a second colon, so image_tier buildtools:<line>
+	// maps to the :buildtools-<line> tag CI pushes for that manifest line.
+	for _, line := range imageversions.MustEmbedded().BuildTools.ReleaseLines() {
+		windows["buildtools:"+line] = "buildtools-" + line
+	}
+	return map[string]map[string]string{
+		"linux": {
+			"native-build": "native-build",
+			"node":         "node",
+			"dotnet":       "dotnet",
+			"rust":         "rust",
+			"go":           "go",
+		},
+		"windows": windows,
+	}
+}
+
+// validImageTiers lists the tiers accepted for an OS: minimal, then the
+// published flavors sorted.
+func validImageTiers(goos string) []string {
+	tiers := make([]string, 0, len(publishedFlavors[goos])+1)
+	for tier := range publishedFlavors[goos] {
+		tiers = append(tiers, tier)
+	}
+	sort.Strings(tiers)
+	return append([]string{"minimal"}, tiers...)
 }
 
 // ImageRef resolves the container image for a pool, in priority order:
@@ -214,10 +255,40 @@ func (p Pool) ImageRef() string {
 		// local build needed for the common case.
 		return "gerardsmit/multirunner-runner-" + p.OS + ":latest"
 	}
-	if publishedFlavors[p.OS][tier] {
-		return "gerardsmit/multirunner-runner-" + p.OS + ":" + tier
+	if tag := publishedFlavors[p.OS][tier]; tag != "" {
+		return "gerardsmit/multirunner-runner-" + p.OS + ":" + tag
 	}
 	return "multirunner/runner-" + p.OS + "-" + tier + ":dev"
+}
+
+// localImageTierPattern is Docker's grammar for one repository path component,
+// which is where an unpublished tier ends up in the local :dev reference.
+var localImageTierPattern = regexp.MustCompile(`^[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*$`)
+
+// maxLocalImageTierLength keeps the generated local reference well inside
+// Docker's 255-character limit for the full repository name.
+const maxLocalImageTierLength = 64
+
+// validateImageTier rejects a tier that has no published flavor for the pool's
+// OS and cannot be expressed as a local :dev build either, because it does not
+// form a valid Docker repository component. Left unchecked those tiers only
+// fail at launch time, as an "invalid reference format" from the daemon that
+// names no pool and wastes a JIT runner registration. An unknown tier that is
+// valid keeps falling back to a local build — a supported dev workflow.
+func (p Pool) validateImageTier() error {
+	if p.Image != "" || p.Backend == "qemu" {
+		return nil
+	}
+	tier := p.ImageTier
+	if tier == "" || tier == "minimal" || publishedFlavors[p.OS][tier] != "" {
+		return nil
+	}
+	if len(tier) <= maxLocalImageTierLength && localImageTierPattern.MatchString(tier) {
+		return nil
+	}
+	return fmt.Errorf("pools[%q].image_tier %q is not published for os=%s and cannot be built locally "+
+		"(a local tier must be lowercase letters and digits separated by '.', '_' or '-', at most %d characters); valid tiers: %s",
+		p.Name, tier, p.OS, maxLocalImageTierLength, strings.Join(validImageTiers(p.OS), ", "))
 }
 
 // ToolCachePath is the hostedtoolcache directory for the pool's OS.
@@ -233,20 +304,20 @@ func (p Pool) DockerSocketPath() string {
 	return "/var/run/docker.sock"
 }
 
-// QEMU configures the VM backend (Windows runners on a Linux/KVM host).
+// QEMU configures the x86-64 Windows VM backend.
 type QEMU struct {
 	Golden  string `yaml:"golden"`   // path to the golden qcow2 (built by `multirunner bake`)
 	WorkDir string `yaml:"work_dir"` // where per-job overlays/ISOs are written
 	MemMB   int    `yaml:"mem_mb"`
 	CPUs    int    `yaml:"cpus"`
-	Accel   string `yaml:"accel"` // "" = auto (kvm/whpx/hvf)
+	Accel   string `yaml:"accel"` // "" = auto (hardware acceleration on x86-64; TCG on ARM)
 	// Housekeeping (golden eval license + rebuilds):
 	BakeISO       string   `yaml:"bake_iso"`        // Windows ISO for rebuilds (enables auto-rebuild)
 	BakeISOSHA256 string   `yaml:"bake_iso_sha256"` // optional expected SHA256 of bake_iso
 	RunnerVersion string   `yaml:"runner_version"`  // runner version to bake
 	RunnerSHA256  string   `yaml:"runner_sha256"`   // required with a non-default runner_version
 	Licensed      bool     `yaml:"licensed"`        // real key/KMS -> skip eval housekeeping
-	Tools         []string `yaml:"tools"`           // toolchains to bake into the golden: dotnet | node | go | buildtools
+	Tools         []string `yaml:"tools"`           // golden selectors: dotnet[:major] | node[:major] | go | buildtools[:line]
 }
 
 // Containerd configures the containerd/runhcs Windows-container backend. The
@@ -503,6 +574,11 @@ func (c *Config) Validate() error {
 			if p.QEMU.Golden == "" {
 				return fmt.Errorf("pools[%q].qemu.golden is required for backend: qemu", p.Name)
 			}
+			// Without this a typo'd selector is only caught when an auto-rebuild
+			// runs, and never at all when bake_iso is unset.
+			if err := winvm.ValidateToolSelectors(p.QEMU.Tools); err != nil {
+				return fmt.Errorf("pools[%q].qemu.tools: %w", p.Name, err)
+			}
 		} else if p.Docker.Host == "" {
 			return fmt.Errorf("pools[%q].docker.host is required", p.Name)
 		}
@@ -513,6 +589,9 @@ func (c *Config) Validate() error {
 			// Without this the pool would start, hold a session against nothing,
 			// and never receive an assignment. Fail at startup instead.
 			return fmt.Errorf("pools[%q].scale_set is required for provisioning: scaleset", p.Name)
+		}
+		if err := p.validateImageTier(); err != nil {
+			return err
 		}
 	}
 

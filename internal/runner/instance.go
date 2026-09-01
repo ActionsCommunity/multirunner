@@ -55,8 +55,19 @@ func RunOnce(ctx context.Context, gh *github.Client, be backend.Backend, spec Sp
 		Index:            spec.Index,
 	})
 	if err != nil {
+		launchErr := fmt.Errorf("launch: %w", err)
+		if handle != nil {
+			// A non-nil handle means Launch could not prove the instance is absent,
+			// so terminate it before reclaiming the registration. If even that
+			// fails the runner may be alive and already on a job, so GitHub
+			// decides, exactly as after a wait failure.
+			if killErr := terminate(ctx, handle); killErr != nil {
+				reclaimAfterFailedKill(ctx, gh, jit.Runner.ID, spec.Name, logger)
+				return -1, errors.Join(launchErr, fmt.Errorf("kill runner: %w", killErr))
+			}
+		}
 		deregister(ctx, gh, jit.Runner.ID, spec.Name, logger)
-		return -1, fmt.Errorf("launch: %w", err)
+		return -1, launchErr
 	}
 
 	logger.Info("runner launched", "name", spec.Name, "container", short(handle.ID()), "runner_id", jit.Runner.ID)
@@ -69,6 +80,7 @@ func RunOnce(ctx context.Context, gh *github.Client, be backend.Backend, spec Sp
 
 	if ctx.Err() != nil {
 		if killErr := terminate(ctx, handle); killErr != nil {
+			reclaimAfterFailedKill(ctx, gh, jit.Runner.ID, spec.Name, logger)
 			return code, errors.Join(ctx.Err(), fmt.Errorf("kill runner: %w", killErr))
 		}
 		deregister(ctx, gh, jit.Runner.ID, spec.Name, logger)
@@ -78,6 +90,7 @@ func RunOnce(ctx context.Context, gh *github.Client, be backend.Backend, spec Sp
 		// A wait error does not prove that the runner stopped. Terminate it first
 		// and only remove its registration after the backend confirms the kill.
 		if killErr := terminate(ctx, handle); killErr != nil {
+			reclaimAfterFailedKill(ctx, gh, jit.Runner.ID, spec.Name, logger)
 			return code, errors.Join(fmt.Errorf("wait: %w", waitErr), fmt.Errorf("kill runner: %w", killErr))
 		}
 		deregister(ctx, gh, jit.Runner.ID, spec.Name, logger)
@@ -116,6 +129,35 @@ func deregister(ctx context.Context, gh *github.Client, runnerID int64, name str
 	default:
 		logger.Warn("deregister runner failed", "name", name, "runner_id", runnerID, "err", err)
 	}
+}
+
+// reclaimAfterFailedKill decides what to do with the registration of a runner
+// whose termination could not be confirmed. Nothing retries this cleanup and
+// the next launch uses a fresh name, so a kept registration leaks forever; but
+// deleting the registration of a runner that is still executing a job would
+// sever that job. GitHub arbitrates: an idle or offline runner is reclaimed, a
+// busy one is kept, and an unknown state keeps it and says so.
+func reclaimAfterFailedKill(ctx context.Context, gh *github.Client, runnerID int64, name string, logger *slog.Logger) {
+	if runnerID == 0 {
+		return
+	}
+	detached, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
+	defer cancel()
+
+	busy, err := gh.RunnerBusy(detached, runnerID)
+	switch {
+	case errors.Is(err, github.ErrRunnerNotFound):
+		return
+	case err != nil:
+		logger.Warn("could not confirm runner state after failed kill; keeping registration",
+			"name", name, "runner_id", runnerID, "err", err)
+		return
+	case busy:
+		logger.Warn("runner still busy after failed kill; keeping registration",
+			"name", name, "runner_id", runnerID)
+		return
+	}
+	deregister(ctx, gh, runnerID, name, logger)
 }
 
 func streamLogs(ctx context.Context, handle backend.RunnerHandle, logger *slog.Logger) {

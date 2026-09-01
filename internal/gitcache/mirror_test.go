@@ -13,15 +13,23 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func mustGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
+	// Point global config at an empty file so a developer's signing or hook
+	// settings cannot break the fixture commits.
+	emptyConfig := filepath.Join(t.TempDir(), "gitconfig")
+	if err := os.WriteFile(emptyConfig, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(),
 		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.com",
 		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@example.com",
+		"GIT_CONFIG_GLOBAL="+emptyConfig, "GIT_CONFIG_NOSYSTEM=1",
 	)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -130,12 +138,13 @@ func forceExplicitBareRepository(t *testing.T) {
 }
 
 // resolveEnv collapses an environment slice into a map using the last-wins
-// duplicate semantics that os/exec applies.
+// duplicate semantics that os/exec applies. Keys are upper-cased because
+// Windows resolves environment names case-insensitively.
 func resolveEnv(env []string) map[string]string {
 	out := map[string]string{}
 	for _, kv := range env {
 		if i := strings.IndexByte(kv, '='); i > 0 {
-			out[kv[:i]] = kv[i+1:]
+			out[strings.ToUpper(kv[:i])] = kv[i+1:]
 		}
 	}
 	return out
@@ -259,6 +268,177 @@ func TestGitEnvIgnoresBogusCount(t *testing.T) {
 	}
 }
 
+func TestGitEnvClampsOversizedInheritedConfig(t *testing.T) {
+	// A huge count must not drive a huge allocation, but the entries that do
+	// exist within the clamp (such as a hardening setting) must survive.
+	t.Setenv("GIT_CONFIG_COUNT", "1000000000")
+	t.Setenv("GIT_CONFIG_KEY_0", "safe.bareRepository")
+	t.Setenv("GIT_CONFIG_VALUE_0", "explicit")
+
+	m := &Manager{token: "test-token", logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	env := resolveEnv(m.gitEnv())
+
+	if got := env["GIT_CONFIG_COUNT"]; got != "2" {
+		t.Errorf("GIT_CONFIG_COUNT = %q, want the inherited entry plus the scoped auth entry", got)
+	}
+	if got := env["GIT_CONFIG_KEY_0"]; got != "safe.bareRepository" {
+		t.Errorf("GIT_CONFIG_KEY_0 = %q, want inherited safe.bareRepository", got)
+	}
+	if got := env["GIT_CONFIG_KEY_1"]; got != "http./.extraHeader" {
+		t.Errorf("GIT_CONFIG_KEY_1 = %q, want scoped extraHeader", got)
+	}
+}
+
+func TestGitEnvDropsInheritedConfigParameters(t *testing.T) {
+	// GIT_CONFIG_PARAMETERS is read by git at the same precedence as the
+	// indexed list, so an inherited rewrite there would bypass the filter.
+	t.Setenv("GIT_CONFIG_PARAMETERS", "'url.https://evil.example/.insteadof=https://github.com/'")
+
+	m := &Manager{token: "test-token", baseURL: "https://github.com", logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	for name, env := range map[string][]string{"gitEnv": m.gitEnv(), "localGitEnv": m.localGitEnv()} {
+		if _, ok := resolveEnv(env)["GIT_CONFIG_PARAMETERS"]; ok {
+			t.Errorf("%s: GIT_CONFIG_PARAMETERS survived into the subprocess environment", name)
+		}
+	}
+}
+
+func TestStripIndexedGitConfigIsCaseInsensitive(t *testing.T) {
+	env := []string{
+		"PATH=/bin",
+		"git_config_count=1",
+		"Git_Config_Key_0=http.https://github.com/.extraHeader",
+		"GIT_CONFIG_VALUE_0=Authorization: bearer inherited",
+		"git_config_parameters='x=y'",
+		"GIT_TERMINAL_PROMPT=0",
+	}
+	got := stripIndexedGitConfig(env)
+	want := []string{"PATH=/bin", "GIT_TERMINAL_PROMPT=0"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("stripIndexedGitConfig = %q, want %q", got, want)
+	}
+}
+
+func TestSweepSkipsBareRepositoriesItDidNotCreate(t *testing.T) {
+	base := setupSourceRepo(t)
+	mirrorRoot := t.TempDir()
+	m, err := New(mirrorRoot, base, "", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	mirror, err := m.EnsureMirror(ctx, "repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreign := filepath.Join(mirrorRoot, "archive.git")
+	mustGit(t, mirrorRoot, "init", "--bare", foreign)
+
+	old := time.Now().Add(-48 * time.Hour)
+	for _, p := range []string{filepath.Join(mirror, lastUsedFile), foreign} {
+		if err := os.Chtimes(p, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	removed, err := m.Sweep(ctx, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 1 {
+		t.Errorf("removed = %d, want only the stale mirror", removed)
+	}
+	if mirrorExists(mirror) {
+		t.Error("stale mirror was not swept")
+	}
+	if !mirrorExists(foreign) {
+		t.Error("bare repository without the last-used marker was deleted")
+	}
+}
+
+func TestLocalGitEnvOmitsCredentials(t *testing.T) {
+	t.Setenv("GIT_CONFIG_COUNT", "2")
+	t.Setenv("GIT_CONFIG_KEY_0", "safe.bareRepository")
+	t.Setenv("GIT_CONFIG_VALUE_0", "explicit")
+	t.Setenv("GIT_CONFIG_KEY_1", "http.https://github.com/.extraHeader")
+	t.Setenv("GIT_CONFIG_VALUE_1", "Authorization: bearer inherited")
+
+	m := &Manager{
+		baseURL: "https://github.com",
+		token:   "manager-secret",
+		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	env := resolveEnv(m.localGitEnv())
+	if got := env["GIT_CONFIG_COUNT"]; got != "1" {
+		t.Fatalf("GIT_CONFIG_COUNT = %q, want only safe inherited config", got)
+	}
+	if got := env["GIT_CONFIG_KEY_0"]; got != "safe.bareRepository" {
+		t.Errorf("GIT_CONFIG_KEY_0 = %q, want safe.bareRepository", got)
+	}
+	for key, value := range env {
+		if strings.Contains(strings.ToLower(key+"="+value), "authorization:") ||
+			strings.Contains(value, "manager-secret") {
+			t.Fatalf("local git environment contains credentials in %s", key)
+		}
+	}
+}
+
+// GitHub App auth leaves the mirror PAT empty, so the unauthenticated manager is
+// a normal configuration — not a degenerate one. Scrubbing must still happen.
+func TestLocalGitEnvOmitsCredentialsWithoutToken(t *testing.T) {
+	t.Setenv("GIT_CONFIG_COUNT", "2")
+	t.Setenv("GIT_CONFIG_KEY_0", "safe.bareRepository")
+	t.Setenv("GIT_CONFIG_VALUE_0", "explicit")
+	t.Setenv("GIT_CONFIG_KEY_1", "http.https://github.com/.extraHeader")
+	t.Setenv("GIT_CONFIG_VALUE_1", "Authorization: bearer inherited")
+
+	m := &Manager{
+		baseURL: "https://github.com",
+		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	env := resolveEnv(m.localGitEnv())
+	if got := env["GIT_CONFIG_COUNT"]; got != "1" {
+		t.Fatalf("GIT_CONFIG_COUNT = %q, want only safe inherited config", got)
+	}
+	if got := env["GIT_CONFIG_KEY_0"]; got != "safe.bareRepository" {
+		t.Errorf("GIT_CONFIG_KEY_0 = %q, want safe.bareRepository", got)
+	}
+	// The dropped entry must be absent outright, not shadowed by a lower count.
+	if _, ok := env["GIT_CONFIG_KEY_1"]; ok {
+		t.Error("inherited Authorization entry survived in the environment")
+	}
+	for key, value := range env {
+		if strings.Contains(strings.ToLower(key+"="+value), "authorization:") {
+			t.Fatalf("local git environment contains credentials in %s", key)
+		}
+	}
+}
+
+// Without a token there is no credential to protect, so an inherited URL rewrite
+// stays in force rather than being silently dropped.
+func TestGitEnvWithoutTokenKeepsUrlRewrite(t *testing.T) {
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "url.https://mirror.invalid/.insteadOf")
+	t.Setenv("GIT_CONFIG_VALUE_0", "https://github.com/")
+
+	m := &Manager{
+		baseURL: "https://github.com",
+		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	env := resolveEnv(m.gitEnv())
+	if got := env["GIT_CONFIG_COUNT"]; got != "1" {
+		t.Fatalf("GIT_CONFIG_COUNT = %q, want 1", got)
+	}
+	if got := env["GIT_CONFIG_KEY_0"]; got != "url.https://mirror.invalid/.insteadOf" {
+		t.Errorf("GIT_CONFIG_KEY_0 = %q, want the inherited rewrite", got)
+	}
+	for key, value := range env {
+		if strings.Contains(strings.ToUpper(key+"="+value), "AUTHORIZATION") {
+			t.Fatalf("unauthenticated environment gained an auth header in %s", key)
+		}
+	}
+}
+
 func TestGitEnvDropsInheritedAuthorizationAndRewrite(t *testing.T) {
 	t.Setenv("GIT_CONFIG_COUNT", "3")
 	t.Setenv("GIT_CONFIG_KEY_0", "safe.bareRepository")
@@ -333,4 +513,53 @@ func commitCount(t *testing.T, mirrorPath string) int {
 		n = n*10 + int(c-'0')
 	}
 	return n
+}
+
+func TestAuditFileConfigFlagsRewritesAndAuthorizationHeaders(t *testing.T) {
+	global := filepath.Join(t.TempDir(), "gitconfig")
+	config := "[url \"https://mirror.example/\"]\n\tinsteadOf = https://github.com/\n" +
+		"[url \"https://other.example/\"]\n\tinsteadOf = https://gitlab.com/\n" +
+		"[url \"https://spaced.example/a b/\"]\n\tinsteadOf = https://github.com/org/\n" +
+		"[url \"https://push.example/\"]\n\tpushInsteadOf = https://github.com/\n" +
+		"[http]\n\textraHeader = Authorization: bearer stored\n" +
+		"[http \"https://github.com/\"]\n\textraHeader = X-Trace: 1\n"
+	if err := os.WriteFile(global, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", global)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+
+	warnings, err := AuditFileConfig(context.Background(), "https://github.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warnings) != 3 {
+		t.Fatalf("warnings = %q, want the two GitHub rewrites and the Authorization header only", warnings)
+	}
+	if !strings.Contains(warnings[0], "rewrites https://github.com/ (url.https://mirror.example/.insteadof)") {
+		t.Errorf("warnings[0] = %q, want the GitHub URL rewrite", warnings[0])
+	}
+	if !strings.Contains(warnings[1], "(url.https://spaced.example/a b/.insteadof)") {
+		t.Errorf("warnings[1] = %q, want the rewrite whose subsection contains a space", warnings[1])
+	}
+	if !strings.Contains(warnings[2], "Authorization header (http.extraheader)") {
+		t.Errorf("warnings[2] = %q, want the stored Authorization header", warnings[2])
+	}
+}
+
+func TestAuditFileConfigQuietOnCleanConfig(t *testing.T) {
+	global := filepath.Join(t.TempDir(), "gitconfig")
+	if err := os.WriteFile(global, []byte("[core]\n\tautocrlf = false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", global)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+
+	warnings, err := AuditFileConfig(context.Background(), "https://github.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warnings) != 0 {
+		t.Errorf("warnings = %q, want none", warnings)
+	}
 }

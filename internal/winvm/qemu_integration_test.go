@@ -29,9 +29,6 @@ func TestQEMULifecycle(t *testing.T) {
 	}
 
 	accel := os.Getenv("MULTIRUNNER_TEST_ACCEL")
-	if accel == "" {
-		accel = "tcg"
-	}
 	be, err := NewBackend(Options{Golden: golden, WorkDir: filepath.Join(dir, "vm"), MemMB: 512, CPUs: 1, Accel: accel})
 	if err != nil {
 		t.Fatal(err)
@@ -52,7 +49,7 @@ func TestQEMULifecycle(t *testing.T) {
 	if _, err := os.Stat(vh.iso); err != nil {
 		t.Errorf("jit iso not created: %v", err)
 	}
-	t.Logf("VM launched: overlay=%s iso=%s accel=%s", filepath.Base(vh.overlay), filepath.Base(vh.iso), accel)
+	t.Logf("VM launched: overlay=%s iso=%s accel=%s", filepath.Base(vh.overlay), filepath.Base(vh.iso), be.accel)
 
 	// Let the VM run briefly, then stop it and confirm Wait returns + cleanup.
 	time.Sleep(2 * time.Second)

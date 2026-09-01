@@ -1,0 +1,67 @@
+name: update-image-versions
+
+on:
+  schedule:
+    - cron: "23 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: write
+  pull-requests: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Refresh runner image dependency versions and checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: go run ./cmd/update-image-versions
+
+      - name: Open or update one image maintenance pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            # native-build intentionally follows rolling Ubuntu packages. It
+            # has no discrete upstream pin to change, so still build the full
+            # graph weekly to validate whatever the repositories now resolve.
+            gh workflow run image-build-check.yml --ref "$GITHUB_REF_NAME"
+            echo "Pinned dependencies are current; weekly image validation dispatched"
+            exit 0
+          fi
+
+          branch=automation/image-versions
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git fetch origin "$branch:refs/remotes/origin/$branch" || true
+          git switch -C "$branch"
+          git add images/versions.json images/linux/Dockerfile images/windows/Dockerfile
+          git commit -m "chore(images): refresh dependency versions"
+          git push --force-with-lease origin "HEAD:refs/heads/$branch"
+
+          # GITHUB_TOKEN pushes do not emit a pull_request run. Dispatch the
+          # complete Linux, ARM64, and Windows image validation explicitly.
+          gh workflow run image-build-check.yml --ref "$branch"
+
+          body='Automated consolidated refresh of runner image dependencies, vendor checksums, base-image digests, and the matching QEMU golden-image pins. See `images/versions.json` for the complete inventory and support dates. New Node LTS lines are added automatically; if a newly supported .NET channel appears under `unassigned_supported_channels`, the image check reports it and requires an explicit target assignment.'
+          if gh pr view "$branch" >/dev/null 2>&1; then
+            gh pr edit "$branch" \
+              --title "chore(images): refresh dependency versions" \
+              --body "$body"
+          else
+            gh pr create \
+              --head "$branch" \
+              --title "chore(images): refresh dependency versions" \
+              --body "$body"
+          fi

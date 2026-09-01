@@ -176,6 +176,28 @@ func (c *Client) DeleteRunner(ctx context.Context, runnerID int64) error {
 	return nil
 }
 
+// RunnerBusy reports whether GitHub currently shows the runner as running a
+// job. Returns ErrRunnerNotFound when the registration is already gone.
+func (c *Client) RunnerBusy(ctx context.Context, runnerID int64) (bool, error) {
+	path, err := c.runnersPath(strconv.FormatInt(runnerID, 10))
+	if err != nil {
+		return false, err
+	}
+	req, err := c.gh.NewRequest(http.MethodGet, path, nil)
+	if err != nil {
+		return false, fmt.Errorf("build get-runner request: %w", err)
+	}
+	var out github.Runner
+	resp, err := c.gh.Do(ctx, req, &out)
+	if err != nil {
+		if resp != nil && resp.StatusCode == http.StatusNotFound {
+			return false, fmt.Errorf("get-runner %d: %w", runnerID, ErrRunnerNotFound)
+		}
+		return false, fmt.Errorf("get-runner %d (%s): %w", runnerID, c.scope, err)
+	}
+	return out.GetBusy(), nil
+}
+
 // QueuedJobLabels returns the requested labels for queued workflow jobs in repo
 // scope. Org/enterprise scope returns nil (no cheap REST endpoint; use webhook
 // mode there).

@@ -1,9 +1,13 @@
-# Windows "node" flavor: Node.js 22 LTS + corepack (npm/pnpm/yarn) on top of the
-# minimal runner image. Mirrors images/linux/flavors/node.Dockerfile.
+# Windows "node" flavor: every pinned active Node.js LTS + corepack
+# (npm/pnpm/yarn) on top of the minimal runner image. The manifest default is
+# exposed on PATH; actions/setup-node can select every cached declared major.
 #
 # Node is laid down in the hosted tool cache layout instead of a plain directory
 # so `actions/setup-node` resolves it from cache rather than downloading a copy
 # on every job.
+#
+# Corepack is installed from its own pinned npm tarball: Node stopped
+# distributing it in the release archive from Node 25 onwards.
 #
 # Build on a Windows-container daemon matching the host (ltsc2025):
 #   docker --host npipe:////./pipe/docker_engine_windows build \
@@ -12,10 +16,9 @@
 #     -t multirunner/runner-windows:node .
 ARG PARENT=gerardsmit/multirunner-runner-windows:minimal
 FROM ${PARENT}
-ARG NODE_VERSION=22.23.2
-ARG NODE_SHA256=1177b4137ba5adaa56354ae40f1080c7450e8ae09cecb47da459d1c52ac99f97
 
 SHELL ["powershell", "-NoProfile", "-Command", "$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue';"]
+COPY images/versions.json C:/image-versions.json
 
 # actions/setup-node looks for <tool-cache>/node/<version>/<arch> and treats the
 # sibling `<arch>.complete` marker as proof the entry is fully written. The
@@ -25,24 +28,36 @@ SHELL ["powershell", "-NoProfile", "-Command", "$ErrorActionPreference='Stop'; $
 ENV AGENT_TOOLSDIRECTORY=C:\\hostedtoolcache\\windows
 ENV RUNNER_TOOL_CACHE=C:\\hostedtoolcache\\windows
 
-RUN $ver = $env:NODE_VERSION; \
-    $dest = 'C:\hostedtoolcache\windows\node\' + $ver + '\x64'; \
-    Invoke-WebRequest -Uri ('https://nodejs.org/dist/v{0}/node-v{0}-win-x64.zip' -f $ver) -OutFile C:/node.zip; \
-    if ((Get-FileHash C:/node.zip -Algorithm SHA256).Hash -ne $env:NODE_SHA256) { throw 'Node archive checksum mismatch' }; \
-    Expand-Archive -Path C:/node.zip -DestinationPath C:/nodetmp; \
-    New-Item -ItemType Directory -Force -Path $dest | Out-Null; \
-    Copy-Item -Path ('C:/nodetmp/node-v{0}-win-x64/*' -f $ver) -Destination $dest -Recurse -Force; \
-    New-Item -ItemType File -Force -Path ('C:\hostedtoolcache\windows\node\{0}\x64.complete' -f $ver) | Out-Null; \
-    Remove-Item -Force C:/node.zip; \
-    Remove-Item -Recurse -Force C:/nodetmp
-
-# Put node/npm on PATH for steps that call them directly without setup-node.
-RUN $dir = 'C:\hostedtoolcache\windows\node\' + $env:NODE_VERSION + '\x64'; \
+RUN $manifest = Get-Content C:/image-versions.json -Raw | ConvertFrom-Json; \
+    $defaultMajor = [string]$manifest.node.default_major; \
+    $defaultRelease = $manifest.node.releases.PSObject.Properties[$defaultMajor].Value; \
+    if (-not $defaultRelease) { throw 'missing default Node release' }; \
+    foreach ($property in $manifest.node.releases.PSObject.Properties) { \
+      $major = $property.Name; \
+      $release = $property.Value; \
+      $ver = $release.version; \
+      $dest = 'C:\hostedtoolcache\windows\node\' + $ver + '\x64'; \
+      $archive = 'node-v' + $ver + '-win-x64.zip'; \
+      $zip = 'C:/node-' + $major + '.zip'; \
+      $temp = 'C:/nodetmp-' + $major; \
+      Invoke-WebRequest -Uri ('https://nodejs.org/dist/v{0}/{1}' -f $ver, $archive) -OutFile $zip; \
+      if ((Get-FileHash $zip -Algorithm SHA256).Hash -ne $release.windows_x64_sha256) { throw ('Node {0} archive checksum mismatch' -f $major) }; \
+      Expand-Archive -Path $zip -DestinationPath $temp; \
+      New-Item -ItemType Directory -Force -Path $dest | Out-Null; \
+      Copy-Item -Path ($temp + '/node-v' + $ver + '-win-x64/*') -Destination $dest -Recurse -Force; \
+      New-Item -ItemType File -Force -Path ($dest + '.complete') | Out-Null; \
+      Remove-Item -Force $zip; \
+      Remove-Item -Recurse -Force $temp; \
+    }; \
+    $defaultDest = 'C:\hostedtoolcache\windows\node\' + $defaultRelease.version + '\x64'; \
     $p = [Environment]::GetEnvironmentVariable('PATH','Machine'); \
-    [Environment]::SetEnvironmentVariable('PATH', $dir + ';' + $dir + '\node_modules\npm\bin;' + $p, 'Machine')
-
-# corepack ships with Node 22 and provides the pnpm/yarn shims that
-# pnpm/action-setup and `pnpm exec` rely on.
-RUN $dir = 'C:\hostedtoolcache\windows\node\' + $env:NODE_VERSION + '\x64'; \
-    & ($dir + '\corepack.cmd') enable --install-directory $dir; \
-    & ($dir + '\node.exe') --version
+    [Environment]::SetEnvironmentVariable('PATH', $defaultDest + ';' + $defaultDest + '\node_modules\npm\bin;' + $p, 'Machine'); \
+    $corepackTgz = 'C:/corepack.tgz'; \
+    Invoke-WebRequest -Uri $manifest.node.corepack.url -OutFile $corepackTgz; \
+    if ((Get-FileHash $corepackTgz -Algorithm SHA512).Hash -ne $manifest.node.corepack.sha512) { throw 'Corepack tarball checksum mismatch' }; \
+    & ($defaultDest + '\npm.cmd') install -g --no-audit --no-fund --no-update-notifier --cache C:/npm-cache $corepackTgz; \
+    if ($LASTEXITCODE -ne 0) { throw 'Corepack install failed' }; \
+    Remove-Item -Recurse -Force $corepackTgz, C:/npm-cache; \
+    & ($defaultDest + '\corepack.cmd') enable --install-directory $defaultDest; \
+    & ($defaultDest + '\node.exe') --version; \
+    Remove-Item -Force C:/image-versions.json

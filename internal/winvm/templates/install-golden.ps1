@@ -68,7 +68,7 @@ try {
     # real git (incremental fetch + the dotgit-cache bundle seed) instead of the
     # REST API full-archive download, and so `run:` steps and the job hook can run
     # git. Prepended to the machine PATH so every process (runner, hook, job) sees it.
-    $gitUrl = 'https://github.com/git-for-windows/git/releases/download/v2.54.0.windows.1/MinGit-2.54.0-64-bit.zip'
+    $gitUrl = '__MINGIT_URL__'
     FetchOrStage 'mingit.zip' $gitUrl C:\mingit.zip SHA256 '__MINGIT_SHA256__'
     Expand-Archive C:\mingit.zip C:\mingit -Force
     Remove-Item C:\mingit.zip
@@ -141,13 +141,7 @@ try {
     foreach ($t in $tools) {
         switch ($t) {
             'node' {
-                FetchOrStage 'node.zip' '__NODE_URL__' C:\node.zip SHA256 '__NODE_SHA256__'
-                Expand-Archive C:\node.zip C:\ -Force
-                Remove-Item C:\node.zip
-                $nd = (Get-ChildItem C:\ -Directory -Filter 'node-v*-win-x64' | Select-Object -First 1).FullName
-                Rename-Item $nd C:\nodejs
-                Add-MachinePath 'C:\nodejs'
-                & C:\nodejs\corepack.cmd enable 2>$null
+__NODE_INSTALLS__
                 Mark 'node installed'
             }
             'go' {
@@ -159,32 +153,14 @@ try {
             }
             'dotnet' {
                 New-Item -ItemType Directory -Force C:\dotnet | Out-Null
-                FetchOrStage 'dotnet8.zip' '__DOTNET8_URL__' C:\dotnet8.zip SHA512 '__DOTNET8_SHA512__'
-                Expand-Archive C:\dotnet8.zip C:\dotnet -Force
-                Remove-Item C:\dotnet8.zip
-                FetchOrStage 'dotnet9.zip' '__DOTNET9_URL__' C:\dotnet9.zip SHA512 '__DOTNET9_SHA512__'
-                Expand-Archive C:\dotnet9.zip C:\dotnet -Force
-                Remove-Item C:\dotnet9.zip
+__DOTNET_INSTALLS__
                 [Environment]::SetEnvironmentVariable('DOTNET_ROOT', 'C:\dotnet', 'Machine')
                 [Environment]::SetEnvironmentVariable('DOTNET_CLI_TELEMETRY_OPTOUT', '1', 'Machine')
                 Add-MachinePath 'C:\dotnet'
                 Mark 'dotnet installed'
             }
             'buildtools' {
-                FetchOrStage 'vs_buildtools.exe' '__VS_URL__' C:\vs_buildtools.exe SHA256 '__VS_SHA256__'
-                FetchOrStage 'vs.channel' '__VS_CHANNEL_URL__' C:\vs.channel SHA256 '__VS_CHANNEL_SHA256__'
-                $p = Start-Process -FilePath C:\vs_buildtools.exe -Wait -PassThru -ArgumentList `
-                    '--quiet', '--wait', '--norestart', '--nocache', '--installPath', 'C:\BuildTools', `
-                    '--channelUri', 'file:///C:/vs.channel', `
-                    '--installChannelUri', 'file:///C:/vs.channel', '--noUpdateInstaller', `
-                    '--add', 'Microsoft.VisualStudio.Workload.VCTools', `
-                    '--add', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64', `
-                    '--add', 'Microsoft.VisualStudio.Component.Windows11SDK.26100', `
-                    '--add', 'Microsoft.VisualStudio.Component.VC.CMake.Project', `
-                    '--includeRecommended'
-                if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { throw "vs_buildtools failed: $($p.ExitCode)" }
-                Remove-Item C:\vs_buildtools.exe, C:\vs.channel
-                [Environment]::SetEnvironmentVariable('VSBUILDTOOLS', 'C:\BuildTools', 'Machine')
+__BUILDTOOLS_INSTALLS__
                 Mark 'buildtools installed'
             }
             default { Mark "unknown tool $t" }

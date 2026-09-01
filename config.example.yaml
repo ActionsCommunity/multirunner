@@ -125,7 +125,7 @@ pools:
       work_dir: "/var/lib/multirunner/vm"
       mem_mb: 4096
       cpus: 2
-      accel: ""                  # "" = auto: kvm (Linux) / whpx (Windows) / hvf (macOS)
+      accel: ""                  # auto: x64 uses kvm/whpx/hvf; ARM uses slower x86 TCG emulation
       # bake_iso enables automatic rebuilds. Its content is always part of the
       # golden fingerprint; set bake_iso_sha256 to also reject unexpected media.
       # bake_iso: "/var/lib/multirunner/WinServer2022.iso"
@@ -135,9 +135,14 @@ pools:
       # runner_sha256: "<64 lowercase hex characters>"
       # licensed: true             # skip evaluation-license housekeeping for activated images
       # Toolchains baked into the golden (the VM equivalent of image_tier; qemu
-      # ignores image/image_tier). Options: dotnet | node | go | buildtools.
+      # ignores image/image_tier). Options: dotnet | dotnet:<major> | node |
+      # node:<major> | go | buildtools | buildtools:<line>. A bare selector
+      # follows images/versions.json (every LTS Node major, the qemu-windows
+      # .NET channels, the default Build Tools line); exact selectors combine.
       # Match `multirunner bake --tools ...`; changing the set forces a rebuild.
-      # tools: [dotnet, node, buildtools]
+      # Two Build Tools lines are two full Visual Studio installs: bake with a
+      # --disk-gb well above the 40 GB default.
+      # tools: [dotnet, "node:24", "buildtools:17", "buildtools:18"]
 
   - name: windows-pool
     os: windows
@@ -151,9 +156,11 @@ pools:
     #   namespace: "multirunner"
     #   isolation: auto            # process | hyperv | auto
     # Windows image_tier options (pulled automatically):
-    #   minimal (default) | node | dotnet | buildtools
+    #   minimal (default) | node | dotnet | buildtools | buildtools:17 | buildtools:18
     # dotnet layers on node, so it already bundles Node. buildtools layers on
-    # minimal and adds the MSVC toolchain for native C/C++.
+    # minimal and adds the MSVC toolchain for native C/C++; the unqualified
+    # tier aliases the default_line in images/versions.json, and each
+    # buildtools:<line> is its own published image.
     image_tier: minimal
     labels: [self-hosted, windows, x64]
     work_folder: _work

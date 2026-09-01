@@ -1,0 +1,34 @@
+name: Wait for Docker
+description: >-
+  Wait until the Docker daemon on a Windows hosted runner accepts connections.
+  The docker service on windows-2025 images starts asynchronously, so a job
+  that runs docker within the first seconds can fail with "failed to connect
+  to the docker API at npipe:////./pipe/docker_engine".
+
+runs:
+  using: composite
+  steps:
+    - name: Wait for the Docker daemon
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Continue'
+        $deadline = [DateTime]::UtcNow.AddMinutes(5)
+        $attempt = 0
+        while ($true) {
+            $attempt++
+            $version = & docker version --format '{{.Server.Version}}' 2>$null
+            if ($LASTEXITCODE -eq 0 -and $version) {
+                Write-Host "Docker daemon ready (server $version) after $attempt attempt(s)"
+                exit 0
+            }
+            $service = Get-Service -Name docker -ErrorAction SilentlyContinue
+            if ($service -and $service.Status -eq 'Stopped') {
+                Write-Host 'Docker service is stopped; starting it'
+                Start-Service -Name docker -ErrorAction SilentlyContinue
+            }
+            if ([DateTime]::UtcNow -ge $deadline) {
+                if ($service) { Write-Host "Docker service status: $($service.Status)" }
+                throw 'Docker daemon did not become ready within 5 minutes'
+            }
+            Start-Sleep -Seconds 5
+        }

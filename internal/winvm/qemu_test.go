@@ -6,11 +6,28 @@ import (
 )
 
 func TestDetectAccel(t *testing.T) {
-	cases := map[string]string{"linux": "kvm", "windows": "whpx", "darwin": "hvf", "plan9": "tcg"}
-	for goos, want := range cases {
-		if got := DetectAccel(goos); got != want {
-			t.Errorf("DetectAccel(%s) = %s, want %s", goos, got, want)
+	restore := kvmAvailable
+	t.Cleanup(func() { kvmAvailable = restore })
+	kvmAvailable = func() bool { return true }
+	cases := []struct {
+		goos, goarch, want string
+	}{
+		{"linux", "amd64", "kvm"},
+		{"windows", "amd64", "whpx"},
+		{"darwin", "amd64", "hvf"},
+		{"linux", "arm64", "tcg"},
+		{"windows", "arm64", "tcg"},
+		{"darwin", "arm64", "tcg"},
+		{"plan9", "amd64", "tcg"},
+	}
+	for _, tc := range cases {
+		if got := DetectAccel(tc.goos, tc.goarch); got != tc.want {
+			t.Errorf("DetectAccel(%s, %s) = %s, want %s", tc.goos, tc.goarch, got, tc.want)
 		}
+	}
+	kvmAvailable = func() bool { return false }
+	if got := DetectAccel("linux", "amd64"); got != "tcg" {
+		t.Errorf("DetectAccel without a usable /dev/kvm = %s, want tcg", got)
 	}
 }
 

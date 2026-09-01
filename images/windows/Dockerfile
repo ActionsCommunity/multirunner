@@ -6,35 +6,36 @@
 #
 # BASE must match the host build for process isolation: ltsc2025 (build 26100) on
 # Windows 11 24H2 / Server 2025. Use ltsc2022 only with Hyper-V isolation.
-ARG BASE=mcr.microsoft.com/windows/servercore:ltsc2025
+# Generated from images/versions.json by go run ./cmd/update-image-versions.
+ARG BASE=mcr.microsoft.com/windows/servercore:ltsc2025@sha256:eeaa17aefe5d949f03b1db17182f5855cf40e757533468cf5b50e07c7c385ada
 
 FROM ${BASE}
-ARG RUNNER_VERSION=2.337.0
-ARG RUNNER_SHA256=1150692afa94e71f872017e254ea55b6eece1eece3fe7e3a6d4c93d0a1b85cfc
-ARG GIT_VERSION=2.47.1
-ARG POWERSHELL_VERSION=7.6.4
-ARG POWERSHELL_SHA256=80832551c52809301e6071c8bac977beb5a2f1ec953eb4db9f94deb953333793
 
 SHELL ["powershell", "-NoProfile", "-Command", "$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue';"]
+COPY images/versions.json C:/image-versions.json
 
 WORKDIR C:/actions-runner
-RUN Invoke-WebRequest -Uri ('https://github.com/actions/runner/releases/download/v{0}/actions-runner-win-x64-{0}.zip' -f $env:RUNNER_VERSION) -OutFile runner.zip; \
-    if ((Get-FileHash runner.zip -Algorithm SHA256).Hash -ne $env:RUNNER_SHA256) { throw 'Runner archive checksum mismatch' }; \
+RUN $v = (Get-Content C:/image-versions.json -Raw | ConvertFrom-Json).minimal.runner; \
+    Invoke-WebRequest -Uri ('https://github.com/actions/runner/releases/download/v{0}/actions-runner-win-x64-{0}.zip' -f $v.version) -OutFile runner.zip; \
+    if ((Get-FileHash runner.zip -Algorithm SHA256).Hash -ne $v.windows_x64_sha256) { throw 'Runner archive checksum mismatch' }; \
     Expand-Archive -Path runner.zip -DestinationPath .; \
     Remove-Item runner.zip
 
 # MinGit for actions/checkout.
-RUN Invoke-WebRequest -Uri ('https://github.com/git-for-windows/git/releases/download/v{0}.windows.1/MinGit-{0}-64-bit.zip' -f $env:GIT_VERSION) -OutFile git.zip; \
+RUN $v = (Get-Content C:/image-versions.json -Raw | ConvertFrom-Json).minimal.mingit; \
+    Invoke-WebRequest -Uri $v.url -OutFile git.zip; \
+    if ((Get-FileHash git.zip -Algorithm SHA256).Hash -ne $v.sha256) { throw 'MinGit archive checksum mismatch' }; \
     Expand-Archive -Path git.zip -DestinationPath C:/MinGit; \
     Remove-Item git.zip
 
 # PowerShell 7. GitHub Actions defaults `run:` steps on Windows to `pwsh`, and
 # GitHub-hosted windows runners ship it, so workflows routinely declare
 # `shell: pwsh`. Without it those steps fail with "pwsh: command not found".
-RUN Invoke-WebRequest -Uri ('https://github.com/PowerShell/PowerShell/releases/download/v{0}/PowerShell-{0}-win-x64.zip' -f $env:POWERSHELL_VERSION) -OutFile pwsh.zip; \
-    if ((Get-FileHash pwsh.zip -Algorithm SHA256).Hash -ne $env:POWERSHELL_SHA256) { throw 'PowerShell archive checksum mismatch' }; \
+RUN $v = (Get-Content C:/image-versions.json -Raw | ConvertFrom-Json).minimal.powershell; \
+    Invoke-WebRequest -Uri ('https://github.com/PowerShell/PowerShell/releases/download/v{0}/PowerShell-{0}-win-x64.zip' -f $v.version) -OutFile pwsh.zip; \
+    if ((Get-FileHash pwsh.zip -Algorithm SHA256).Hash -ne $v.windows_x64_sha256) { throw 'PowerShell archive checksum mismatch' }; \
     Expand-Archive -Path pwsh.zip -DestinationPath C:/PowerShell; \
-    Remove-Item pwsh.zip
+    Remove-Item pwsh.zip, C:/image-versions.json
 
 # Cache redirect patch, kept as a SIDECAR rather than applied in place.
 #

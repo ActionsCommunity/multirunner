@@ -1,0 +1,143 @@
+{
+  "schema": 1,
+  "minimal": {
+    "linux_base": {
+      "repository": "mcr.microsoft.com/dotnet/runtime-deps",
+      "tag": "8.0-noble",
+      "digest": "sha256:6533e6633f557e0bc2b5c87bc19ba1dc069fd5e38d2703c6d6abadc9fbc378d7"
+    },
+    "windows_base": {
+      "repository": "mcr.microsoft.com/windows/servercore",
+      "tag": "ltsc2025",
+      "digest": "sha256:eeaa17aefe5d949f03b1db17182f5855cf40e757533468cf5b50e07c7c385ada"
+    },
+    "runner": {
+      "version": "2.337.0",
+      "linux_x64_sha256": "70920811a4f8ad4328818682bca5c6469c1c942fab52448868071d0063816613",
+      "linux_arm64_sha256": "9b1dc70626422526e3c94767cf024896beb15da5342a3f4819bf2feac13e0393",
+      "windows_x64_sha256": "1150692afa94e71f872017e254ea55b6eece1eece3fe7e3a6d4c93d0a1b85cfc"
+    },
+    "mingit": {
+      "version": "2.55.0.windows.5",
+      "url": "https://github.com/git-for-windows/git/releases/download/v2.55.0.windows.5/MinGit-2.55.0.5-64-bit.zip",
+      "sha256": "56d7b226b7693196cfc71fef26568f536c4a021ab6c37ff2db4287bed908e96e"
+    },
+    "powershell": {
+      "version": "7.6.5",
+      "windows_x64_sha256": "32eb8f6cdce08f86e987d625a2733e54ac3e289ae7e1621b14c0b5bcec2434ea"
+    }
+  },
+  "native_build": {
+    "package_source": "Ubuntu noble apt repositories resolved at image build time",
+    "strategy": "rolling packages are refreshed and validated on each image build"
+  },
+  "node": {
+    "track": "supported-lts",
+    "default_major": 22,
+    "corepack": {
+      "version": "0.36.0",
+      "url": "https://registry.npmjs.org/corepack/-/corepack-0.36.0.tgz",
+      "sha512": "4a2889b01859a9d0623c74c497a393dec012ad1aca21c61340cb15197c7a104fe033c5853306237885fc4edf11894e08bf627a2db4fc2a919f08eb01a51581ff"
+    },
+    "releases": {
+      "22": {
+        "version": "22.23.2",
+        "eol": "2027-04-30",
+        "linux_x64_sha256": "d60acfe00a2932254bb0ad20e01b0d74397a0875595de719654b214f4b03f307",
+        "linux_arm64_sha256": "fff4078c5def658577f92c88db7db3bc0072924bfb93fe52c1e744a54e94abb8",
+        "windows_x64_sha256": "1177b4137ba5adaa56354ae40f1080c7450e8ae09cecb47da459d1c52ac99f97"
+      },
+      "24": {
+        "version": "24.20.0",
+        "eol": "2028-04-30",
+        "linux_x64_sha256": "2f2c0da162318f0de47665410c7c8c2ed3d36c8f3105de4bbc61176c70a7cbf2",
+        "linux_arm64_sha256": "5f4ddab610c1ab2016b3c227cebdbf6d9495161487e4739c7b90090595f465f7",
+        "windows_x64_sha256": "6cac9ffbca8f6a47091e4b5c772e0606049c3871cb67d900c0cedde630e545ba"
+      }
+    }
+  },
+  "dotnet": {
+    "track_release_types": [
+      "lts",
+      "sts"
+    ],
+    "unassigned_supported_channels": [],
+    "channels": {
+      "10.0": {
+        "targets": [
+          "windows-container"
+        ],
+        "release_type": "lts",
+        "version": "10.0.400",
+        "eol": "2028-11-14",
+        "support_phase": "active",
+        "linux_x64_sha512": "1033977dd837150e0814cf0c5d5b17ceb63925fda7ba2158b47258a4bd7c048cf82eac3bc1166f3146f53124a3f5fba09db1de1260d2ce96399860303b404b48",
+        "linux_arm64_sha512": "a1b45da58e5591fff909a6126ac6bfc1ef9c12bc72c0625f7815e83a82be1a902317ee96926cbbf81324a45c6abf2ed8102a216d0507879cc166159af78d1b77",
+        "windows_x64_sha512": "9b8b88590e4da131bfd0da7aa089d0fc04d5418d5f8607ec13d55dc5a17b4399afd54d496c12657fa05c6c6546dc5eab930f26ac6c50f2d3a7712c0fb378c366"
+      },
+      "8.0": {
+        "targets": [
+          "linux",
+          "qemu-windows"
+        ],
+        "release_type": "lts",
+        "version": "8.0.424",
+        "eol": "2026-11-10",
+        "support_phase": "maintenance",
+        "linux_x64_sha512": "6503fd9f464d5e3a4f43a881d2b74afc6a2c46ceda74d027f1565b7239f4b3ec884857c03c0dcd49eb52f384d5ae1fa5aaf135f0a6aabc5518103aceed643c74",
+        "linux_arm64_sha512": "bb19b6779ad93d146055583d644ef269bb42501f6c7fdef51e14026cde9d5fd726d370de098a8d8504867fb24bfcb5ab88cc22bec812461aede334de1aacf7b6",
+        "windows_x64_sha512": "1787ab90635c2950672ed7c6507b000e1b212ea7d9a22fcef37061344d37c64d4c4eda12b8742601eff5b45c8736485b31c55613892f240c300190e4e88a58b0"
+      },
+      "9.0": {
+        "targets": [
+          "linux",
+          "qemu-windows"
+        ],
+        "release_type": "sts",
+        "version": "9.0.317",
+        "eol": "2026-11-10",
+        "support_phase": "maintenance",
+        "linux_x64_sha512": "145bf69dcb88c4b905feb531cfdd7894a75fc875d2a030e958a13d1fb1131521c8cebd8a8a6e0fbd1a433ebae9cde86356b6adad07b1ad81efb92b36ff8a3333",
+        "linux_arm64_sha512": "fdf30fe705c91304d890115e955f738055f8c0885ea9891e7df1153321120fa2c38b6ae4dd132f871cb8facc0d1fabbd2b25ddd53d0a5b4293aa85d296e3b98d",
+        "windows_x64_sha512": "9d2206253b14bdad493e08b5d843d5da1bd534f66d7a43ca1ac4fed31fd11721f5f7bfc8fa79cc3ba0370a705a0c4e7226c1ce214489d239a55580d864e9e43a"
+      }
+    }
+  },
+  "go": {
+    "strategy": "latest stable",
+    "version": "1.27.0",
+    "linux_amd64_sha256": "675c26c449cbb18fc24b74650de1eabbae6e16f64326fd85a283fb3b58280685",
+    "linux_arm64_sha256": "51798d2c42d0e1c6ed7fd9f48728b4193abac9e8aad6dbac2fe96a81f5909bda",
+    "windows_amd64_sha256": "f0c0a0d33ba94f4d2c5dbc887334ce678b21813504ddb3aafcb06e60a5a667c4"
+  },
+  "rust": {
+    "channel": "stable",
+    "version": "1.98.0",
+    "rustup_version": "1.29.1",
+    "rustup_x64_sha256": "dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71",
+    "rustup_arm64_sha256": "15f6e4ce9f583b929c996c91562bad6d4454f3281de858b02cdfdef615fac433"
+  },
+  "buildtools": {
+    "default_line": "18",
+    "lines": {
+      "17": {
+        "channel": "17/release",
+        "release_line": "17",
+        "version": "17.14.39",
+        "bootstrapper_url": "https://download.visualstudio.microsoft.com/download/pr/fa619120-9c0e-47e6-bfe0-3ee96fb671b2/2aeac090a9cfb2c56474aa9a6c5817ad8cfb879539e0ed1aecec33de9fc2dc4f/vs_BuildTools.exe",
+        "bootstrapper_sha256": "2aeac090a9cfb2c56474aa9a6c5817ad8cfb879539e0ed1aecec33de9fc2dc4f",
+        "channel_url": "https://download.visualstudio.microsoft.com/download/pr/fa619120-9c0e-47e6-bfe0-3ee96fb671b2/c26f06fe7ef8ee5381d82838bb39db61d0cb01124493eab761cdace9720e0995/VisualStudio.17.Release.chman",
+        "channel_sha256": "4c81e902fb7fe2acea779b828e6dc548fe0bbb693df50eda0224263c16686bdd"
+      },
+      "18": {
+        "channel": "18/stable",
+        "release_line": "18",
+        "version": "18.9.2",
+        "bootstrapper_url": "https://download.visualstudio.microsoft.com/download/pr/fe4fb3e6-ea32-4ae3-b154-72821a274f0d/352ac5776d592a4870c15756f9e140507b9ee64de62b401152e5929f7c0c52a6/vs_BuildTools.exe",
+        "bootstrapper_sha256": "352ac5776d592a4870c15756f9e140507b9ee64de62b401152e5929f7c0c52a6",
+        "channel_url": "https://download.visualstudio.microsoft.com/download/pr/fe4fb3e6-ea32-4ae3-b154-72821a274f0d/8ae0a45312cd28cec640174c5df11085f4efcb3bf210bd94cea932fb42c36778/VisualStudio.18.Release.chman",
+        "channel_sha256": "d3aa7336680097d007876ffb85c9d2b5c32c21796e0125407c4e3b88ebe4fc31"
+      }
+    }
+  }
+}

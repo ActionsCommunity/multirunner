@@ -8,3 +8,4 @@
 *.sh            text eol=lf
 Dockerfile      text eol=lf
 *.Dockerfile    text eol=lf
+images/versions.json text eol=lf

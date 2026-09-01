@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	imageversions "github.com/GerardSmit/multirunner/images"
 )
 
 func writeConfig(t *testing.T, body string) string {
@@ -72,6 +74,51 @@ pools:
 	qemu := c.Pools[0].QEMU
 	if qemu.BakeISOSHA256 != strings.Repeat("a", 64) || qemu.RunnerSHA256 != strings.Repeat("b", 64) {
 		t.Fatalf("QEMU checksums not loaded: %+v", qemu)
+	}
+}
+
+func TestLoadRejectsUnknownQEMUToolSelectors(t *testing.T) {
+	// bake_iso is deliberately absent: without load-time validation a typo here
+	// is never reported at all, because no rebuild ever resolves the selectors.
+	for name, tools := range map[string]string{
+		"unknown node major": `[node:23]`,
+		"unknown kind":       `[nodejs]`,
+		"trailing colon":     `[buildtools:]`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := writeConfig(t, `
+github: {scope: org, owner: myorg}
+auth: {pat: ghp_x}
+pools:
+  - name: windows-vm
+    os: windows
+    backend: qemu
+    qemu:
+      golden: golden.qcow2
+      tools: `+tools+"\n")
+			_, err := Load(p)
+			if err == nil {
+				t.Fatalf("tools %s should fail config load", tools)
+			}
+			if !strings.Contains(err.Error(), "windows-vm") || !strings.Contains(err.Error(), "qemu.tools") {
+				t.Fatalf("error should name the pool and field: %v", err)
+			}
+		})
+	}
+
+	p := writeConfig(t, `
+github: {scope: org, owner: myorg}
+auth: {pat: ghp_x}
+pools:
+  - name: windows-vm
+    os: windows
+    backend: qemu
+    qemu:
+      golden: golden.qcow2
+      tools: [dotnet, "node:24", "buildtools:17", "buildtools:18"]
+`)
+	if _, err := Load(p); err != nil {
+		t.Fatalf("valid selectors rejected: %v", err)
 	}
 }
 
@@ -219,6 +266,8 @@ func TestImageRef(t *testing.T) {
 		{"windows", "node", "", "gerardsmit/multirunner-runner-windows:node"},
 		{"windows", "dotnet", "", "gerardsmit/multirunner-runner-windows:dotnet"},
 		{"windows", "buildtools", "", "gerardsmit/multirunner-runner-windows:buildtools"},
+		{"windows", "buildtools:17", "", "gerardsmit/multirunner-runner-windows:buildtools-17"},
+		{"windows", "buildtools:18", "", "gerardsmit/multirunner-runner-windows:buildtools-18"},
 		{"linux", "custom", "", "multirunner/runner-linux-custom:dev"},
 		{"windows", "minimal", "", "gerardsmit/multirunner-runner-windows:latest"},
 		{"windows", "rust", "", "multirunner/runner-windows-rust:dev"},
@@ -229,6 +278,75 @@ func TestImageRef(t *testing.T) {
 		if got := p.ImageRef(); got != c.want {
 			t.Errorf("ImageRef(os=%s tier=%s explicit=%s) = %q, want %q", c.os, c.tier, c.explicit, got, c.want)
 		}
+	}
+}
+
+func TestImageRefBuildToolsLinesFollowManifest(t *testing.T) {
+	for _, line := range imageversions.MustEmbedded().BuildTools.ReleaseLines() {
+		p := Pool{OS: "windows", ImageTier: "buildtools:" + line}
+		want := "gerardsmit/multirunner-runner-windows:buildtools-" + line
+		if got := p.ImageRef(); got != want {
+			t.Errorf("ImageRef(buildtools:%s) = %q, want %q", line, got, want)
+		}
+	}
+}
+
+func TestValidateRejectsUnbuildableImageTier(t *testing.T) {
+	cases := map[string]struct {
+		os, tier string
+	}{
+		"published windows line on a linux pool": {"linux", "buildtools:17"},
+		"unknown build tools line":               {"windows", "buildtools:19"},
+		"uppercase local tier":                   {"linux", "Node"},
+		"whitespace in local tier":               {"linux", "my tier"},
+		"plus sign in local tier":                {"linux", "a+b"},
+		"leading separator in local tier":        {"linux", "-node"},
+		"overlong local tier":                    {"linux", strings.Repeat("a", 65)},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			p := writeConfig(t, `
+github: {scope: org, owner: o}
+auth: {pat: x}
+pools: [{name: broken-pool, os: `+tc.os+`, image_tier: "`+tc.tier+`", docker: {host: h}}]`)
+			_, err := Load(p)
+			if err == nil {
+				t.Fatalf("expected validation error for tier %q on os=%s", tc.tier, tc.os)
+			}
+			for _, want := range []string{"broken-pool", tc.tier, "minimal"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not mention %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+func TestValidateAllowsLocalDevImageTier(t *testing.T) {
+	p := writeConfig(t, `
+github: {scope: org, owner: o}
+auth: {pat: x}
+pools: [{name: dev-pool, os: linux, image_tier: custom, docker: {host: h}}]`)
+	c, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v (a colon-free unknown tier must keep the local :dev fallback)", err)
+	}
+	if got := c.Pools[0].ImageRef(); got != "multirunner/runner-linux-custom:dev" {
+		t.Errorf("ImageRef = %q", got)
+	}
+}
+
+func TestValidateAllowsPublishedBuildToolsTier(t *testing.T) {
+	p := writeConfig(t, `
+github: {scope: org, owner: o}
+auth: {pat: x}
+pools: [{name: win-pool, os: windows, image_tier: "buildtools:17", docker: {host: h}}]`)
+	c, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := c.Pools[0].ImageRef(); got != "gerardsmit/multirunner-runner-windows:buildtools-17" {
+		t.Errorf("ImageRef = %q", got)
 	}
 }
 
@@ -477,6 +595,23 @@ pools: [{name: p, os: linux, docker: {host: h}}]`)
 	}
 	if c.GitHub.Owner != "octocat" || c.GitHub.Repos[0] != "repo-a" || c.GitHub.Repos[1] != "octocat/repo-b" {
 		t.Fatalf("GitHub config not normalized: %+v", c.GitHub)
+	}
+}
+
+func TestRepoTargetsIncludesSingularAndPluralScopes(t *testing.T) {
+	single := GitHub{Scope: ScopeRepo, Owner: "octo", Repo: "one"}.RepoTargets()
+	if len(single) != 1 || single[0] != (RepoRef{Owner: "octo", Repo: "one"}) {
+		t.Fatalf("single RepoTargets = %+v", single)
+	}
+
+	plural := GitHub{Scope: ScopeRepos, Owner: "octo", Repos: []string{"one", "other/two"}}.RepoTargets()
+	if len(plural) != 2 || plural[0] != (RepoRef{Owner: "octo", Repo: "one"}) ||
+		plural[1] != (RepoRef{Owner: "other", Repo: "two"}) {
+		t.Fatalf("plural RepoTargets = %+v", plural)
+	}
+
+	if got := (GitHub{Scope: ScopeOrg, Owner: "octo"}).RepoTargets(); got != nil {
+		t.Fatalf("organization RepoTargets = %+v, want nil", got)
 	}
 }
 

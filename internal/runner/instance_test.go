@@ -51,6 +51,9 @@ func (stubBackend) Ping(context.Context) error                { return nil }
 func (stubBackend) OSType(context.Context) (string, error)    { return "linux", nil }
 func (stubBackend) EnsureImage(context.Context, string) error { return nil }
 func (b stubBackend) Launch(context.Context, backend.LaunchRequest) (backend.RunnerHandle, error) {
+	if b.handle == nil {
+		return nil, b.launchErr
+	}
 	return b.handle, b.launchErr
 }
 func (stubBackend) Close() error { return nil }
@@ -64,6 +67,18 @@ func jitServer(t *testing.T, deleteStatus int) (*github.Client, func() []string)
 
 func jitServerWithRunnerID(t *testing.T, deleteStatus int, runnerID int64) (*github.Client, func() []string) {
 	t.Helper()
+	return jitServerWithRunnerState(t, deleteStatus, runnerID, runnerState{status: http.StatusOK})
+}
+
+// runnerState is what GET /actions/runners/{id} reports: the HTTP status and,
+// when successful, whether the runner is executing a job.
+type runnerState struct {
+	status int
+	busy   bool
+}
+
+func jitServerWithRunnerState(t *testing.T, deleteStatus int, runnerID int64, state runnerState) (*github.Client, func() []string) {
+	t.Helper()
 	var mu sync.Mutex
 	var deletes []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -72,6 +87,15 @@ func jitServerWithRunnerID(t *testing.T, deleteStatus int, runnerID int64) (*git
 			deletes = append(deletes, r.URL.Path)
 			mu.Unlock()
 			w.WriteHeader(deleteStatus)
+			return
+		}
+		if r.Method == http.MethodGet {
+			w.WriteHeader(state.status)
+			if state.status == http.StatusOK {
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"id": runnerID, "name": "mr-1", "status": "online", "busy": state.busy,
+				})
+			}
 			return
 		}
 		w.WriteHeader(http.StatusCreated)
@@ -210,20 +234,77 @@ func TestRunOnceReportsDeregisterFailure(t *testing.T) {
 	}
 }
 
-func TestRunOnceDeregistersAfterLaunchFailure(t *testing.T) {
+func TestRunOnceDeregistersWhenLaunchProvesNoInstance(t *testing.T) {
 	gh, deletes := jitServer(t, http.StatusNoContent)
-	_, err := RunOnce(context.Background(), gh, stubBackend{launchErr: errors.New("partial launch")},
+	_, err := RunOnce(context.Background(), gh, stubBackend{launchErr: errors.New("create failed")},
 		Spec{Name: "mr-1", Image: "img"}, discardLogger())
-	if err == nil || !strings.Contains(err.Error(), "partial launch") {
+	if err == nil || !strings.Contains(err.Error(), "create failed") {
 		t.Fatalf("RunOnce error = %v, want launch failure", err)
 	}
 	if got := deletes(); len(got) != 1 {
-		t.Errorf("deletes = %v, want registration reclaimed after launch failure", got)
+		t.Errorf("deletes = %v, want registration reclaimed after confirmed pre-launch failure", got)
 	}
 }
 
-func TestRunOnceKeepsRegistrationWhenWaitAndKillFail(t *testing.T) {
+func TestRunOnceTerminatesPartialLaunchBeforeDeregistering(t *testing.T) {
 	gh, deletes := jitServer(t, http.StatusNoContent)
+	handle := &stubHandle{}
+	_, err := RunOnce(context.Background(), gh,
+		stubBackend{handle: handle, launchErr: errors.New("start response lost")},
+		Spec{Name: "mr-1", Image: "img"}, discardLogger())
+	if err == nil || !strings.Contains(err.Error(), "start response lost") {
+		t.Fatalf("RunOnce error = %v, want launch failure", err)
+	}
+	if !handle.killed {
+		t.Fatal("ambiguous launch must be terminated before deregistration")
+	}
+	if got := deletes(); len(got) != 1 {
+		t.Errorf("deletes = %v, want registration reclaimed after confirmed termination", got)
+	}
+}
+
+// TestRunOnceDeregistersWhenPartialLaunchKillFails is the regression test for a
+// permanent registration leak: a failed launch whose cleanup kill also failed
+// (an unreachable daemon answers with a transport error, not a not-found) used
+// to return before deregistering. Nothing retries that cleanup and the pool
+// mints a new runner name per attempt, so the JIT registration stayed on GitHub
+// forever. Both failures must still be surfaced.
+func TestRunOnceKeepsRegistrationWhenPartialLaunchKillFailsAndRunnerBusy(t *testing.T) {
+	gh, deletes := jitServerWithRunnerState(t, http.StatusNoContent, 42, runnerState{status: http.StatusOK, busy: true})
+	handle := &stubHandle{killErr: errors.New("daemon unreachable")}
+	_, err := RunOnce(context.Background(), gh,
+		stubBackend{handle: handle, launchErr: errors.New("start response lost")},
+		Spec{Name: "mr-1", Image: "img"}, discardLogger())
+	if err == nil || !strings.Contains(err.Error(), "daemon unreachable") {
+		t.Fatalf("RunOnce error = %v, want launch and kill failures", err)
+	}
+	if got := deletes(); len(got) != 0 {
+		t.Errorf("deletes = %v, a runner GitHub reports busy must keep its registration", got)
+	}
+}
+
+func TestRunOnceDeregistersWhenPartialLaunchKillFails(t *testing.T) {
+	gh, deletes := jitServer(t, http.StatusNoContent)
+	handle := &stubHandle{killErr: errors.New("daemon unreachable")}
+	_, err := RunOnce(context.Background(), gh,
+		stubBackend{handle: handle, launchErr: errors.New("start response lost")},
+		Spec{Name: "mr-1", Image: "img"}, discardLogger())
+	if err == nil || !strings.Contains(err.Error(), "start response lost") ||
+		!strings.Contains(err.Error(), "daemon unreachable") {
+		t.Fatalf("RunOnce error = %v, want launch and kill failures", err)
+	}
+	if !handle.killed {
+		t.Error("a failed launch must still attempt termination")
+	}
+	if got := deletes(); len(got) != 1 || !strings.HasSuffix(got[0], "/repos/o/r/actions/runners/42") {
+		t.Errorf("deletes = %v, want the idle runner's registration reclaimed when the kill failed", got)
+	}
+}
+
+// When the kill cannot be confirmed, GitHub decides the registration's fate:
+// a busy runner is still executing a job and must keep its registration.
+func TestRunOnceKeepsRegistrationWhenWaitAndKillFailAndRunnerBusy(t *testing.T) {
+	gh, deletes := jitServerWithRunnerState(t, http.StatusNoContent, 42, runnerState{status: http.StatusOK, busy: true})
 	handle := &stubHandle{
 		waitErr: errors.New("transport interrupted"),
 		killErr: errors.New("daemon unreachable"),
@@ -234,12 +315,61 @@ func TestRunOnceKeepsRegistrationWhenWaitAndKillFail(t *testing.T) {
 		t.Fatalf("RunOnce error = %v, want kill failure", err)
 	}
 	if got := deletes(); len(got) != 0 {
-		t.Errorf("deletes = %v, live runner registration must be preserved", got)
+		t.Errorf("deletes = %v, busy runner registration must be preserved", got)
 	}
 }
 
-func TestRunOnceKeepsRegistrationWhenShutdownKillFails(t *testing.T) {
-	gh, deletes := jitServer(t, http.StatusNoContent)
+// An idle runner whose kill failed is not running a job, so nothing is lost by
+// reclaiming the registration; keeping it would leak forever because the next
+// launch uses a fresh name.
+func TestRunOnceReclaimsIdleRunnerWhenWaitAndKillFail(t *testing.T) {
+	gh, deletes := jitServerWithRunnerState(t, http.StatusNoContent, 42, runnerState{status: http.StatusOK, busy: false})
+	handle := &stubHandle{
+		waitErr: errors.New("transport interrupted"),
+		killErr: errors.New("daemon unreachable"),
+	}
+	_, err := RunOnce(context.Background(), gh, stubBackend{handle: handle},
+		Spec{Name: "mr-1", Image: "img"}, discardLogger())
+	if err == nil || !strings.Contains(err.Error(), "daemon unreachable") {
+		t.Fatalf("RunOnce error = %v, want kill failure", err)
+	}
+	if got := deletes(); len(got) != 1 {
+		t.Errorf("deletes = %v, want the idle runner's registration reclaimed", got)
+	}
+}
+
+func TestRunOnceKeepsRegistrationWhenRunnerStateUnknown(t *testing.T) {
+	gh, deletes := jitServerWithRunnerState(t, http.StatusNoContent, 42, runnerState{status: http.StatusInternalServerError})
+	handle := &stubHandle{
+		waitErr: errors.New("transport interrupted"),
+		killErr: errors.New("daemon unreachable"),
+	}
+	if _, err := RunOnce(context.Background(), gh, stubBackend{handle: handle},
+		Spec{Name: "mr-1", Image: "img"}, discardLogger()); err == nil {
+		t.Fatal("RunOnce should surface the kill failure")
+	}
+	if got := deletes(); len(got) != 0 {
+		t.Errorf("deletes = %v, unknown runner state must keep the registration", got)
+	}
+}
+
+func TestRunOnceSkipsDeregisterWhenRunnerAlreadyGoneAfterFailedKill(t *testing.T) {
+	gh, deletes := jitServerWithRunnerState(t, http.StatusNoContent, 42, runnerState{status: http.StatusNotFound})
+	handle := &stubHandle{
+		waitErr: errors.New("transport interrupted"),
+		killErr: errors.New("daemon unreachable"),
+	}
+	if _, err := RunOnce(context.Background(), gh, stubBackend{handle: handle},
+		Spec{Name: "mr-1", Image: "img"}, discardLogger()); err == nil {
+		t.Fatal("RunOnce should surface the kill failure")
+	}
+	if got := deletes(); len(got) != 0 {
+		t.Errorf("deletes = %v, a registration GitHub already removed needs no delete", got)
+	}
+}
+
+func TestRunOnceKeepsRegistrationWhenShutdownKillFailsAndRunnerBusy(t *testing.T) {
+	gh, deletes := jitServerWithRunnerState(t, http.StatusNoContent, 42, runnerState{status: http.StatusOK, busy: true})
 	ctx, cancel := context.WithCancel(context.Background())
 	handle := &stubHandle{onWait: cancel, killErr: errors.New("kill failed")}
 	_, err := RunOnce(ctx, gh, stubBackend{handle: handle},
@@ -248,6 +378,20 @@ func TestRunOnceKeepsRegistrationWhenShutdownKillFails(t *testing.T) {
 		t.Fatalf("RunOnce error = %v, want cancellation and kill failure", err)
 	}
 	if got := deletes(); len(got) != 0 {
-		t.Errorf("deletes = %v, runner may still be alive", got)
+		t.Errorf("deletes = %v, busy runner may still be running a job", got)
+	}
+}
+
+func TestRunOnceReclaimsIdleRunnerWhenShutdownKillFails(t *testing.T) {
+	gh, deletes := jitServerWithRunnerState(t, http.StatusNoContent, 42, runnerState{status: http.StatusOK, busy: false})
+	ctx, cancel := context.WithCancel(context.Background())
+	handle := &stubHandle{onWait: cancel, killErr: errors.New("kill failed")}
+	_, err := RunOnce(ctx, gh, stubBackend{handle: handle},
+		Spec{Name: "mr-1", Image: "img"}, discardLogger())
+	if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "kill failed") {
+		t.Fatalf("RunOnce error = %v, want cancellation and kill failure", err)
+	}
+	if got := deletes(); len(got) != 1 {
+		t.Errorf("deletes = %v, want the idle runner's registration reclaimed", got)
 	}
 }

@@ -4,24 +4,25 @@
 # Tiers (medium/github-like/custom-baked) override BASE in later milestones; the
 # default below is the "minimal" tier built on the .NET runtime deps base.
 
-ARG BASE=mcr.microsoft.com/dotnet/runtime-deps:8.0-noble
+# Generated from images/versions.json by go run ./cmd/update-image-versions.
+ARG BASE=mcr.microsoft.com/dotnet/runtime-deps:8.0-noble@sha256:6533e6633f557e0bc2b5c87bc19ba1dc069fd5e38d2703c6d6abadc9fbc378d7
 
 FROM ${BASE} AS build
-ARG RUNNER_VERSION=2.337.0
-ARG RUNNER_X64_SHA256=70920811a4f8ad4328818682bca5c6469c1c942fab52448868071d0063816613
-ARG RUNNER_ARM64_SHA256=9b1dc70626422526e3c94767cf024896beb15da5342a3f4819bf2feac13e0393
 # TARGETARCH is supplied automatically by buildx (amd64|arm64); map it to the
 # runner's release arch name so multi-arch builds fetch the right tarball.
 ARG TARGETARCH
 ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update -y && apt-get install -y --no-install-recommends curl ca-certificates perl \
+COPY images/versions.json /tmp/image-versions.json
+RUN apt-get update -y && apt-get install -y --no-install-recommends curl ca-certificates jq perl \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /actions-runner
-RUN case "${TARGETARCH:-amd64}" in \
-        amd64) RUNNER_ARCH=x64; RUNNER_SHA256="${RUNNER_X64_SHA256}" ;; \
-        arm64) RUNNER_ARCH=arm64; RUNNER_SHA256="${RUNNER_ARM64_SHA256}" ;; \
+RUN RUNNER_VERSION="$(jq -er '.minimal.runner.version' /tmp/image-versions.json)" \
+    && case "${TARGETARCH:-amd64}" in \
+        amd64) RUNNER_ARCH=x64; digest_key=linux_x64_sha256 ;; \
+        arm64) RUNNER_ARCH=arm64; digest_key=linux_arm64_sha256 ;; \
         *)     echo "unsupported runner architecture: ${TARGETARCH}" && exit 1 ;; \
     esac \
+    && RUNNER_SHA256="$(jq -er --arg key "$digest_key" '.minimal.runner[$key]' /tmp/image-versions.json)" \
     && curl -fsSL -o runner.tar.gz \
       "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-${RUNNER_ARCH}-${RUNNER_VERSION}.tar.gz" \
     && echo "${RUNNER_SHA256}  runner.tar.gz" | sha256sum --check - \

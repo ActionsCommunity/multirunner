@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GerardSmit/multirunner/internal/config"
 	"github.com/GerardSmit/multirunner/internal/winvm"
@@ -221,15 +222,35 @@ func TestCheckActionsEnabledFailsOnIncompleteRepoCheck(t *testing.T) {
 	}
 }
 
-// TestCheckActionsEnabledSkipsNonReposScope pins that org and enterprise scopes
-// make no API calls: they have no per-repo list to validate.
-func TestCheckActionsEnabledSkipsNonReposScope(t *testing.T) {
+func TestCheckActionsEnabledChecksRepoScope(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v3/repos/o/a/actions/permissions" {
+			t.Errorf("request path = %q, want repo Actions permissions", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"enabled":false}`)
+	}))
+	defer srv.Close()
+
+	cfg := starvedConfig(config.ProvisioningAutoscale, 1)
+	cfg.GitHub = config.GitHub{URL: srv.URL, Scope: config.ScopeRepo, Owner: "o", Repo: "a"}
+	cfg.Auth = config.Auth{PAT: "x"}
+	var err error
+	out := captureStdout(t, func() { err = checkActionsEnabled(context.Background(), cfg) })
+	if err == nil || !strings.Contains(out, "o/a") {
+		t.Fatalf("single-repo check error = %v, output = %q", err, out)
+	}
+}
+
+// TestCheckActionsEnabledSkipsNonRepoScope pins that org and enterprise scopes
+// make no API calls: they have no concrete per-repo target to validate.
+func TestCheckActionsEnabledSkipsNonRepoScope(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Errorf("unexpected request to %s", r.URL.Path)
 	}))
 	defer srv.Close()
 
-	for _, scope := range []config.Scope{config.ScopeRepo, config.ScopeOrg, config.ScopeEnterprise} {
+	for _, scope := range []config.Scope{config.ScopeOrg, config.ScopeEnterprise} {
 		cfg := starvedConfig(config.ProvisioningAutoscale, 3)
 		cfg.GitHub.Scope = scope
 		cfg.GitHub.URL = srv.URL
@@ -394,18 +415,70 @@ func TestWarnNoSelfHostedWorkflowsIgnoresNonWorkflowFiles(t *testing.T) {
 	}
 }
 
-func TestWarnNoSelfHostedWorkflowsSkipsNonReposScope(t *testing.T) {
+func TestWarnNoSelfHostedWorkflowsChecksRepoScope(t *testing.T) {
+	srv := workflowServer(t, map[string]map[string]string{
+		"o/a": {"ci.yml": "runs-on: ubuntu-latest\n"},
+	})
+	defer srv.Close()
+
+	cfg := selfHostedConfig(t, srv)
+	cfg.GitHub.Scope = config.ScopeRepo
+	cfg.GitHub.Repo = "a"
+	cfg.GitHub.Repos = nil
+	out := captureStdout(t, func() { warnNoSelfHostedWorkflows(context.Background(), cfg) })
+	if !strings.Contains(out, "heuristic") || !strings.Contains(out, "o/a") {
+		t.Fatalf("single-repo workflow output = %q", out)
+	}
+}
+
+func TestWarnNoSelfHostedWorkflowsSkipsNonRepoScope(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Errorf("unexpected request to %s", r.URL.Path)
 	}))
 	defer srv.Close()
 
-	for _, scope := range []config.Scope{config.ScopeRepo, config.ScopeOrg, config.ScopeEnterprise} {
+	for _, scope := range []config.Scope{config.ScopeOrg, config.ScopeEnterprise} {
 		cfg := selfHostedConfig(t, srv)
 		cfg.GitHub.Scope = scope
 		out := captureStdout(t, func() { warnNoSelfHostedWorkflows(context.Background(), cfg) })
 		if out != "" {
 			t.Errorf("scope=%s produced output: %q", scope, out)
+		}
+	}
+}
+
+func TestRemoteCheckBudgetScalesWithRepoWaves(t *testing.T) {
+	cases := []struct {
+		repos int
+		want  time.Duration
+	}{
+		{0, remoteCheckTimeout},
+		{1, remoteCheckTimeout},
+		{repoCheckConcurrency * 4, remoteCheckTimeout},
+		{repoCheckConcurrency*4 + 1, 5 * remoteRepoCheckTimeout},
+		{repoCheckConcurrency * 10, 10 * remoteRepoCheckTimeout},
+	}
+	for _, tc := range cases {
+		if got := remoteCheckBudget(tc.repos); got != tc.want {
+			t.Errorf("remoteCheckBudget(%d) = %v, want %v", tc.repos, got, tc.want)
+		}
+	}
+}
+
+func TestTCGReasonNamesTheActualCause(t *testing.T) {
+	cases := []struct {
+		detected     bool
+		goos, goarch string
+		want         string
+	}{
+		{false, "linux", "amd64", "qemu.accel is set to tcg"},
+		{true, "darwin", "arm64", "x86-64 hardware acceleration requires an x86-64 host"},
+		{true, "linux", "amd64", "/dev/kvm is missing or not accessible to this user"},
+		{true, "freebsd", "amd64", "no hardware accelerator is available on this host"},
+	}
+	for _, tc := range cases {
+		if got := tcgReason(tc.detected, tc.goos, tc.goarch); got != tc.want {
+			t.Errorf("tcgReason(%v, %s, %s) = %q, want %q", tc.detected, tc.goos, tc.goarch, got, tc.want)
 		}
 	}
 }

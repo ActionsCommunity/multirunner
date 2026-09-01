@@ -9,12 +9,80 @@ on:
     paths:
       - "images/**"
       - ".gitattributes"
+      - ".github/actions/**"
       - ".github/workflows/image-build-check.yml"
       - ".github/workflows/images.yml"
+      - ".github/workflows/update-image-versions.yml"
+      - "cmd/update-image-versions/**"
+      - "internal/winvm/bake.go"
   workflow_dispatch:
 
 jobs:
+  version-policy:
+    runs-on: ubuntu-latest
+    outputs:
+      buildtools-lines: ${{ steps.buildtools-lines.outputs.lines }}
+      linux-changed: ${{ steps.inputs.outputs.linux }}
+      windows-changed: ${{ steps.inputs.outputs.windows }}
+      buildtools-changed: ${{ steps.inputs.outputs.buildtools }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Windows image jobs cost a hosted runner ten to twenty minutes each,
+      # most of it Windows layer extraction that nothing can cache. Only build
+      # the targets whose inputs changed; manual runs and the weekly refresh
+      # (which edits versions.json) build everything.
+      - name: Detect changed image targets
+        id: inputs
+        uses: ./.github/actions/image-inputs-changed
+        with:
+          base-sha: ${{ github.event.pull_request.base.sha }}
+          extra-paths: .github/workflows/image-build-check.yml
+
+      - name: Discover Build Tools release lines
+        id: buildtools-lines
+        run: |
+          set -euo pipefail
+          lines=$(jq -c '.buildtools.lines | keys' images/versions.json)
+          # Without this, a jq failure produces an empty matrix and every
+          # Build Tools image silently goes unbuilt.
+          printf '%s' "$lines" | jq -e 'type == "array" and length > 0' >/dev/null
+          echo "lines=$lines" >> "$GITHUB_OUTPUT"
+
+      - name: Reject end-of-life Node majors and .NET channels
+        run: |
+          set -euo pipefail
+          today=$(date -u +%F)
+          expired=$(jq -r --arg today "$today" '
+            [ (.node.releases   | to_entries[] | select(.value.eol < $today) | "Node major \(.key) reached end of life on \(.value.eol)"),
+              (.dotnet.channels | to_entries[] | select(.value.eol < $today) | ".NET channel \(.key) reached end of life on \(.value.eol)")
+            ] | .[]' images/versions.json)
+          if [ -z "$expired" ]; then
+            echo "All declared Node majors and .NET channels are supported"
+            exit 0
+          fi
+          while IFS= read -r entry; do
+            echo "::error title=End-of-life runtime declared::$entry. Remove it from images/versions.json (drop the Node major, moving default_major first if needed, or drop the .NET channel). The updater rewrites eol dates from vendor metadata, so extending the date does not retain it."
+          done <<< "$expired"
+          exit 1
+
+      - name: Require image targets for newly supported .NET channels
+        run: |
+          set -euo pipefail
+          count=$(jq '.dotnet.unassigned_supported_channels | length' images/versions.json)
+          if [ "$count" -eq 0 ]; then
+            echo "All supported .NET channels have image targets"
+            exit 0
+          fi
+
+          jq -r '.dotnet.unassigned_supported_channels[] |
+            "::error title=Assign .NET image targets::Channel \(.channel) is \(.release_type) / \(.support_phase), latest SDK \(.latest_sdk), EOL \(.eol). Move it into dotnet.channels and select linux, windows-container, and/or qemu-windows targets."' \
+            images/versions.json
+          exit 1
+
   linux:
+    needs: version-policy
+    if: needs.version-policy.outputs.linux-changed == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -48,15 +116,17 @@ jobs:
             printf "int main(void){return 0;}\n" > probe.c
             autoreconf -fi && ./configure && make
           '
-          docker run --rm --entrypoint bash $B:node          -lc '
+          # The default major may still bundle its own Corepack, so a silent
+          # install failure only shows if the version is the pinned one.
+          COREPACK_VERSION="$(node -p "require('./images/versions.json').node.corepack.version")"
+          docker run --rm --entrypoint bash -e COREPACK_VERSION="$COREPACK_VERSION" $B:node -lc '
             set -eu
-            arch=$(dpkg --print-architecture); [ "$arch" = amd64 ] && arch=x64
-            version=22.23.2
-            test -x "$RUNNER_TOOL_CACHE/node/$version/$arch/bin/node"
-            test -f "$RUNNER_TOOL_CACHE/node/$version/$arch.complete"
-            test "$(stat -c %U "$RUNNER_TOOL_CACHE/node/$version/$arch")" = runner
-            "$RUNNER_TOOL_CACHE/node/$version/$arch/bin/node" --version
-            corepack --version
+            cache_dir=$(dirname "$(dirname "$(readlink -f "$(command -v node)")")")
+            test -x "$cache_dir/bin/node"
+            test -f "$cache_dir.complete"
+            test "$(stat -c %U "$cache_dir")" = runner
+            "$cache_dir/bin/node" --version
+            test "$(corepack --version)" = "$COREPACK_VERSION"
           '
           docker run --rm --entrypoint bash $B:dotnet        -lc 'dotnet --list-sdks && node --version'
           docker run --rm --entrypoint bash $B:rust          -lc 'rustc --version && cargo --version'
@@ -97,6 +167,8 @@ jobs:
           rm runner-worker-stock.dll runner-worker-patched.dll
 
   linux-arm64:
+    needs: version-policy
+    if: needs.version-policy.outputs.linux-changed == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -110,21 +182,24 @@ jobs:
           docker build --platform linux/arm64 -f images/linux/flavors/node.Dockerfile --build-arg PARENT=$B:native-build -t $B:node .
           docker run --rm --platform linux/arm64 --entrypoint bash $B:node -lc '
             set -eu
-            test -x "$RUNNER_TOOL_CACHE/node/22.23.2/arm64/bin/node"
-            test -f "$RUNNER_TOOL_CACHE/node/22.23.2/arm64.complete"
+            cache_dir=$(dirname "$(dirname "$(readlink -f "$(command -v node)")")")
+            case "$cache_dir" in */arm64) ;; *) echo "unexpected cache path: $cache_dir"; exit 1 ;; esac
+            test -x "$cache_dir/bin/node"
+            test -f "$cache_dir.complete"
             node --version
           '
 
   windows:
+    needs: version-policy
+    if: needs.version-policy.outputs.windows-changed == 'true'
     runs-on: windows-2025
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/wait-for-docker
 
-      # Windows images are large (roughly ten GB each), so building the whole
-      # graph before testing any of it exhausts the hosted runner's disk on the
-      # buildtools layer. Build one branch, assert it, then delete its derived
-      # tags and reclaim the space before starting the next. `minimal` is kept
-      # throughout because both branches build on it.
+      # Windows images are large, so keep this job to the Node/.NET branch.
+      # Build Tools release lines run on separate clean runners below because
+      # Windows container layer deletion does not reliably return disk space.
       - name: Build minimal
         shell: bash
         run: |
@@ -135,6 +210,11 @@ jobs:
 
       - name: Build and assert node + dotnet, then reclaim
         shell: bash
+        # Git Bash rewrites the `/c` and `/s` switches handed to cmd into
+        # `C:\` paths before docker.exe sees them, so cmd starts interactively,
+        # reads an empty stdin, and exits 0 without running the assertion.
+        env:
+          MSYS_NO_PATHCONV: "1"
         run: |
           set -euo pipefail
           B=mr-check-windows
@@ -145,6 +225,20 @@ jobs:
           # container, which is what jobs calling node/dotnet directly rely on.
           docker run --rm --entrypoint cmd $B:node   /c "where node && where npm && node --version"
           docker run --rm --entrypoint cmd $B:dotnet /c "where dotnet && dotnet --list-sdks && node --version"
+          # The default major may still bundle its own Corepack, so a silent
+          # install failure only shows if the version is the pinned one.
+          COREPACK_VERSION="$(node -p "require('./images/versions.json').node.corepack.version")"
+          test "$(docker run --rm --entrypoint cmd $B:node /c "corepack --version" | tr -d '\r')" = "$COREPACK_VERSION"
+          NODE_VERSIONS="$(node -e "const v=require('./images/versions.json'); console.log(Object.values(v.node.releases).map(r => r.version).join(' '))")"
+          # One assertion per cmd invocation: cmd folds an `&&` chain after
+          # `if not exist X exit 1` into the IF body, so chained checks never
+          # run when the first path exists.
+          for version in $NODE_VERSIONS; do
+            docker run --rm --entrypoint cmd $B:node /s /c \
+              "if not exist C:/hostedtoolcache/windows/node/$version/x64/node.exe exit 1"
+            docker run --rm --entrypoint cmd $B:node /s /c \
+              "if not exist C:/hostedtoolcache/windows/node/$version/x64.complete exit 1"
+          done
 
           # Docker's default escape character is `\`, so an unescaped
           # `ENV X=C:\foo` silently becomes `C:foo`. Assert the real values.
@@ -153,19 +247,11 @@ jobs:
           docker run --rm --entrypoint cmd $B:dotnet /c \
             "if not \"%DOTNET_ROOT%\"==\"C:\\dotnet\" exit 1"
 
-          # Free this branch before building the next one. `minimal` survives
-          # because buildtools layers on it.
+          # Reclaim the derived branch before the minimal-image smoke tests.
           docker rmi -f $B:dotnet $B:node
           docker builder prune -af
           docker image prune -f
           df -h / || true
-
-      - name: Build and assert buildtools
-        shell: bash
-        run: |
-          set -euo pipefail
-          B=mr-check-windows
-          docker build -f images/windows/flavors/buildtools.Dockerfile --build-arg "PARENT=$B:minimal" -t $B:buildtools .
 
       # The cache-redirect patch must live ONLY in the sidecar. If it leaks into
       # the live DLL, ACTIONS_RESULTS_URL is unset whenever cache.enabled is false
@@ -231,18 +317,13 @@ jobs:
           if (-not (Test-Lit .\runner-worker-patched.dll 'ACTIONS_RESULTS_URX')) { throw 'redirect entrypoint mode was not patched' }
           Remove-Item .\runner-worker-stock.dll, .\runner-worker-patched.dll
 
-      - name: Smoke-test VS Build Tools
-        shell: bash
-        run: |
-          set -euo pipefail
-          B=mr-check-windows
-          docker run --rm --entrypoint powershell $B:buildtools -NoProfile -Command \
-            "& 'C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe' -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath"
-          docker run --rm --entrypoint cmd $B:buildtools /s /c \
-            "if not \"%VSBUILDTOOLS%\"==\"C:\BuildTools\" exit 1 && call \"%VSBUILDTOOLS%\Common7\Tools\VsDevCmd.bat\" && where cl"
-
       - name: Smoke-test shells on PATH
         shell: bash
+        # Git Bash rewrites the `/c` and `/s` switches handed to cmd into
+        # `C:\` paths before docker.exe sees them, so cmd starts interactively,
+        # reads an empty stdin, and exits 0 without running the assertion.
+        env:
+          MSYS_NO_PATHCONV: "1"
         run: |
           set -euo pipefail
           B=mr-check-windows
@@ -250,3 +331,67 @@ jobs:
           # Actions, so it must resolve on PATH or `shell: pwsh` steps fail.
           docker run --rm --entrypoint cmd $B:minimal /c "where pwsh && where git"
           docker run --rm --entrypoint pwsh $B:minimal -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'
+
+  windows-buildtools:
+    name: windows-buildtools-${{ matrix.line }}
+    needs: version-policy
+    if: needs.version-policy.outputs.buildtools-changed == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        line: ${{ fromJSON(needs.version-policy.outputs.buildtools-lines) }}
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reclaim host Visual Studio disk
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $targets = @(
+              'C:\Program Files\Microsoft Visual Studio\18\Enterprise',
+              'C:\ProgramData\Microsoft\VisualStudio\Packages'
+          )
+          foreach ($expected in $targets) {
+              $target = [IO.Path]::GetFullPath($expected).TrimEnd('\')
+              if ($target -cne $expected -or $target.Length -lt 40) {
+                  throw "unsafe cleanup target: $target"
+              }
+              if (-not (Test-Path -LiteralPath $target)) { continue }
+              $item = Get-Item -LiteralPath $target -Force
+              if (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+                  throw "cleanup target is not a real directory: $target"
+              }
+              Write-Host "Removing ephemeral runner directory $target"
+              Remove-Item -LiteralPath $target -Recurse -Force
+          }
+          $free = (Get-PSDrive -Name C).Free
+          Write-Host ("Free disk after cleanup: {0:N1} GB" -f ($free / 1GB))
+          if ($free -lt 35GB) { throw 'less than 35 GB free after guarded cleanup' }
+
+      - uses: ./.github/actions/wait-for-docker
+
+      - name: Build minimal and assert Build Tools ${{ matrix.line }}
+        shell: bash
+        # Git Bash rewrites the `/c` and `/s` switches handed to cmd into
+        # `C:\` paths before docker.exe sees them, so cmd starts interactively,
+        # reads an empty stdin, and exits 0 without running the assertion.
+        env:
+          MSYS_NO_PATHCONV: "1"
+        run: |
+          set -euo pipefail
+          B=mr-check-windows-buildtools-${{ matrix.line }}
+          docker build -f images/windows/Dockerfile -t "$B:minimal" .
+          docker build -f images/windows/flavors/buildtools.Dockerfile \
+            --build-arg "PARENT=$B:minimal" \
+            --build-arg "BUILDTOOLS_LINE=${{ matrix.line }}" \
+            -t "$B:buildtools" .
+          docker run --rm --entrypoint powershell "$B:buildtools" -NoProfile -Command \
+            "& 'C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe' -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath"
+          # Separate cmd invocations: chaining `&&` after `if not ... exit 1`
+          # puts the whole chain inside the IF body, so the dev-cmd checks
+          # would only ever run on the failure branch.
+          docker run --rm --entrypoint cmd "$B:buildtools" /s /c \
+            "if not \"%VSBUILDTOOLS%\"==\"C:\BuildTools\" exit 1"
+          docker run --rm --entrypoint cmd "$B:buildtools" /s /c \
+            "call %VSBUILDTOOLS%\Common7\Tools\VsDevCmd.bat && where cl && msbuild -version"

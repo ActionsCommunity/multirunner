@@ -8,12 +8,14 @@ package gitcache
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,6 +24,10 @@ import (
 
 // lastUsedFile marks when a mirror was last cloned/fetched/bundled, for GC.
 const lastUsedFile = ".mr-lastused"
+
+// maxInheritedGitConfigEntries prevents an untrusted or corrupted environment
+// from driving an arbitrarily large allocation while auth config is rebuilt.
+const maxInheritedGitConfigEntries = 256
 
 // Manager owns the mirror directory and serializes updates per repo.
 type Manager struct {
@@ -73,7 +79,11 @@ func (m *Manager) EnsureMirror(ctx context.Context, repoSlug string) (string, er
 	lock := m.repoLock(repoSlug)
 	lock.Lock()
 	defer lock.Unlock()
+	return m.ensureMirrorLocked(ctx, repoSlug)
+}
 
+// ensureMirrorLocked is EnsureMirror for callers that already hold the repo lock.
+func (m *Manager) ensureMirrorLocked(ctx context.Context, repoSlug string) (string, error) {
 	path := m.MirrorPath(repoSlug)
 	cloneURL := m.cloneURL(repoSlug)
 
@@ -102,20 +112,21 @@ func (m *Manager) touch(mirrorPath string) {
 	_ = os.WriteFile(filepath.Join(mirrorPath, lastUsedFile), nil, 0o644)
 }
 
-// lastUsed returns when a mirror was last touched, falling back to the mirror
-// directory's own mtime if the marker is missing (older mirrors).
-func lastUsed(mirrorPath string) time.Time {
-	if fi, err := os.Stat(filepath.Join(mirrorPath, lastUsedFile)); err == nil {
-		return fi.ModTime()
+// lastUsed returns when a mirror was last touched. Every clone, fetch, and
+// bundle writes the marker, so a bare repository without one was not created by
+// this manager; the second result is false and the caller must leave it alone.
+func lastUsed(mirrorPath string) (time.Time, bool) {
+	fi, err := os.Stat(filepath.Join(mirrorPath, lastUsedFile))
+	if err != nil {
+		return time.Time{}, false
 	}
-	if fi, err := os.Stat(mirrorPath); err == nil {
-		return fi.ModTime()
-	}
-	return time.Time{}
+	return fi.ModTime(), true
 }
 
 // Sweep removes bare mirrors not used within maxAge. maxAge <= 0 disables it.
-// Returns the number of mirrors removed.
+// Only mirrors carrying this manager's last-used marker are candidates: the
+// cache root may be shared with bare repositories the operator keeps for other
+// reasons, and those are never deleted. Returns the number of mirrors removed.
 func (m *Manager) Sweep(ctx context.Context, maxAge time.Duration) (int, error) {
 	if maxAge <= 0 {
 		return 0, nil
@@ -129,14 +140,28 @@ func (m *Manager) Sweep(ctx context.Context, maxAge time.Duration) (int, error) 
 		if !info.IsDir() || !strings.HasSuffix(path, ".git") || !mirrorExists(path) {
 			return nil
 		}
-		if lastUsed(path).Before(cutoff) {
+		used, owned := lastUsed(path)
+		if !owned {
+			m.logger.Debug("skipping bare repository not created by the mirror cache", "path", path)
+			return filepath.SkipDir
+		}
+		if used.Before(cutoff) {
 			lock := m.repoLock(m.slugFor(path))
 			lock.Lock()
-			rmErr := os.RemoveAll(path)
+			// Re-check under the lock: a job may have refreshed the mirror
+			// between the walk and the removal.
+			used, owned = lastUsed(path)
+			stale := owned && used.Before(cutoff)
+			var rmErr error
+			if stale {
+				rmErr = os.RemoveAll(path)
+			}
 			lock.Unlock()
-			if rmErr != nil {
+			switch {
+			case !stale:
+			case rmErr != nil:
 				m.logger.Warn("mirror sweep remove failed", "path", path, "err", rmErr)
-			} else {
+			default:
 				m.logger.Info("mirror swept (stale)", "path", path)
 				removed++
 			}
@@ -160,15 +185,19 @@ func (m *Manager) slugFor(mirrorPath string) string {
 // objects, no GitHub bandwidth) and re-points origin at GitHub so checkout
 // fetches only the delta. The bundle carries objects only — no credentials.
 func (m *Manager) Bundle(ctx context.Context, repoSlug string, w io.Writer) error {
-	path, err := m.EnsureMirror(ctx, repoSlug)
-	if err != nil {
-		return err
-	}
+	// Hold the repo lock across the refresh and the bundle so a concurrent
+	// sweep cannot remove the mirror in between.
 	lock := m.repoLock(repoSlug)
 	lock.Lock()
 	defer lock.Unlock()
+	path, err := m.ensureMirrorLocked(ctx, repoSlug)
+	if err != nil {
+		return err
+	}
 	cmd := exec.CommandContext(ctx, "git", "--git-dir="+path, "bundle", "create", "-", "--all")
-	cmd.Env = m.gitEnv()
+	// Bundle creation is entirely local. Do not expose the mirror PAT to a
+	// subprocess that cannot use it.
+	cmd.Env = m.localGitEnv()
 	cmd.Stdout = w
 	var errb strings.Builder
 	cmd.Stderr = &errb
@@ -225,18 +254,41 @@ func (m *Manager) git(ctx context.Context, gitDir string, args ...string) error 
 // a dense, validated list before the credential is appended. URL rewrites are
 // excluded because they could redirect the configured GitHub URL to another
 // host after authentication was attached. Inherited Authorization headers are
-// also excluded to prevent duplicate credentials.
+// also excluded to prevent duplicate credentials. GIT_CONFIG_PARAMETERS is the
+// other environment channel Git reads at the same precedence (it is how `git -c`
+// reaches subprocesses); it is dropped outright because its contents cannot be
+// filtered the same way.
 func (m *Manager) gitEnv() []string {
+	return m.buildGitEnv(true)
+}
+
+// localGitEnv preserves safe inherited Git settings while excluding both the
+// manager's PAT and inherited Authorization headers from local-only commands.
+func (m *Manager) localGitEnv() []string {
+	return m.buildGitEnv(false)
+}
+
+func (m *Manager) buildGitEnv(includeAuth bool) []string {
+	// Auth is only attached when a token exists; without one there is nothing to
+	// protect against a URL rewrite, so inherited rewrites stay usable.
+	authenticated := includeAuth && m.token != ""
+
 	env := append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
-	if m.token == "" {
-		return env
-	}
+	// Rebuilt entries are appended below. Remove the inherited indexed variables
+	// first so dropped credentials are absent from the subprocess environment,
+	// not merely hidden behind a smaller last-wins GIT_CONFIG_COUNT. This runs
+	// even without a token so an inherited Authorization header never reaches a
+	// subprocess that has no use for it.
+	env = stripIndexedGitConfig(env)
 
 	count := 0
 	if raw := os.Getenv("GIT_CONFIG_COUNT"); raw != "" {
 		parsed, err := strconv.Atoi(raw)
 		if err != nil || parsed < 0 {
 			m.logger.Warn("ignoring unusable GIT_CONFIG_COUNT", "value", raw)
+		} else if parsed > maxInheritedGitConfigEntries {
+			m.logger.Warn("truncating oversized inherited git config", "count", parsed, "max", maxInheritedGitConfigEntries)
+			count = maxInheritedGitConfigEntries
 		} else {
 			count = parsed
 		}
@@ -247,12 +299,16 @@ func (m *Manager) gitEnv() []string {
 	for i := 0; i < count; i++ {
 		key, keyOK := os.LookupEnv(fmt.Sprintf("GIT_CONFIG_KEY_%d", i))
 		value, valueOK := os.LookupEnv(fmt.Sprintf("GIT_CONFIG_VALUE_%d", i))
+		if !keyOK && !valueOK {
+			m.logger.Warn("inherited git config ends before GIT_CONFIG_COUNT", "index", i, "count", count)
+			break
+		}
 		if !keyOK || !valueOK || strings.TrimSpace(key) == "" {
 			m.logger.Warn("ignoring incomplete inherited git config", "index", i)
 			continue
 		}
 		lowerKey := strings.ToLower(key)
-		if strings.HasPrefix(lowerKey, "url.") &&
+		if authenticated && strings.HasPrefix(lowerKey, "url.") &&
 			(strings.HasSuffix(lowerKey, ".insteadof") || strings.HasSuffix(lowerKey, ".pushinsteadof")) {
 			m.logger.Warn("ignoring inherited git URL rewrite while authenticated", "key", key)
 			continue
@@ -265,9 +321,11 @@ func (m *Manager) gitEnv() []string {
 		entries = append(entries, entry{key: key, value: value})
 	}
 
-	hdr := "AUTHORIZATION: basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:"+m.token))
-	base := strings.TrimRight(m.baseURL, "/") + "/"
-	entries = append(entries, entry{key: "http." + base + ".extraHeader", value: hdr})
+	if authenticated {
+		hdr := "AUTHORIZATION: basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:"+m.token))
+		base := strings.TrimRight(m.baseURL, "/") + "/"
+		entries = append(entries, entry{key: "http." + base + ".extraHeader", value: hdr})
+	}
 	env = append(env, fmt.Sprintf("GIT_CONFIG_COUNT=%d", len(entries)))
 	for i, item := range entries {
 		env = append(env,
@@ -275,6 +333,79 @@ func (m *Manager) gitEnv() []string {
 			fmt.Sprintf("GIT_CONFIG_VALUE_%d=%s", i, item.value))
 	}
 	return env
+}
+
+// stripIndexedGitConfig removes every environment channel through which Git
+// reads configuration: the indexed GIT_CONFIG_COUNT/KEY/VALUE list and
+// GIT_CONFIG_PARAMETERS. Names are compared case-insensitively because Windows
+// environment variables are, and os/exec resolves them the same way there.
+func stripIndexedGitConfig(env []string) []string {
+	out := env[:0]
+	for _, item := range env {
+		key, _, _ := strings.Cut(item, "=")
+		upper := strings.ToUpper(key)
+		if upper == "GIT_CONFIG_COUNT" || upper == "GIT_CONFIG_PARAMETERS" ||
+			strings.HasPrefix(upper, "GIT_CONFIG_KEY_") || strings.HasPrefix(upper, "GIT_CONFIG_VALUE_") {
+			continue
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+// AuditFileConfig reports git configuration read from files (system and global
+// config, including GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM overrides) that would
+// affect authenticated mirror operations. The subprocess environment is
+// filtered, but file config is the operator's own machine state and still
+// applies to every git call, so a rewrite of the GitHub base URL or a stored
+// Authorization header there deserves a warning before jobs depend on the
+// cache. Each returned string is one human-readable warning.
+func AuditFileConfig(ctx context.Context, baseURL string) ([]string, error) {
+	cmd := exec.CommandContext(ctx, "git", "config", "-z", "--show-origin", "--get-regexp",
+		`^(url\..*\.insteadof|http\.(.*\.)?extraheader)$`)
+	// Run outside any repository so only file-based config is inspected, with
+	// the same environment channels stripped that mirror subprocesses drop.
+	// GIT_DIR would point the audit at some unrelated repository's config.
+	cmd.Dir = os.TempDir()
+	env := stripIndexedGitConfig(append(os.Environ(), "GIT_TERMINAL_PROMPT=0"))
+	cmd.Env = slices.DeleteFunc(env, func(kv string) bool {
+		key, _, _ := strings.Cut(kv, "=")
+		key = strings.ToUpper(key)
+		return key == "GIT_DIR" || key == "GIT_WORK_TREE"
+	})
+	out, err := cmd.Output()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			return nil, nil // no matching keys
+		}
+		return nil, fmt.Errorf("git config: %w", err)
+	}
+
+	base := strings.TrimRight(baseURL, "/") + "/"
+	var warnings []string
+	// With -z each match is emitted as "origin\0key\nvalue\0", so subsections
+	// containing spaces and values containing newlines survive intact.
+	fields := strings.Split(strings.TrimSuffix(string(out), "\x00"), "\x00")
+	for i := 0; i+1 < len(fields); i += 2 {
+		origin := fields[i]
+		key, value, _ := strings.Cut(fields[i+1], "\n")
+		lowerKey := strings.ToLower(key)
+		switch {
+		case strings.HasPrefix(lowerKey, "url."):
+			replaced := strings.TrimRight(value, "/") + "/"
+			if strings.HasPrefix(base, replaced) || strings.HasPrefix(replaced, base) {
+				warnings = append(warnings, fmt.Sprintf(
+					"%s rewrites %s (%s); mirror fetches for %s would be redirected", origin, value, key, baseURL))
+			}
+		case strings.HasPrefix(lowerKey, "http."):
+			if strings.HasPrefix(strings.ToLower(strings.TrimSpace(value)), "authorization:") {
+				warnings = append(warnings, fmt.Sprintf(
+					"%s sets an Authorization header (%s) that git sends alongside multirunner's own token for matching URLs", origin, key))
+			}
+		}
+	}
+	return warnings, nil
 }
 
 func mirrorExists(path string) bool {

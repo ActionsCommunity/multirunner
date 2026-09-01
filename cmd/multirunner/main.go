@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"github.com/GerardSmit/multirunner/internal/backend"
 	"github.com/GerardSmit/multirunner/internal/cache"
 	"github.com/GerardSmit/multirunner/internal/config"
+	"github.com/GerardSmit/multirunner/internal/gitcache"
 	"github.com/GerardSmit/multirunner/internal/github"
 	"github.com/GerardSmit/multirunner/internal/metrics"
 	"github.com/GerardSmit/multirunner/internal/pool"
@@ -90,11 +92,14 @@ Runs identically in the foreground or under a service manager (see "service").`,
 
 	doctorC := &cobra.Command{
 		Use:   "doctor",
-		Short: "Check daemon reachability and container mode without starting runners",
+		Short: "Check daemons, repository access, and scheduling without starting runners",
 		Long: `Run preflight checks against the config: for every pool, confirm its Docker/
 Podman daemon is reachable and running in the expected container mode (a Linux
 daemon assigned to a Windows pool, or vice versa, is reported as a problem).
-Exits non-zero if any pool is misconfigured.`,
+For repo/repositories scope, also verify that Actions is enabled and perform a
+heuristic workflow scan for the self-hosted label. The heuristic can miss custom
+label and matrix expressions, but incomplete API checks still fail preflight.
+Exits non-zero if any required check is incomplete or misconfigured.`,
 		Example: "  multirunner doctor --config config.yaml",
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -257,7 +262,7 @@ func bakeCmd() *cobra.Command {
 		Long: `Build (or rebuild) the golden Windows Server Core qcow2 used by qemu pools:
 creates a base disk, boots the Windows installer unattended, installs the runner
 + boot task + cache patch, then powers off. Needs QEMU and a Windows Server ISO.
-Run on a Linux/KVM host (or any host with QEMU + hardware accel).
+Uses hardware acceleration on x86-64 hosts and TCG software emulation on ARM.
 
 --prepare-only creates the base disk + autounattend ISO and prints the QEMU
 command without running it (for manual/observed installs).`,
@@ -296,7 +301,7 @@ command without running it (for manual/observed installs).`,
 	c.Flags().StringVar(&accel, "accel", "", "QEMU accel: kvm|whpx|hvf|tcg ('' = auto)")
 	c.Flags().StringVar(&runnerVer, "runner-version", winvm.DefaultRunnerVersion, "actions/runner version to bake in")
 	c.Flags().StringVar(&runnerSHA256, "runner-sha256", "", "runner archive SHA256 (required for a non-default version)")
-	c.Flags().StringSliceVar(&tools, "tools", nil, "toolchains to bake into the golden: dotnet,node,go,buildtools")
+	c.Flags().StringSliceVar(&tools, "tools", nil, "toolchains to bake: dotnet[:major],node[:major],go,buildtools[:line]")
 	c.Flags().BoolVar(&licensed, "licensed", false, "a real Windows key/KMS is configured (skip eval housekeeping)")
 	c.Flags().StringVar(&vncWeb, "vnc-web", "127.0.0.1:8090", "serve a browser VNC viewer at host:port to watch the install (empty to disable)")
 	return c
@@ -423,6 +428,20 @@ func runOrchestrator(ctx context.Context, configPath string, interactive, instal
 	logger := newLogger(cfg.Log)
 	for _, warn := range cfg.Warnings() {
 		logger.Warn(warn)
+	}
+	for _, pc := range cfg.Pools {
+		if pc.Backend != "qemu" {
+			continue
+		}
+		accel := pc.QEMU.Accel
+		detected := accel == ""
+		if detected {
+			accel = winvm.DetectAccel(runtime.GOOS, runtime.GOARCH)
+		}
+		if accel == "tcg" {
+			logger.Warn("QEMU Windows guest is using software CPU emulation; "+tcgReason(detected, runtime.GOOS, runtime.GOARCH),
+				"pool", pc.Name, "host_os", runtime.GOOS, "host_arch", runtime.GOARCH)
+		}
 	}
 
 	// Build the GitHub client provider. For scope=repos, create a per-repo
@@ -776,7 +795,10 @@ func doctor(configPath string) error {
 				status += "\n        hint: install containerd+nerdctl (`multirunner install-containerd`)"
 			}
 			allOK = false
-		} else if osType, err := be.OSType(ctx); err == nil && osType != pc.OS {
+		} else if osType, err := be.OSType(ctx); err != nil {
+			status = "UNKNOWN MODE: " + err.Error()
+			allOK = false
+		} else if osType != pc.OS {
 			status = fmt.Sprintf("WRONG MODE: daemon=%s pool=%s", osType, pc.OS)
 			allOK = false
 		}
@@ -786,17 +808,25 @@ func doctor(configPath string) error {
 	if err := warnStarvedRepos(cfg); err != nil {
 		allOK = false
 	}
-	// The remote checks get a budget of their own. They share nothing with the
+	// The git audit is local and quick; it must not inherit whatever the pool
+	// pings left of the shared budget.
+	auditCtx, cancelAudit := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	warnGitFileConfig(auditCtx, cfg)
+	cancelAudit()
+	// Each remote phase gets a budget of its own. They share nothing with the
 	// pool pings above, and a single hung daemon eating the 20s would otherwise
 	// starve them into reporting "could not check" for every repo, which reads
-	// as a GitHub problem when it is a local one.
-	apiCtx, apiCancel := context.WithTimeout(context.WithoutCancel(ctx), remoteCheckTimeout)
-	defer apiCancel()
-	if err := checkActionsEnabled(apiCtx, cfg); err != nil {
-		allOK = false
-	}
-	if err := warnNoSelfHostedWorkflows(apiCtx, cfg); err != nil {
-		allOK = false
+	// as a GitHub problem when it is a local one. The budget also scales with
+	// the repo list, since the checks visit repos in bounded waves and a fixed
+	// clock would fail a healthy config that merely lists many repos.
+	budget := remoteCheckBudget(len(cfg.GitHub.RepoTargets()))
+	for _, phase := range []func(context.Context, *config.Config) error{checkActionsEnabled, warnNoSelfHostedWorkflows} {
+		phaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), budget)
+		err := phase(phaseCtx, cfg)
+		cancel()
+		if err != nil {
+			allOK = false
+		}
 	}
 	if !allOK {
 		return fmt.Errorf("preflight found problems")
@@ -811,7 +841,7 @@ func doctor(configPath string) error {
 // identical to a repo that is merely idle, which is what makes it worth calling
 // out here. Returns an error if any repo is off, so doctor exits non-zero.
 func checkActionsEnabled(ctx context.Context, cfg *config.Config) error {
-	if cfg.GitHub.Scope != config.ScopeRepos {
+	if cfg.GitHub.Scope != config.ScopeRepo && cfg.GitHub.Scope != config.ScopeRepos {
 		return nil
 	}
 	var disabled []string
@@ -830,7 +860,7 @@ func checkActionsEnabled(ctx context.Context, cfg *config.Config) error {
 	if len(disabled) > 0 {
 		fmt.Printf("\nWARNING: Actions is disabled on %d of %d configured repo(s): %s\n"+
 			"        These repos can never queue a job, so multirunner polls them for nothing.\n"+
-			"        fix: enable Actions under Settings > Actions > General, or drop them from github.repos.\n",
+			"        fix: enable Actions under Settings > Actions > General, or remove them from multirunner's GitHub scope.\n",
 			len(disabled), len(results), strings.Join(disabled, ", "))
 	}
 	if len(disabled) > 0 || len(incomplete) > 0 {
@@ -848,10 +878,10 @@ func checkActionsEnabled(ctx context.Context, cfg *config.Config) error {
 // Detection is a literal search for "self-hosted" under .github/workflows.
 // runs-on can legally name custom labels only (runs-on: [Windows, X64]) and
 // matrix or expression forms cannot be resolved without evaluating the workflow,
-// so a miss here is possible. That is why this only ever advises and never fails
-// doctor: a false alarm on a working repo would be worse than staying quiet.
+// so a miss here is possible. That is why a repo without a hit only earns a
+// note; doctor fails only when the scan itself could not complete.
 func warnNoSelfHostedWorkflows(ctx context.Context, cfg *config.Config) error {
-	if cfg.GitHub.Scope != config.ScopeRepos {
+	if cfg.GitHub.Scope != config.ScopeRepo && cfg.GitHub.Scope != config.ScopeRepos {
 		return nil
 	}
 	var unused []string
@@ -868,7 +898,7 @@ func warnNoSelfHostedWorkflows(ctx context.Context, cfg *config.Config) error {
 	if len(unused) > 0 {
 		fmt.Printf("\nNOTE: heuristic scan found no workflow targeting a self-hosted runner in %d of %d configured repo(s): %s\n"+
 			"        multirunner polls these every interval but they can never send it a job.\n"+
-			"        fix: point a workflow at `runs-on: [self-hosted, ...]`, or drop them from github.repos.\n"+
+			"        fix: point a workflow at `runs-on: [self-hosted, ...]`, or remove them from multirunner's GitHub scope.\n"+
 			"        (custom-label and matrix runs-on forms are not detected, so verify before removing)\n",
 			len(unused), len(results), strings.Join(unused, ", "))
 	}
@@ -904,6 +934,26 @@ func repoTargetsSelfHosted(ctx context.Context, c *github.Client) (bool, error) 
 	return false, nil
 }
 
+// warnGitFileConfig surfaces file-based git configuration that would affect the
+// mirror cache's authenticated fetches. Environment-based config is filtered
+// out of mirror subprocesses, but the operator's own global or system config
+// still applies, and a rewrite of the GitHub URL or a stored Authorization
+// header there is almost always unintended for this host. Advisory only: the
+// operator owns those files and may have set them on purpose.
+func warnGitFileConfig(ctx context.Context, cfg *config.Config) {
+	if !cfg.GitCache.Enabled() {
+		return
+	}
+	warnings, err := gitcache.AuditFileConfig(ctx, cfg.GitHub.URL)
+	if err != nil {
+		fmt.Printf("\ncould not inspect git config: %v\n", err)
+		return
+	}
+	for _, warning := range warnings {
+		fmt.Printf("\nWARNING: git config %s\n        mirror fetches inherit file-based git config; review or remove it if unintended\n", warning)
+	}
+}
+
 // warnStarvedRepos flags the one config shape that silently strands work: pool
 // provisioning across more repos than a pool has slots. A repo-scoped runner
 // binds to exactly one repo, and a pool slot only re-registers after its runner
@@ -937,14 +987,43 @@ type repoCheckResult struct {
 	err  error
 }
 
+// repoCheckConcurrency caps how many repos a doctor phase inspects at once.
+const repoCheckConcurrency = 8
+
+// remoteCheckBudget sizes a doctor phase for the number of repos it visits:
+// at least remoteCheckTimeout, and never less than every wave of repos being
+// allowed its full per-repo cap.
+func remoteCheckBudget(repos int) time.Duration {
+	waves := (repos + repoCheckConcurrency - 1) / repoCheckConcurrency
+	if budget := time.Duration(waves) * remoteRepoCheckTimeout; budget > remoteCheckTimeout {
+		return budget
+	}
+	return remoteCheckTimeout
+}
+
+// tcgReason explains why the QEMU guest fell back to software emulation, so
+// the operator can tell a fixable host problem from an inherent one.
+func tcgReason(detected bool, goos, goarch string) string {
+	switch {
+	case !detected:
+		return "qemu.accel is set to tcg"
+	case goarch != "amd64":
+		return "x86-64 hardware acceleration requires an x86-64 host"
+	case goos == "linux":
+		return "/dev/kvm is missing or not accessible to this user"
+	default:
+		return "no hardware accelerator is available on this host"
+	}
+}
+
 func runRepoChecks(
 	ctx context.Context,
 	cfg *config.Config,
 	check func(context.Context, *github.Client) (bool, error),
 ) []repoCheckResult {
-	refs := cfg.GitHub.ResolvedRepos()
+	refs := cfg.GitHub.RepoTargets()
 	results := make([]repoCheckResult, len(refs))
-	limit := make(chan struct{}, 8)
+	limit := make(chan struct{}, repoCheckConcurrency)
 	var wg sync.WaitGroup
 	for i, ref := range refs {
 		wg.Add(1)
