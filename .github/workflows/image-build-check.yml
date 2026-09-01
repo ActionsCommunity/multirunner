@@ -188,7 +188,20 @@ jobs:
         run: |
           set -euo pipefail
           B=mr-check-windows
-          docker build -f images/windows/flavors/buildtools.Dockerfile --build-arg "PARENT=$B:minimal" -t $B:buildtools .
+          BUILDTOOLS_LINES="$(node -e "const v=require('./images/versions.json'); console.log(Object.keys(v.buildtools.lines).join(' '))")"
+          for line in $BUILDTOOLS_LINES; do
+            docker build -f images/windows/flavors/buildtools.Dockerfile \
+              --build-arg "PARENT=$B:minimal" \
+              --build-arg "BUILDTOOLS_LINE=$line" \
+              -t "$B:buildtools-$line" .
+            docker run --rm --entrypoint powershell "$B:buildtools-$line" -NoProfile -Command \
+              "& 'C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe' -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath"
+            docker run --rm --entrypoint cmd "$B:buildtools-$line" /s /c \
+              "if not \"%VSBUILDTOOLS%\"==\"C:\BuildTools\" exit 1 && call \"%VSBUILDTOOLS%\Common7\Tools\VsDevCmd.bat\" && where cl && msbuild -version"
+            docker rmi -f "$B:buildtools-$line"
+            docker builder prune -af
+            docker image prune -f
+          done
 
       # The cache-redirect patch must live ONLY in the sidecar. If it leaks into
       # the live DLL, ACTIONS_RESULTS_URL is unset whenever cache.enabled is false
@@ -253,16 +266,6 @@ jobs:
           if (Test-Lit .\runner-worker-stock.dll 'ACTIONS_RESULTS_URX') { throw 'stock entrypoint mode was patched' }
           if (-not (Test-Lit .\runner-worker-patched.dll 'ACTIONS_RESULTS_URX')) { throw 'redirect entrypoint mode was not patched' }
           Remove-Item .\runner-worker-stock.dll, .\runner-worker-patched.dll
-
-      - name: Smoke-test VS Build Tools
-        shell: bash
-        run: |
-          set -euo pipefail
-          B=mr-check-windows
-          docker run --rm --entrypoint powershell $B:buildtools -NoProfile -Command \
-            "& 'C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe' -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath"
-          docker run --rm --entrypoint cmd $B:buildtools /s /c \
-            "if not \"%VSBUILDTOOLS%\"==\"C:\BuildTools\" exit 1 && call \"%VSBUILDTOOLS%\Common7\Tools\VsDevCmd.bat\" && where cl"
 
       - name: Smoke-test shells on PATH
         shell: bash

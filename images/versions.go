@@ -145,12 +145,32 @@ type Rust struct {
 }
 
 type BuildTools struct {
+	DefaultLine string                    `json:"default_line"`
+	Lines       map[string]BuildToolsLine `json:"lines"`
+}
+
+type BuildToolsLine struct {
+	Channel            string `json:"channel"`
 	ReleaseLine        string `json:"release_line"`
 	Version            string `json:"version"`
 	BootstrapperURL    string `json:"bootstrapper_url"`
 	BootstrapperSHA256 string `json:"bootstrapper_sha256"`
 	ChannelURL         string `json:"channel_url"`
 	ChannelSHA256      string `json:"channel_sha256"`
+}
+
+func (b BuildTools) DefaultRelease() (BuildToolsLine, bool) {
+	r, ok := b.Lines[b.DefaultLine]
+	return r, ok
+}
+
+func (b BuildTools) ReleaseLines() []string {
+	lines := make([]string, 0, len(b.Lines))
+	for line := range b.Lines {
+		lines = append(lines, line)
+	}
+	sort.Strings(lines)
+	return lines
 }
 
 func Embedded() (Manifest, error) { return parse(embeddedJSON) }
@@ -172,8 +192,8 @@ func Read(path string) (Manifest, error) {
 }
 
 // ReadForUpdate validates policy fields but permits unresolved versions and
-// digests. This lets a maintainer add one empty Node major or .NET channel entry
-// and have the updater populate every upstream-derived field.
+// digests. This lets a maintainer add an empty Node major, .NET channel, or
+// Build Tools line and have the updater populate every upstream-derived field.
 func ReadForUpdate(path string) (Manifest, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -210,18 +230,16 @@ func (m Manifest) Validate() error {
 		}
 	}
 	for name, value := range map[string]string{
-		"runner linux x64":    m.Minimal.Runner.LinuxX64SHA256,
-		"runner linux arm64":  m.Minimal.Runner.LinuxARM64SHA256,
-		"runner windows x64":  m.Minimal.Runner.WindowsX64SHA256,
-		"MinGit":              m.Minimal.MinGit.SHA256,
-		"PowerShell":          m.Minimal.PowerShell.WindowsX64SHA256,
-		"Go linux amd64":      m.Go.LinuxAMD64SHA256,
-		"Go linux arm64":      m.Go.LinuxARM64SHA256,
-		"Go windows amd64":    m.Go.WindowsAMD64SHA256,
-		"rustup x64":          m.Rust.RustupX64SHA256,
-		"rustup arm64":        m.Rust.RustupARM64SHA256,
-		"Build Tools":         m.BuildTools.BootstrapperSHA256,
-		"Build Tools channel": m.BuildTools.ChannelSHA256,
+		"runner linux x64":   m.Minimal.Runner.LinuxX64SHA256,
+		"runner linux arm64": m.Minimal.Runner.LinuxARM64SHA256,
+		"runner windows x64": m.Minimal.Runner.WindowsX64SHA256,
+		"MinGit":             m.Minimal.MinGit.SHA256,
+		"PowerShell":         m.Minimal.PowerShell.WindowsX64SHA256,
+		"Go linux amd64":     m.Go.LinuxAMD64SHA256,
+		"Go linux arm64":     m.Go.LinuxARM64SHA256,
+		"Go windows amd64":   m.Go.WindowsAMD64SHA256,
+		"rustup x64":         m.Rust.RustupX64SHA256,
+		"rustup arm64":       m.Rust.RustupARM64SHA256,
 	} {
 		if err := digest(value, "", 64); err != nil {
 			return fmt.Errorf("%s digest: %w", name, err)
@@ -263,8 +281,21 @@ func (m Manifest) Validate() error {
 			return fmt.Errorf(".NET Windows channel %q lacks a Windows archive", channel)
 		}
 	}
-	if m.BuildTools.ReleaseLine == "" || m.BuildTools.Version == "" || m.BuildTools.BootstrapperURL == "" || m.BuildTools.ChannelURL == "" {
-		return fmt.Errorf("Visual Studio Build Tools release identity is incomplete")
+	for line, release := range m.BuildTools.Lines {
+		if release.ReleaseLine != line || release.Version == "" || release.BootstrapperURL == "" || release.ChannelURL == "" {
+			return fmt.Errorf("Visual Studio Build Tools %s release identity is incomplete", line)
+		}
+		if !strings.HasPrefix(release.Version, line+".") {
+			return fmt.Errorf("Visual Studio Build Tools %s resolved unexpected version %q", line, release.Version)
+		}
+		for name, value := range map[string]string{
+			"bootstrapper": release.BootstrapperSHA256,
+			"channel":      release.ChannelSHA256,
+		} {
+			if err := digest(value, "", 64); err != nil {
+				return fmt.Errorf("Visual Studio Build Tools %s %s digest: %w", line, name, err)
+			}
+		}
 	}
 	return nil
 }
@@ -361,8 +392,23 @@ func (m Manifest) ValidatePolicy() error {
 			return fmt.Errorf("unassigned .NET channel %q has incomplete discovery metadata", discovery.Channel)
 		}
 	}
-	if m.Rust.Channel == "" || m.BuildTools.ReleaseLine == "" {
-		return fmt.Errorf("Rust channel and Build Tools release line are required")
+	if m.Rust.Channel == "" {
+		return fmt.Errorf("Rust channel is required")
+	}
+	if len(m.BuildTools.Lines) == 0 {
+		return fmt.Errorf("at least one Build Tools release line is required")
+	}
+	if _, ok := m.BuildTools.DefaultRelease(); !ok {
+		return fmt.Errorf("Build Tools default line %q is not declared", m.BuildTools.DefaultLine)
+	}
+	for line, release := range m.BuildTools.Lines {
+		value, err := strconv.Atoi(line)
+		if err != nil || value <= 0 || strconv.Itoa(value) != line {
+			return fmt.Errorf("invalid Build Tools release line %q", line)
+		}
+		if release.Channel == "" || !strings.HasPrefix(release.Channel, line+"/") {
+			return fmt.Errorf("Build Tools %s channel must start with %q", line, line+"/")
+		}
 	}
 	return nil
 }

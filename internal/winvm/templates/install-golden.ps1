@@ -166,20 +166,7 @@ __DOTNET_INSTALLS__
                 Mark 'dotnet installed'
             }
             'buildtools' {
-                FetchOrStage 'vs_buildtools.exe' '__VS_URL__' C:\vs_buildtools.exe SHA256 '__VS_SHA256__'
-                FetchOrStage 'vs.channel' '__VS_CHANNEL_URL__' C:\vs.channel SHA256 '__VS_CHANNEL_SHA256__'
-                $p = Start-Process -FilePath C:\vs_buildtools.exe -Wait -PassThru -ArgumentList `
-                    '--quiet', '--wait', '--norestart', '--nocache', '--installPath', 'C:\BuildTools', `
-                    '--channelUri', 'file:///C:/vs.channel', `
-                    '--installChannelUri', 'file:///C:/vs.channel', '--noUpdateInstaller', `
-                    '--add', 'Microsoft.VisualStudio.Workload.VCTools', `
-                    '--add', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64', `
-                    '--add', 'Microsoft.VisualStudio.Component.Windows11SDK.26100', `
-                    '--add', 'Microsoft.VisualStudio.Component.VC.CMake.Project', `
-                    '--includeRecommended'
-                if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { throw "vs_buildtools failed: $($p.ExitCode)" }
-                Remove-Item C:\vs_buildtools.exe, C:\vs.channel
-                [Environment]::SetEnvironmentVariable('VSBUILDTOOLS', 'C:\BuildTools', 'Machine')
+__BUILDTOOLS_INSTALLS__
                 Mark 'buildtools installed'
             }
             default { Mark "unknown tool $t" }

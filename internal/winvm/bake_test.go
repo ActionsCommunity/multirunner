@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"crypto/sha512"
 	"encoding/hex"
-	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -38,9 +37,15 @@ func TestAutounattendFiles(t *testing.T) {
 		runnerDigest, minGitSHA256,
 		bakeNodeURL(), bakeNodeSHA256,
 		bakeGoURL(), bakeGoSHA256,
-		bakeVSURL, bakeVSSHA256, bakeVSChannelURL, bakeVSChannelSHA256,
 	}
-	for _, artifact := range bakeDotNetArtifacts() {
+	plan, err := resolveToolPlan([]string{"dotnet", "buildtools"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, artifact := range bakeDotNetArtifacts(plan.DotNet) {
+		wants = append(wants, artifact.Name, artifact.URL, artifact.Digest)
+	}
+	for _, artifact := range bakeBuildToolsArtifacts(plan.BuildTools) {
 		wants = append(wants, artifact.Name, artifact.URL, artifact.Digest)
 	}
 	for _, want := range wants {
@@ -130,20 +135,41 @@ func TestToolsHashFingerprintsEveryPayloadIdentity(t *testing.T) {
 	}
 }
 
-func TestBakeDotNetArtifactsFollowManifestTargets(t *testing.T) {
-	original := imageVersionManifest
-	defer func() { imageVersionManifest = original }()
-	imageVersionManifest.DotNet.Channels = maps.Clone(original.DotNet.Channels)
-	release := imageVersionManifest.DotNet.Channels["10.0"]
-	release.Targets = append(release.Targets, "qemu-windows")
-	imageVersionManifest.DotNet.Channels["10.0"] = release
-
-	artifacts := bakeDotNetArtifacts()
-	if len(artifacts) != 3 {
-		t.Fatalf("got %d QEMU .NET artifacts, want 3", len(artifacts))
+func TestVersionedGoldenToolSelectors(t *testing.T) {
+	defaultPlan, err := resolveToolPlan([]string{"buildtools"})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if script := bakeDotNetInstallScript(); !strings.Contains(script, "dotnet-10-0.zip") || !strings.Contains(script, release.WindowsX64SHA512) {
-		t.Fatal("generated QEMU install script did not include newly targeted channel")
+	if got, want := strings.Join(defaultPlan.Canonical, ","), "buildtools:18"; got != want {
+		t.Fatalf("default Build Tools selector = %q, want %q", got, want)
+	}
+	plan, err := resolveToolPlan([]string{"dotnet", "dotnet:10", "buildtools:17", "buildtools:18"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(plan.Canonical, ","), "buildtools:17,buildtools:18,dotnet:10,dotnet:8,dotnet:9"; got != want {
+		t.Fatalf("canonical selectors = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(plan.DotNet, ","), "8.0,9.0,10.0"; got != want {
+		t.Fatalf(".NET install order = %q, want %q", got, want)
+	}
+	artifacts := bakeDotNetArtifacts(plan.DotNet)
+	if len(artifacts) != 3 {
+		t.Fatalf("got %d stable .NET artifacts, want 3", len(artifacts))
+	}
+	if script := bakeDotNetInstallScript(plan.DotNet); !strings.Contains(script, "dotnet-10-0.zip") || !strings.Contains(script, imageVersionManifest.DotNet.Channels["10.0"].WindowsX64SHA512) {
+		t.Fatal("generated install script did not include .NET 10")
+	}
+	buildToolsScript := bakeBuildToolsInstallScript(plan.BuildTools)
+	for _, want := range []string{"C:\\BuildTools\\17", "C:\\BuildTools\\18", "VSBUILDTOOLS_17", "VSBUILDTOOLS_18"} {
+		if !strings.Contains(buildToolsScript, want) {
+			t.Errorf("generated Build Tools script missing %q", want)
+		}
+	}
+	for _, selector := range []string{"dotnet:7", "buildtools:19", "node:22", "unknown"} {
+		if _, err := resolveToolPlan([]string{selector}); err == nil {
+			t.Errorf("selector %q should fail", selector)
+		}
 	}
 }
 

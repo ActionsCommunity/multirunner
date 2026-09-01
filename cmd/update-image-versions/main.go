@@ -85,8 +85,12 @@ func run(ctx context.Context, manifestPath string) error {
 	}
 
 	defaultNode, _ := m.Node.DefaultRelease()
-	fmt.Printf("Runner image versions refreshed (runner %s, Node %s, Go %s, Rust %s)\n",
-		m.Minimal.Runner.Version, defaultNode.Version, m.Go.Version, m.Rust.Version)
+	buildTools := make([]string, 0, len(m.BuildTools.Lines))
+	for _, line := range m.BuildTools.ReleaseLines() {
+		buildTools = append(buildTools, line+"="+m.BuildTools.Lines[line].Version)
+	}
+	fmt.Printf("Runner image versions refreshed (runner %s, Node %s, Go %s, Rust %s, Build Tools %s)\n",
+		m.Minimal.Runner.Version, defaultNode.Version, m.Go.Version, m.Rust.Version, strings.Join(buildTools, ", "))
 	for _, discovery := range m.DotNet.UnassignedSupportedChannels {
 		fmt.Printf("New supported .NET channel needs image targets: %s (%s, SDK %s, EOL %s)\n",
 			discovery.Channel, discovery.ReleaseType, discovery.LatestSDK, discovery.EOL)
@@ -467,32 +471,37 @@ func (u updater) refreshRust(ctx context.Context, m *imageversions.Manifest) err
 }
 
 func (u updater) refreshBuildTools(ctx context.Context, m *imageversions.Manifest) error {
-	base := "https://aka.ms/vs/" + m.BuildTools.ReleaseLine + "/release/"
-	bootstrapperSHA, bootstrapperURL, _, err := u.downloadSHA256(ctx, base+"vs_buildtools.exe", false)
-	if err != nil {
-		return fmt.Errorf("Visual Studio Build Tools bootstrapper: %w", err)
+	for _, line := range m.BuildTools.ReleaseLines() {
+		release := m.BuildTools.Lines[line]
+		base := "https://aka.ms/vs/" + release.Channel + "/"
+		bootstrapperSHA, bootstrapperURL, _, err := u.downloadSHA256(ctx, base+"vs_buildtools.exe", false)
+		if err != nil {
+			return fmt.Errorf("Visual Studio Build Tools %s bootstrapper: %w", line, err)
+		}
+		channelSHA, channelURL, body, err := u.downloadSHA256(ctx, base+"channel", true)
+		if err != nil {
+			return fmt.Errorf("Visual Studio Build Tools %s channel: %w", line, err)
+		}
+		var channel struct {
+			Info struct {
+				ProductDisplayVersion string `json:"productDisplayVersion"`
+			} `json:"info"`
+		}
+		if err := json.Unmarshal(body, &channel); err != nil {
+			return fmt.Errorf("decode Visual Studio Build Tools %s channel: %w", line, err)
+		}
+		version := strings.Fields(channel.Info.ProductDisplayVersion)
+		if len(version) == 0 || !strings.HasPrefix(version[0], line+".") {
+			return fmt.Errorf("Visual Studio Build Tools %s channel has unexpected product version %q", line, channel.Info.ProductDisplayVersion)
+		}
+		release.ReleaseLine = line
+		release.Version = version[0]
+		release.BootstrapperURL = bootstrapperURL
+		release.BootstrapperSHA256 = bootstrapperSHA
+		release.ChannelURL = channelURL
+		release.ChannelSHA256 = channelSHA
+		m.BuildTools.Lines[line] = release
 	}
-	channelSHA, channelURL, body, err := u.downloadSHA256(ctx, base+"channel", true)
-	if err != nil {
-		return fmt.Errorf("Visual Studio Build Tools channel: %w", err)
-	}
-	var channel struct {
-		Info struct {
-			ProductDisplayVersion string `json:"productDisplayVersion"`
-		} `json:"info"`
-	}
-	if err := json.Unmarshal(body, &channel); err != nil {
-		return fmt.Errorf("decode Visual Studio channel: %w", err)
-	}
-	version := strings.Fields(channel.Info.ProductDisplayVersion)
-	if len(version) == 0 {
-		return errors.New("Visual Studio channel has no product version")
-	}
-	m.BuildTools.Version = version[0]
-	m.BuildTools.BootstrapperURL = bootstrapperURL
-	m.BuildTools.BootstrapperSHA256 = bootstrapperSHA
-	m.BuildTools.ChannelURL = channelURL
-	m.BuildTools.ChannelSHA256 = channelSHA
 	return nil
 }
 

@@ -112,11 +112,26 @@
     "rustup_arm64_sha256": "9732d6c5e2a098d3521fca8145d826ae0aaa067ef2385ead08e6feac88fa5792"
   },
   "buildtools": {
-    "release_line": "17",
-    "version": "17.14.39",
-    "bootstrapper_url": "https://download.visualstudio.microsoft.com/download/pr/fa619120-9c0e-47e6-bfe0-3ee96fb671b2/2aeac090a9cfb2c56474aa9a6c5817ad8cfb879539e0ed1aecec33de9fc2dc4f/vs_BuildTools.exe",
-    "bootstrapper_sha256": "2aeac090a9cfb2c56474aa9a6c5817ad8cfb879539e0ed1aecec33de9fc2dc4f",
-    "channel_url": "https://download.visualstudio.microsoft.com/download/pr/fa619120-9c0e-47e6-bfe0-3ee96fb671b2/c26f06fe7ef8ee5381d82838bb39db61d0cb01124493eab761cdace9720e0995/VisualStudio.17.Release.chman",
-    "channel_sha256": "4c81e902fb7fe2acea779b828e6dc548fe0bbb693df50eda0224263c16686bdd"
+    "default_line": "18",
+    "lines": {
+      "17": {
+        "channel": "17/release",
+        "release_line": "17",
+        "version": "17.14.39",
+        "bootstrapper_url": "https://download.visualstudio.microsoft.com/download/pr/fa619120-9c0e-47e6-bfe0-3ee96fb671b2/2aeac090a9cfb2c56474aa9a6c5817ad8cfb879539e0ed1aecec33de9fc2dc4f/vs_BuildTools.exe",
+        "bootstrapper_sha256": "2aeac090a9cfb2c56474aa9a6c5817ad8cfb879539e0ed1aecec33de9fc2dc4f",
+        "channel_url": "https://download.visualstudio.microsoft.com/download/pr/fa619120-9c0e-47e6-bfe0-3ee96fb671b2/c26f06fe7ef8ee5381d82838bb39db61d0cb01124493eab761cdace9720e0995/VisualStudio.17.Release.chman",
+        "channel_sha256": "4c81e902fb7fe2acea779b828e6dc548fe0bbb693df50eda0224263c16686bdd"
+      },
+      "18": {
+        "channel": "18/stable",
+        "release_line": "18",
+        "version": "18.9.2",
+        "bootstrapper_url": "https://download.visualstudio.microsoft.com/download/pr/fe4fb3e6-ea32-4ae3-b154-72821a274f0d/352ac5776d592a4870c15756f9e140507b9ee64de62b401152e5929f7c0c52a6/vs_BuildTools.exe",
+        "bootstrapper_sha256": "352ac5776d592a4870c15756f9e140507b9ee64de62b401152e5929f7c0c52a6",
+        "channel_url": "https://download.visualstudio.microsoft.com/download/pr/fe4fb3e6-ea32-4ae3-b154-72821a274f0d/8ae0a45312cd28cec640174c5df11085f4efcb3bf210bd94cea932fb42c36778/VisualStudio.18.Release.chman",
+        "channel_sha256": "d3aa7336680097d007876ffb85c9d2b5c32c21796e0125407c4e3b88ebe4fc31"
+      }
+    }
   }
 }

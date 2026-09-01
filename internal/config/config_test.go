@@ -219,6 +219,8 @@ func TestImageRef(t *testing.T) {
 		{"windows", "node", "", "gerardsmit/multirunner-runner-windows:node"},
 		{"windows", "dotnet", "", "gerardsmit/multirunner-runner-windows:dotnet"},
 		{"windows", "buildtools", "", "gerardsmit/multirunner-runner-windows:buildtools"},
+		{"windows", "buildtools:17", "", "gerardsmit/multirunner-runner-windows:buildtools-17"},
+		{"windows", "buildtools:18", "", "gerardsmit/multirunner-runner-windows:buildtools-18"},
 		{"linux", "custom", "", "multirunner/runner-linux-custom:dev"},
 		{"windows", "minimal", "", "gerardsmit/multirunner-runner-windows:latest"},
 		{"windows", "rust", "", "multirunner/runner-windows-rust:dev"},

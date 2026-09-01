@@ -195,19 +195,36 @@ jobs:
           docker builder prune -af
           docker image prune -f
 
-          # buildtools flavor
-          docker build -f images/windows/flavors/buildtools.Dockerfile \
-            --build-arg "PARENT=$IMG:minimal-$SUFFIX" \
-            -t "$IMG:buildtools-$SUFFIX" .
-          docker run --rm --entrypoint cmd "$IMG:buildtools-$SUFFIX" /s /c \
-            "call \"C:\BuildTools\Common7\Tools\VsDevCmd.bat\" && where cl"
-          docker push "$IMG:buildtools-$SUFFIX"
+          # One Build Tools image per manifest line. Docker tags cannot contain
+          # a second colon, so image_tier buildtools:17 maps to :buildtools-17.
+          BUILDTOOLS_LINES="$(node -e "const v=require('./images/versions.json'); console.log(Object.keys(v.buildtools.lines).join(' '))")"
+          BUILDTOOLS_DEFAULT="$(node -p "require('./images/versions.json').buildtools.default_line")"
+          for line in $BUILDTOOLS_LINES; do
+            docker build -f images/windows/flavors/buildtools.Dockerfile \
+              --build-arg "PARENT=$IMG:minimal-$SUFFIX" \
+              --build-arg "BUILDTOOLS_LINE=$line" \
+              -t "$IMG:buildtools-$line-$SUFFIX" .
+            docker run --rm --entrypoint cmd "$IMG:buildtools-$line-$SUFFIX" /s /c \
+              "call \"C:\BuildTools\Common7\Tools\VsDevCmd.bat\" && where cl && msbuild -version"
+            docker push "$IMG:buildtools-$line-$SUFFIX"
+            docker rmi -f "$IMG:buildtools-$line-$SUFFIX"
+            docker builder prune -af
+            docker image prune -f
+          done
 
-          for flavor in minimal node dotnet buildtools; do
+          for flavor in minimal node dotnet; do
             docker buildx imagetools create \
               --tag "$IMG:$flavor" \
               "$IMG:$flavor-$SUFFIX"
           done
+          for line in $BUILDTOOLS_LINES; do
+            docker buildx imagetools create \
+              --tag "$IMG:buildtools-$line" \
+              "$IMG:buildtools-$line-$SUFFIX"
+          done
+          docker buildx imagetools create \
+            --tag "$IMG:buildtools" \
+            "$IMG:buildtools-$BUILDTOOLS_DEFAULT-$SUFFIX"
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
             MINOR="${SUFFIX%.*}"
             docker buildx imagetools create \

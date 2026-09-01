@@ -20,12 +20,21 @@ func TestEmbeddedManifest(t *testing.T) {
 	if len(m.DotNet.ChannelsForTarget(DotNetTargetQEMUWindows)) == 0 {
 		t.Fatal("no .NET channel targets QEMU")
 	}
+	if m.BuildTools.DefaultLine != "18" || len(m.BuildTools.ReleaseLines()) != 2 {
+		t.Fatalf("Build Tools policy = default %q, lines %v", m.BuildTools.DefaultLine, m.BuildTools.ReleaseLines())
+	}
+	for _, line := range []string{"17", "18"} {
+		if release := m.BuildTools.Lines[line]; release.ReleaseLine != line || release.Version == "" {
+			t.Fatalf("Build Tools %s is unresolved: %#v", line, release)
+		}
+	}
 }
 
 func TestReadForUpdateAllowsNewUnresolvedEntries(t *testing.T) {
 	m := MustEmbedded()
 	m.Node.Releases["26"] = NodeRelease{}
 	m.DotNet.Channels["11.0"] = DotNetChannel{Targets: []string{DotNetTargetLinux}}
+	m.BuildTools.Lines["19"] = BuildToolsLine{Channel: "19/stable"}
 	data, err := json.Marshal(m)
 	if err != nil {
 		t.Fatal(err)

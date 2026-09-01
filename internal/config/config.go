@@ -197,18 +197,20 @@ type Pool struct {
 // publishedFlavors lists the per-OS image flavors CI builds and pushes as tags
 // on gerardsmit/multirunner-runner-<os>. A pool's image_tier naming one of these
 // resolves to the published tag; unknown tiers fall back to a local :dev build.
-var publishedFlavors = map[string]map[string]bool{
+var publishedFlavors = map[string]map[string]string{
 	"linux": {
-		"native-build": true,
-		"node":         true,
-		"dotnet":       true,
-		"rust":         true,
-		"go":           true,
+		"native-build": "native-build",
+		"node":         "node",
+		"dotnet":       "dotnet",
+		"rust":         "rust",
+		"go":           "go",
 	},
 	"windows": {
-		"node":       true,
-		"dotnet":     true,
-		"buildtools": true,
+		"node":          "node",
+		"dotnet":        "dotnet",
+		"buildtools":    "buildtools",
+		"buildtools:17": "buildtools-17",
+		"buildtools:18": "buildtools-18",
 	},
 }
 
@@ -227,8 +229,8 @@ func (p Pool) ImageRef() string {
 		// local build needed for the common case.
 		return "gerardsmit/multirunner-runner-" + p.OS + ":latest"
 	}
-	if publishedFlavors[p.OS][tier] {
-		return "gerardsmit/multirunner-runner-" + p.OS + ":" + tier
+	if tag := publishedFlavors[p.OS][tier]; tag != "" {
+		return "gerardsmit/multirunner-runner-" + p.OS + ":" + tag
 	}
 	return "multirunner/runner-" + p.OS + "-" + tier + ":dev"
 }
@@ -259,7 +261,7 @@ type QEMU struct {
 	RunnerVersion string   `yaml:"runner_version"`  // runner version to bake
 	RunnerSHA256  string   `yaml:"runner_sha256"`   // required with a non-default runner_version
 	Licensed      bool     `yaml:"licensed"`        // real key/KMS -> skip eval housekeeping
-	Tools         []string `yaml:"tools"`           // toolchains to bake into the golden: dotnet | node | go | buildtools
+	Tools         []string `yaml:"tools"`           // golden selectors: dotnet[:major] | node | go | buildtools[:line]
 }
 
 // Containerd configures the containerd/runhcs Windows-container backend. The

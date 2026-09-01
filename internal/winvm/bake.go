@@ -48,11 +48,6 @@ var bakeNodeVersion = bakeNodeRelease.Version
 var bakeNodeSHA256 = bakeNodeRelease.WindowsX64SHA256
 var bakeGoVersion = imageVersionManifest.Go.Version
 var bakeGoSHA256 = imageVersionManifest.Go.WindowsAMD64SHA256
-var bakeVSVersion = imageVersionManifest.BuildTools.Version
-var bakeVSURL = imageVersionManifest.BuildTools.BootstrapperURL
-var bakeVSSHA256 = imageVersionManifest.BuildTools.BootstrapperSHA256
-var bakeVSChannelURL = imageVersionManifest.BuildTools.ChannelURL
-var bakeVSChannelSHA256 = imageVersionManifest.BuildTools.ChannelSHA256
 
 func bakeNodeURL() string {
 	return fmt.Sprintf("https://nodejs.org/dist/v%s/node-v%s-win-x64.zip", bakeNodeVersion, bakeNodeVersion)
@@ -69,8 +64,7 @@ func bakeDotNetArtifactName(channel string) string {
 	return "dotnet-" + strings.ReplaceAll(channel, ".", "-") + ".zip"
 }
 
-func bakeDotNetArtifacts() []bakeArtifact {
-	channels := imageVersionManifest.DotNet.ChannelsForTarget(imageversions.DotNetTargetQEMUWindows)
+func bakeDotNetArtifacts(channels []string) []bakeArtifact {
 	artifacts := make([]bakeArtifact, 0, len(channels))
 	for _, channel := range channels {
 		release := imageVersionManifest.DotNet.Channels[channel]
@@ -85,9 +79,9 @@ func bakeDotNetArtifacts() []bakeArtifact {
 	return artifacts
 }
 
-func bakeDotNetInstallScript() string {
+func bakeDotNetInstallScript(channels []string) string {
 	var script strings.Builder
-	for _, artifact := range bakeDotNetArtifacts() {
+	for _, artifact := range bakeDotNetArtifacts(channels) {
 		_, _ = fmt.Fprintf(&script,
 			"                FetchOrStage '%s' '%s' C:\\%s SHA512 '%s'\n"+
 				"                Expand-Archive C:\\%s C:\\dotnet -Force\n"+
@@ -95,6 +89,160 @@ func bakeDotNetInstallScript() string {
 			artifact.Name, artifact.URL, artifact.Name, artifact.Digest, artifact.Name, artifact.Name)
 	}
 	return strings.TrimSuffix(script.String(), "\n")
+}
+
+func bakeBuildToolsArtifactName(line, suffix string) string {
+	return "vs-" + line + "." + suffix
+}
+
+func bakeBuildToolsArtifacts(lines []string) []bakeArtifact {
+	artifacts := make([]bakeArtifact, 0, len(lines)*2)
+	for _, line := range lines {
+		release := imageVersionManifest.BuildTools.Lines[line]
+		artifacts = append(artifacts,
+			bakeArtifact{Name: bakeBuildToolsArtifactName(line, "exe"), Version: release.Version, URL: release.BootstrapperURL, Algorithm: "SHA256", Digest: release.BootstrapperSHA256},
+			bakeArtifact{Name: bakeBuildToolsArtifactName(line, "channel"), Version: release.Version, URL: release.ChannelURL, Algorithm: "SHA256", Digest: release.ChannelSHA256},
+		)
+	}
+	return artifacts
+}
+
+func bakeBuildToolsInstallScript(lines []string) string {
+	var script strings.Builder
+	for _, line := range lines {
+		release := imageVersionManifest.BuildTools.Lines[line]
+		exe := bakeBuildToolsArtifactName(line, "exe")
+		channel := bakeBuildToolsArtifactName(line, "channel")
+		installPath := `C:\BuildTools\` + line
+		_, _ = fmt.Fprintf(&script,
+			"                FetchOrStage '%s' '%s' C:\\%s SHA256 '%s'\n"+
+				"                FetchOrStage '%s' '%s' C:\\%s SHA256 '%s'\n"+
+				"                $p = Start-Process -FilePath C:\\%s -Wait -PassThru -ArgumentList `\n"+
+				"                    '--quiet', '--wait', '--norestart', '--nocache', '--installPath', '%s', `\n"+
+				"                    '--channelUri', 'file:///C:/%s', '--installChannelUri', 'file:///C:/%s', '--noUpdateInstaller', `\n"+
+				"                    '--add', 'Microsoft.VisualStudio.Workload.VCTools', `\n"+
+				"                    '--add', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64', `\n"+
+				"                    '--add', 'Microsoft.VisualStudio.Component.Windows11SDK.26100', `\n"+
+				"                    '--add', 'Microsoft.VisualStudio.Component.VC.CMake.Project', `\n"+
+				"                    '--add', 'Microsoft.Net.Component.4.8.SDK', `\n"+
+				"                    '--add', 'Microsoft.Net.Component.4.8.TargetingPack', `\n"+
+				"                    '--add', 'Microsoft.VisualStudio.Component.Roslyn.Compiler', '--includeRecommended'\n"+
+				"                if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { throw \"vs_buildtools %s failed: $($p.ExitCode)\" }\n"+
+				"                Remove-Item C:\\%s, C:\\%s\n"+
+				"                [Environment]::SetEnvironmentVariable('VSBUILDTOOLS_%s', '%s', 'Machine')\n",
+			exe, release.BootstrapperURL, exe, release.BootstrapperSHA256,
+			channel, release.ChannelURL, channel, release.ChannelSHA256,
+			exe, installPath, channel, channel, line, exe, channel, line, installPath)
+	}
+	defaultLine := imageVersionManifest.BuildTools.DefaultLine
+	selected := ""
+	for _, line := range lines {
+		selected = line
+		if line == defaultLine {
+			selected = line
+			break
+		}
+	}
+	if selected != "" {
+		_, _ = fmt.Fprintf(&script,
+			"                [Environment]::SetEnvironmentVariable('VSBUILDTOOLS', 'C:\\BuildTools\\%s', 'Machine')\n", selected)
+	}
+	return strings.TrimSuffix(script.String(), "\n")
+}
+
+type bakeToolPlan struct {
+	Canonical  []string
+	Kinds      []string
+	DotNet     []string
+	BuildTools []string
+}
+
+func resolveToolPlan(tools []string) (bakeToolPlan, error) {
+	canonical := map[string]bool{}
+	kinds := map[string]bool{}
+	dotnet := map[string]bool{}
+	buildtools := map[string]bool{}
+	for _, selector := range normalizeTools(tools) {
+		parts := strings.Split(selector, ":")
+		if len(parts) > 2 {
+			return bakeToolPlan{}, fmt.Errorf("invalid tool selector %q", selector)
+		}
+		kind := parts[0]
+		version := ""
+		if len(parts) == 2 {
+			version = parts[1]
+		}
+		switch kind {
+		case "node", "go":
+			if version != "" {
+				return bakeToolPlan{}, fmt.Errorf("%s does not support a version selector", kind)
+			}
+			canonical[kind] = true
+			kinds[kind] = true
+		case "dotnet":
+			channels := []string{}
+			if version == "" {
+				for channel, release := range imageVersionManifest.DotNet.Channels {
+					if (release.SupportPhase == "active" || release.SupportPhase == "maintenance") && release.WindowsX64SHA512 != "" {
+						channels = append(channels, channel)
+					}
+				}
+			} else {
+				channels = []string{version + ".0"}
+			}
+			for _, channel := range channels {
+				release, ok := imageVersionManifest.DotNet.Channels[channel]
+				if !ok || release.WindowsX64SHA512 == "" || (release.SupportPhase != "active" && release.SupportPhase != "maintenance") {
+					return bakeToolPlan{}, fmt.Errorf("unsupported stable .NET major %q", version)
+				}
+				dotnet[channel] = true
+				canonical["dotnet:"+strings.TrimSuffix(channel, ".0")] = true
+			}
+			kinds[kind] = true
+		case "buildtools":
+			line := version
+			if line == "" {
+				line = imageVersionManifest.BuildTools.DefaultLine
+			}
+			if _, ok := imageVersionManifest.BuildTools.Lines[line]; !ok {
+				return bakeToolPlan{}, fmt.Errorf("unsupported Build Tools release line %q", line)
+			}
+			buildtools[line] = true
+			canonical["buildtools:"+line] = true
+			kinds[kind] = true
+		default:
+			return bakeToolPlan{}, fmt.Errorf("unknown tool selector %q", selector)
+		}
+	}
+	plan := bakeToolPlan{
+		Canonical:  sortedKeys(canonical),
+		Kinds:      sortedKeys(kinds),
+		DotNet:     sortedVersionKeys(dotnet),
+		BuildTools: sortedVersionKeys(buildtools),
+	}
+	return plan, nil
+}
+
+func sortedKeys(values map[string]bool) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func sortedVersionKeys(values map[string]bool) []string {
+	keys := sortedKeys(values)
+	sort.Slice(keys, func(i, j int) bool {
+		left, leftErr := strconv.Atoi(strings.SplitN(keys[i], ".", 2)[0])
+		right, rightErr := strconv.Atoi(strings.SplitN(keys[j], ".", 2)[0])
+		if leftErr != nil || rightErr != nil {
+			return keys[i] < keys[j]
+		}
+		return left < right
+	})
+	return keys
 }
 
 type bakeArtifact struct {
@@ -106,6 +254,14 @@ type bakeArtifact struct {
 }
 
 func bakeArtifacts(runnerVersion, runnerSHA256 string, tools []string) ([]bakeArtifact, error) {
+	plan, err := resolveToolPlan(tools)
+	if err != nil {
+		return nil, err
+	}
+	return bakeArtifactsForPlan(runnerVersion, runnerSHA256, plan)
+}
+
+func bakeArtifactsForPlan(runnerVersion, runnerSHA256 string, plan bakeToolPlan) ([]bakeArtifact, error) {
 	if runnerVersion == "" {
 		runnerVersion = DefaultRunnerVersion
 	}
@@ -129,7 +285,7 @@ func bakeArtifacts(runnerVersion, runnerSHA256 string, tools []string) ([]bakeAr
 		},
 		{Name: "mingit.zip", Version: minGitVersion, URL: minGitURL, Algorithm: "SHA256", Digest: minGitSHA256},
 	}
-	for _, tool := range normalizeTools(tools) {
+	for _, tool := range plan.Kinds {
 		switch tool {
 		case "node":
 			artifacts = append(artifacts, bakeArtifact{
@@ -140,12 +296,9 @@ func bakeArtifacts(runnerVersion, runnerSHA256 string, tools []string) ([]bakeAr
 				Name: "go.zip", Version: bakeGoVersion, URL: bakeGoURL(), Algorithm: "SHA256", Digest: bakeGoSHA256,
 			})
 		case "dotnet":
-			artifacts = append(artifacts, bakeDotNetArtifacts()...)
+			artifacts = append(artifacts, bakeDotNetArtifacts(plan.DotNet)...)
 		case "buildtools":
-			artifacts = append(artifacts,
-				bakeArtifact{Name: "vs_buildtools.exe", Version: bakeVSVersion, URL: bakeVSURL, Algorithm: "SHA256", Digest: bakeVSSHA256},
-				bakeArtifact{Name: "vs.channel", Version: bakeVSVersion, URL: bakeVSChannelURL, Algorithm: "SHA256", Digest: bakeVSChannelSHA256},
-			)
+			artifacts = append(artifacts, bakeBuildToolsArtifacts(plan.BuildTools)...)
 		}
 	}
 	return artifacts, nil
@@ -171,11 +324,15 @@ func ToolsHash(o BakeOptions) (string, error) {
 			return "", fmt.Errorf("Windows ISO SHA256 mismatch: got %s, want %s", isoDigest, o.WindowsISOSHA256)
 		}
 	}
-	artifacts, err := bakeArtifacts(o.RunnerVersion, o.RunnerSHA256, o.Tools)
+	plan, err := resolveToolPlan(o.Tools)
 	if err != nil {
 		return "", err
 	}
-	return toolsHashResolved(o.Tools, isoDigest, artifacts), nil
+	artifacts, err := bakeArtifactsForPlan(o.RunnerVersion, o.RunnerSHA256, plan)
+	if err != nil {
+		return "", err
+	}
+	return toolsHashResolved(plan.Canonical, isoDigest, artifacts), nil
 }
 
 func toolsHashResolved(tools []string, isoDigest string, artifacts []bakeArtifact) string {
@@ -271,7 +428,7 @@ type BakeOptions struct {
 	Accel            string // "" = auto
 	RunnerVersion    string
 	RunnerSHA256     string   // required when RunnerVersion is not DefaultRunnerVersion
-	Tools            []string // toolchains baked into the golden: dotnet | node | go | buildtools
+	Tools            []string // golden selectors: dotnet[:major] | node | go | buildtools[:line]
 	AdminPassword    string
 	EvalDays         int  // 180 (server) / 90 (client)
 	MaxRearms        int  // ~5
@@ -312,7 +469,7 @@ func (o *BakeOptions) defaults() {
 		// Toolchains add large in-guest downloads/installs over the slow SLIRP
 		// network; VS Build Tools especially. Give the install more headroom.
 		for _, t := range normalizeTools(o.Tools) {
-			switch t {
+			switch strings.SplitN(t, ":", 2)[0] {
 			case "buildtools":
 				o.Timeout = 120 * time.Minute
 			case "dotnet", "node", "go":
@@ -359,6 +516,10 @@ func copyFile(dst, src string) error {
 // AutounattendFiles returns the answer file + provisioning scripts with bake
 // substitutions applied (for the autounattend ISO).
 func AutounattendFiles(runnerVersion, runnerSHA256, adminPassword string, tools []string) (map[string]string, error) {
+	plan, err := resolveToolPlan(tools)
+	if err != nil {
+		return nil, err
+	}
 	read := func(name string) (string, error) {
 		b, err := templatesFS.ReadFile("templates/" + name)
 		return string(b), err
@@ -389,17 +550,14 @@ func AutounattendFiles(runnerVersion, runnerSHA256, adminPassword string, tools 
 		runnerSHA256 = DefaultRunnerSHA256
 	}
 	install = strings.ReplaceAll(install, "__RUNNER_SHA256__", runnerSHA256)
-	install = strings.ReplaceAll(install, "__TOOLS__", strings.Join(normalizeTools(tools), ","))
+	install = strings.ReplaceAll(install, "__TOOLS__", strings.Join(plan.Kinds, ","))
 	install = strings.ReplaceAll(install, "__NODE_URL__", bakeNodeURL())
 	install = strings.ReplaceAll(install, "__NODE_SHA256__", bakeNodeSHA256)
 	install = strings.ReplaceAll(install, "__GO_URL__", bakeGoURL())
 	install = strings.ReplaceAll(install, "__GO_SHA256__", bakeGoSHA256)
 	install = strings.ReplaceAll(install, "__MINGIT_SHA256__", minGitSHA256)
-	install = strings.ReplaceAll(install, "__DOTNET_INSTALLS__", bakeDotNetInstallScript())
-	install = strings.ReplaceAll(install, "__VS_URL__", bakeVSURL)
-	install = strings.ReplaceAll(install, "__VS_SHA256__", bakeVSSHA256)
-	install = strings.ReplaceAll(install, "__VS_CHANNEL_URL__", bakeVSChannelURL)
-	install = strings.ReplaceAll(install, "__VS_CHANNEL_SHA256__", bakeVSChannelSHA256)
+	install = strings.ReplaceAll(install, "__DOTNET_INSTALLS__", bakeDotNetInstallScript(plan.DotNet))
+	install = strings.ReplaceAll(install, "__BUILDTOOLS_INSTALLS__", bakeBuildToolsInstallScript(plan.BuildTools))
 	return map[string]string{
 		"autounattend.xml":   unattend,
 		"setupcomplete.cmd":  setupComplete,

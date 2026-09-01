@@ -187,11 +187,15 @@ The default `minimal` image is just the runner + git. For common toolchains, set
 | `dotnet`       | both    | + .NET SDK (**Node included** for ASP.NET SPA builds)          |
 | `rust`         | linux   | + rustup stable + musl target (**Node included** for napi-rs)  |
 | `go`           | linux   | + Go toolchain                                                 |
-| `buildtools`   | windows | + VS 2022 Build Tools (MSVC v143, Windows SDK, CMake, MSBuild) |
+| `buildtools`   | windows | + default/current VS Build Tools line (currently 18)          |
+| `buildtools:17` | windows | + Visual Studio 2022 Build Tools 17                           |
+| `buildtools:18` | windows | + Visual Studio 2026 Build Tools 18                           |
 
 Flavor layering differs by OS. Linux uses `dotnet`/`rust` ⊃ `node` ⊃
 `native-build` and `go` ⊃ `native-build`. Windows uses `dotnet` ⊃ `node`, while
-`buildtools` is a separate branch. The SDK channels assigned to Linux, Windows
+`buildtools` is a separate branch. Each Build Tools major is a separate image;
+the unqualified flavor aliases the `default_line` in `images/versions.json`.
+The SDK channels assigned to Linux, Windows
 containers, and QEMU are declared in `images/versions.json`; Windows SDK
 archives include the WindowsDesktop packs. Windows jobs needing Node/.NET plus
 native MSVC tooling therefore need a custom image derived from `buildtools`, or a
@@ -299,6 +303,8 @@ hardware virtualization, especially while baking the golden image.
 multirunner bake --iso WinServer2022Eval.iso --golden /var/lib/multirunner/golden.qcow2
 # bake toolchains into the golden (the VM equivalent of container flavors):
 multirunner bake --iso WinServer2022Eval.iso --golden golden.qcow2 --tools dotnet,node,buildtools
+# exact, combinable selectors are also supported:
+multirunner bake --iso WinServer2022Eval.iso --golden golden.qcow2 --tools dotnet:10,buildtools:17,buildtools:18
 # optionally reject an ISO that does not match the licensed media you selected:
 multirunner bake --iso WinServer2022.iso --iso-sha256 <sha256> --golden golden.qcow2
 ```
@@ -306,7 +312,9 @@ multirunner bake --iso WinServer2022.iso --iso-sha256 <sha256> --golden golden.q
 The QEMU backend boots the baked golden image and **ignores `image`/`image_tier`**
 (those only apply to container backends — multirunner warns if you set them on a
 qemu pool). To give a VM runner toolchains, bake them in with `--tools`
-(`dotnet`, `node`, `go`, `buildtools` = VS 2022 Build Tools). List the same tools
+(`dotnet` = every stable supported SDK channel; `dotnet:8`, `dotnet:9`, and
+`dotnet:10` select exact majors; `buildtools` selects the manifest default;
+`buildtools:17` and `buildtools:18` are exact and may be combined). List the same tools
 under `qemu.tools` so an auto-rebuild reuses them; changing the set re-bakes.
 Built-in bakes pin and verify the runner, MinGit, Node, Go, .NET SDKs, and Visual
 Studio Build Tools. The Windows ISO content and every selected payload identity
@@ -330,7 +338,7 @@ pools:
       accel: ""            # auto: x64 kvm/whpx/hvf; ARM uses x86 TCG emulation
       bake_iso: /var/lib/multirunner/WinServer2022.iso
       bake_iso_sha256: "<sha256>"   # optional expected digest; ISO is always fingerprinted
-      tools: [dotnet, node, buildtools]   # bake these into the golden on rebuild
+      tools: [dotnet, node, "buildtools:17", "buildtools:18"]
 ```
 
 Highlights:
