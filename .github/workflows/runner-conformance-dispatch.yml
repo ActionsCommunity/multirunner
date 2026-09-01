@@ -1,0 +1,43 @@
+# Install this small dispatcher in every repository listed by
+# MR_CONFORMANCE_TARGETS. External repositories should replace the local `uses`
+# path with:
+# ActionsCommunity/multirunner/.github/workflows/runner-conformance-target.yml@main
+name: runner-conformance-dispatch
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        required: true
+        type: choice
+        options: [linux, windows]
+      runner_label:
+        required: true
+        type: string
+      runner_prefix:
+        required: true
+        type: string
+      fixture_repository:
+        required: true
+        type: string
+      fixture_ref:
+        required: true
+        type: string
+      cache_namespace:
+        required: true
+        type: choice
+        options: [enabled, disabled]
+
+permissions:
+  contents: read
+
+jobs:
+  conformance:
+    uses: ./.github/workflows/runner-conformance-target.yml
+    with:
+      platform: ${{ inputs.platform }}
+      runner_label: ${{ inputs.runner_label }}
+      runner_prefix: ${{ inputs.runner_prefix }}
+      fixture_repository: ${{ inputs.fixture_repository }}
+      fixture_ref: ${{ inputs.fixture_ref }}
+      cache_namespace: ${{ inputs.cache_namespace }}

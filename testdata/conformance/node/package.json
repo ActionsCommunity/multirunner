@@ -1,0 +1,10 @@
+{
+  "name": "multirunner-node-conformance",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.25.0",
+  "scripts": {
+    "test": "node --test"
+  }
+}
