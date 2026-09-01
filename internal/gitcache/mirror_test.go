@@ -514,3 +514,52 @@ func commitCount(t *testing.T, mirrorPath string) int {
 	}
 	return n
 }
+
+func TestAuditFileConfigFlagsRewritesAndAuthorizationHeaders(t *testing.T) {
+	global := filepath.Join(t.TempDir(), "gitconfig")
+	config := "[url \"https://mirror.example/\"]\n\tinsteadOf = https://github.com/\n" +
+		"[url \"https://other.example/\"]\n\tinsteadOf = https://gitlab.com/\n" +
+		"[url \"https://spaced.example/a b/\"]\n\tinsteadOf = https://github.com/org/\n" +
+		"[url \"https://push.example/\"]\n\tpushInsteadOf = https://github.com/\n" +
+		"[http]\n\textraHeader = Authorization: bearer stored\n" +
+		"[http \"https://github.com/\"]\n\textraHeader = X-Trace: 1\n"
+	if err := os.WriteFile(global, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", global)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+
+	warnings, err := AuditFileConfig(context.Background(), "https://github.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warnings) != 3 {
+		t.Fatalf("warnings = %q, want the two GitHub rewrites and the Authorization header only", warnings)
+	}
+	if !strings.Contains(warnings[0], "rewrites https://github.com/ (url.https://mirror.example/.insteadof)") {
+		t.Errorf("warnings[0] = %q, want the GitHub URL rewrite", warnings[0])
+	}
+	if !strings.Contains(warnings[1], "(url.https://spaced.example/a b/.insteadof)") {
+		t.Errorf("warnings[1] = %q, want the rewrite whose subsection contains a space", warnings[1])
+	}
+	if !strings.Contains(warnings[2], "Authorization header (http.extraheader)") {
+		t.Errorf("warnings[2] = %q, want the stored Authorization header", warnings[2])
+	}
+}
+
+func TestAuditFileConfigQuietOnCleanConfig(t *testing.T) {
+	global := filepath.Join(t.TempDir(), "gitconfig")
+	if err := os.WriteFile(global, []byte("[core]\n\tautocrlf = false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", global)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+
+	warnings, err := AuditFileConfig(context.Background(), "https://github.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warnings) != 0 {
+		t.Errorf("warnings = %q, want none", warnings)
+	}
+}

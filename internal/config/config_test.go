@@ -297,6 +297,11 @@ func TestValidateRejectsUnbuildableImageTier(t *testing.T) {
 	}{
 		"published windows line on a linux pool": {"linux", "buildtools:17"},
 		"unknown build tools line":               {"windows", "buildtools:19"},
+		"uppercase local tier":                   {"linux", "Node"},
+		"whitespace in local tier":               {"linux", "my tier"},
+		"plus sign in local tier":                {"linux", "a+b"},
+		"leading separator in local tier":        {"linux", "-node"},
+		"overlong local tier":                    {"linux", strings.Repeat("a", 65)},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {

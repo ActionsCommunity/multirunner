@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -260,12 +261,20 @@ func (p Pool) ImageRef() string {
 	return "multirunner/runner-" + p.OS + "-" + tier + ":dev"
 }
 
+// localImageTierPattern is Docker's grammar for one repository path component,
+// which is where an unpublished tier ends up in the local :dev reference.
+var localImageTierPattern = regexp.MustCompile(`^[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*$`)
+
+// maxLocalImageTierLength keeps the generated local reference well inside
+// Docker's 255-character limit for the full repository name.
+const maxLocalImageTierLength = 64
+
 // validateImageTier rejects a tier that has no published flavor for the pool's
-// OS and cannot be expressed as a local :dev build either, because it carries a
-// character a Docker tag may not contain. Left unchecked those tiers only fail
-// at launch time, as an "invalid reference format" from the daemon that names no
-// pool and wastes a JIT runner registration. An unknown tier without such a
-// character keeps falling back to a local build — a supported dev workflow.
+// OS and cannot be expressed as a local :dev build either, because it does not
+// form a valid Docker repository component. Left unchecked those tiers only
+// fail at launch time, as an "invalid reference format" from the daemon that
+// names no pool and wastes a JIT runner registration. An unknown tier that is
+// valid keeps falling back to a local build — a supported dev workflow.
 func (p Pool) validateImageTier() error {
 	if p.Image != "" || p.Backend == "qemu" {
 		return nil
@@ -274,12 +283,12 @@ func (p Pool) validateImageTier() error {
 	if tier == "" || tier == "minimal" || publishedFlavors[p.OS][tier] != "" {
 		return nil
 	}
-	if !strings.ContainsAny(tier, ":/@") {
+	if len(tier) <= maxLocalImageTierLength && localImageTierPattern.MatchString(tier) {
 		return nil
 	}
 	return fmt.Errorf("pools[%q].image_tier %q is not published for os=%s and cannot be built locally "+
-		"(a tier used as an image tag may not contain ':', '/' or '@'); valid tiers: %s",
-		p.Name, tier, p.OS, strings.Join(validImageTiers(p.OS), ", "))
+		"(a local tier must be lowercase letters and digits separated by '.', '_' or '-', at most %d characters); valid tiers: %s",
+		p.Name, tier, p.OS, maxLocalImageTierLength, strings.Join(validImageTiers(p.OS), ", "))
 }
 
 // ToolCachePath is the hostedtoolcache directory for the pool's OS.

@@ -8,12 +8,14 @@ package gitcache
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -349,6 +351,61 @@ func stripIndexedGitConfig(env []string) []string {
 		out = append(out, item)
 	}
 	return out
+}
+
+// AuditFileConfig reports git configuration read from files (system and global
+// config, including GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM overrides) that would
+// affect authenticated mirror operations. The subprocess environment is
+// filtered, but file config is the operator's own machine state and still
+// applies to every git call, so a rewrite of the GitHub base URL or a stored
+// Authorization header there deserves a warning before jobs depend on the
+// cache. Each returned string is one human-readable warning.
+func AuditFileConfig(ctx context.Context, baseURL string) ([]string, error) {
+	cmd := exec.CommandContext(ctx, "git", "config", "-z", "--show-origin", "--get-regexp",
+		`^(url\..*\.insteadof|http\.(.*\.)?extraheader)$`)
+	// Run outside any repository so only file-based config is inspected, with
+	// the same environment channels stripped that mirror subprocesses drop.
+	// GIT_DIR would point the audit at some unrelated repository's config.
+	cmd.Dir = os.TempDir()
+	env := stripIndexedGitConfig(append(os.Environ(), "GIT_TERMINAL_PROMPT=0"))
+	cmd.Env = slices.DeleteFunc(env, func(kv string) bool {
+		key, _, _ := strings.Cut(kv, "=")
+		key = strings.ToUpper(key)
+		return key == "GIT_DIR" || key == "GIT_WORK_TREE"
+	})
+	out, err := cmd.Output()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			return nil, nil // no matching keys
+		}
+		return nil, fmt.Errorf("git config: %w", err)
+	}
+
+	base := strings.TrimRight(baseURL, "/") + "/"
+	var warnings []string
+	// With -z each match is emitted as "origin\0key\nvalue\0", so subsections
+	// containing spaces and values containing newlines survive intact.
+	fields := strings.Split(strings.TrimSuffix(string(out), "\x00"), "\x00")
+	for i := 0; i+1 < len(fields); i += 2 {
+		origin := fields[i]
+		key, value, _ := strings.Cut(fields[i+1], "\n")
+		lowerKey := strings.ToLower(key)
+		switch {
+		case strings.HasPrefix(lowerKey, "url."):
+			replaced := strings.TrimRight(value, "/") + "/"
+			if strings.HasPrefix(base, replaced) || strings.HasPrefix(replaced, base) {
+				warnings = append(warnings, fmt.Sprintf(
+					"%s rewrites %s (%s); mirror fetches for %s would be redirected", origin, value, key, baseURL))
+			}
+		case strings.HasPrefix(lowerKey, "http."):
+			if strings.HasPrefix(strings.ToLower(strings.TrimSpace(value)), "authorization:") {
+				warnings = append(warnings, fmt.Sprintf(
+					"%s sets an Authorization header (%s) that git sends alongside multirunner's own token for matching URLs", origin, key))
+			}
+		}
+	}
+	return warnings, nil
 }
 
 func mirrorExists(path string) bool {

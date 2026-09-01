@@ -1,6 +1,10 @@
 package main
 
 import (
+	"crypto/sha512"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -110,6 +114,71 @@ func TestDiscoverNodeLTS(t *testing.T) {
 	}
 	if _, ok := node.Releases["28"]; ok {
 		t.Fatal("future LTS major was added")
+	}
+}
+
+func TestIntegritySHA512Hex(t *testing.T) {
+	sum := sha512.Sum512([]byte("corepack tarball"))
+	integrity := "sha512-" + base64.StdEncoding.EncodeToString(sum[:])
+	got, err := integritySHA512Hex(integrity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := hex.EncodeToString(sum[:]); got != want {
+		t.Fatalf("hex = %q, want %q", got, want)
+	}
+	if err := validHex(got, 128); err != nil {
+		t.Fatalf("converted digest is not a manifest digest: %v", err)
+	}
+	for name, value := range map[string]string{
+		"sha1 algorithm":  "sha1-" + base64.StdEncoding.EncodeToString(sum[:]),
+		"no algorithm":    base64.StdEncoding.EncodeToString(sum[:]),
+		"not base64":      "sha512-not base64!",
+		"truncated hash":  "sha512-" + base64.StdEncoding.EncodeToString(sum[:32]),
+		"empty integrity": "",
+	} {
+		if _, err := integritySHA512Hex(value); err == nil {
+			t.Errorf("%s unexpectedly accepted", name)
+		}
+	}
+}
+
+func TestNpmPackageVersionCorepack(t *testing.T) {
+	sum := sha512.Sum512([]byte("corepack tarball"))
+	fixture := `{
+	  "name": "corepack",
+	  "version": "0.36.0",
+	  "bin": {"corepack": "dist/corepack.js"},
+	  "dist": {
+	    "shasum": "04e62edc9b34b932cc09124d0181ae5c922fbce8",
+	    "tarball": "https://registry.npmjs.org/corepack/-/corepack-0.36.0.tgz",
+	    "integrity": "sha512-` + base64.StdEncoding.EncodeToString(sum[:]) + `"
+	  }
+	}`
+	var latest npmPackageVersion
+	if err := json.Unmarshal([]byte(fixture), &latest); err != nil {
+		t.Fatal(err)
+	}
+	got, err := latest.corepack()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := imageversions.Corepack{
+		Version: "0.36.0",
+		URL:     "https://registry.npmjs.org/corepack/-/corepack-0.36.0.tgz",
+		SHA512:  hex.EncodeToString(sum[:]),
+	}
+	if got != want {
+		t.Fatalf("corepack = %#v, want %#v", got, want)
+	}
+
+	var empty npmPackageVersion
+	if _, err := empty.corepack(); err == nil {
+		t.Error("registry metadata without a version or tarball unexpectedly accepted")
+	}
+	latest.Dist.Integrity = "sha1-" + base64.StdEncoding.EncodeToString(sum[:20])
+	if _, err := latest.corepack(); err == nil {
+		t.Error("non-sha512 integrity unexpectedly accepted")
 	}
 }
 

@@ -58,14 +58,14 @@ func RunOnce(ctx context.Context, gh *github.Client, be backend.Backend, spec Sp
 		launchErr := fmt.Errorf("launch: %w", err)
 		if handle != nil {
 			// A non-nil handle means Launch could not prove the instance is absent,
-			// so terminate it before reclaiming the registration.
+			// so terminate it before reclaiming the registration. If even that
+			// fails the runner may be alive and already on a job, so GitHub
+			// decides, exactly as after a wait failure.
 			if killErr := terminate(ctx, handle); killErr != nil {
-				launchErr = errors.Join(launchErr, fmt.Errorf("kill runner: %w", killErr))
+				reclaimAfterFailedKill(ctx, gh, jit.Runner.ID, spec.Name, logger)
+				return -1, errors.Join(launchErr, fmt.Errorf("kill runner: %w", killErr))
 			}
 		}
-		// Deregister even when termination failed: nothing retries this cleanup and
-		// the caller launches under a fresh runner name, so a kept registration
-		// would leak on GitHub forever.
 		deregister(ctx, gh, jit.Runner.ID, spec.Name, logger)
 		return -1, launchErr
 	}

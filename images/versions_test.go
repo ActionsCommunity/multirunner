@@ -17,6 +17,12 @@ func TestEmbeddedManifest(t *testing.T) {
 	if !ok || defaultNode.Version == "" {
 		t.Fatal("default Node release is unresolved")
 	}
+	if m.Node.Corepack.Version == "" || m.Node.Corepack.URL == "" || len(m.Node.Corepack.SHA512) != 128 {
+		t.Fatalf("Corepack is unpinned: %#v", m.Node.Corepack)
+	}
+	if !strings.Contains(m.Node.Corepack.URL, m.Node.Corepack.Version) {
+		t.Errorf("Corepack URL %q does not carry version %q", m.Node.Corepack.URL, m.Node.Corepack.Version)
+	}
 	if len(m.DotNet.ChannelsForTarget(DotNetTargetQEMUWindows)) == 0 {
 		t.Fatal("no .NET channel targets QEMU")
 	}
@@ -55,6 +61,25 @@ func TestReadForUpdateAllowsNewUnresolvedEntries(t *testing.T) {
 	}
 	if _, err := Read(path); err == nil {
 		t.Fatal("strict read accepted unresolved entries")
+	}
+}
+
+func TestValidateRequiresPinnedCorepack(t *testing.T) {
+	for name, mutate := range map[string]func(*Corepack){
+		"missing version": func(c *Corepack) { c.Version = "" },
+		"missing url":     func(c *Corepack) { c.URL = "" },
+		"missing sha512":  func(c *Corepack) { c.SHA512 = "" },
+		"sha256 digest":   func(c *Corepack) { c.SHA512 = strings.Repeat("a", 64) },
+		"non-hex sha512":  func(c *Corepack) { c.SHA512 = strings.Repeat("z", 128) },
+	} {
+		m := MustEmbedded()
+		mutate(&m.Node.Corepack)
+		if err := m.Validate(); err == nil {
+			t.Errorf("%s: unpinned Corepack unexpectedly accepted", name)
+		}
+		if err := m.ValidatePolicy(); err != nil {
+			t.Errorf("%s: policy validation must ignore unresolved Corepack fields: %v", name, err)
+		}
 	}
 }
 

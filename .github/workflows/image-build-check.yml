@@ -62,7 +62,7 @@ jobs:
             exit 0
           fi
           while IFS= read -r entry; do
-            echo "::error title=End-of-life runtime declared::$entry. Remove it from images/versions.json, or retain it explicitly by extending the declared eol date."
+            echo "::error title=End-of-life runtime declared::$entry. Remove it from images/versions.json (drop the Node major, moving default_major first if needed, or drop the .NET channel). The updater rewrites eol dates from vendor metadata, so extending the date does not retain it."
           done <<< "$expired"
           exit 1
 
@@ -116,14 +116,17 @@ jobs:
             printf "int main(void){return 0;}\n" > probe.c
             autoreconf -fi && ./configure && make
           '
-          docker run --rm --entrypoint bash $B:node          -lc '
+          # The default major may still bundle its own Corepack, so a silent
+          # install failure only shows if the version is the pinned one.
+          COREPACK_VERSION="$(node -p "require('./images/versions.json').node.corepack.version")"
+          docker run --rm --entrypoint bash -e COREPACK_VERSION="$COREPACK_VERSION" $B:node -lc '
             set -eu
             cache_dir=$(dirname "$(dirname "$(readlink -f "$(command -v node)")")")
             test -x "$cache_dir/bin/node"
             test -f "$cache_dir.complete"
             test "$(stat -c %U "$cache_dir")" = runner
             "$cache_dir/bin/node" --version
-            corepack --version
+            test "$(corepack --version)" = "$COREPACK_VERSION"
           '
           docker run --rm --entrypoint bash $B:dotnet        -lc 'dotnet --list-sdks && node --version'
           docker run --rm --entrypoint bash $B:rust          -lc 'rustc --version && cargo --version'
@@ -217,6 +220,10 @@ jobs:
           # container, which is what jobs calling node/dotnet directly rely on.
           docker run --rm --entrypoint cmd $B:node   /c "where node && where npm && node --version"
           docker run --rm --entrypoint cmd $B:dotnet /c "where dotnet && dotnet --list-sdks && node --version"
+          # The default major may still bundle its own Corepack, so a silent
+          # install failure only shows if the version is the pinned one.
+          COREPACK_VERSION="$(node -p "require('./images/versions.json').node.corepack.version")"
+          test "$(docker run --rm --entrypoint cmd $B:node /c "corepack --version" | tr -d '\r')" = "$COREPACK_VERSION"
           NODE_VERSIONS="$(node -e "const v=require('./images/versions.json'); console.log(Object.values(v.node.releases).map(r => r.version).join(' '))")"
           # One assertion per cmd invocation: cmd folds an `&&` chain after
           # `if not exist X exit 1` into the IF body, so chained checks never

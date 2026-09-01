@@ -6,6 +6,11 @@
 # every job. images/versions.json is the source of truth for versions,
 # the default, and vendor digests; other versions still download.
 #
+# Corepack is installed from its own pinned npm tarball: Node stopped
+# distributing it in the release archive from Node 25 onwards. npm is launched
+# through a `/usr/bin/env node` shebang, so that install prepends the cached
+# Node bin directory to PATH — the /usr/local/bin symlinks do not exist yet.
+#
 #   docker build -f images/linux/flavors/node.Dockerfile \
 #     --build-arg PARENT=multirunner/runner-linux-native-build:dev -t multirunner/runner-linux-node:dev .
 ARG PARENT=gerardsmit/multirunner-runner-linux:native-build
@@ -50,6 +55,12 @@ RUN apt-get update -y && apt-get install -y --no-install-recommends ca-certifica
          || { echo "Node ${ver} install failed"; exit 1; }; \
        done \
     && dir="/opt/hostedtoolcache/node/${default_version}/${node_arch}" \
+    && corepack_url="$(jq -er '.node.corepack.url' /tmp/image-versions.json)" \
+    && corepack_sha512="$(jq -er '.node.corepack.sha512' /tmp/image-versions.json)" \
+    && curl -fsSL -o /tmp/corepack.tgz "$corepack_url" \
+    && echo "${corepack_sha512}  /tmp/corepack.tgz" | sha512sum --check - \
+    && PATH="$dir/bin:$PATH" "$dir/bin/npm" install -g --no-audit --no-fund --no-update-notifier --cache /tmp/npm-cache /tmp/corepack.tgz \
+    && rm -rf /tmp/corepack.tgz /tmp/npm-cache \
     && ln -sf "$dir/bin/node" /usr/local/bin/node \
     && ln -sf "$dir/bin/npm" /usr/local/bin/npm \
     && ln -sf "$dir/bin/npx" /usr/local/bin/npx \

@@ -92,8 +92,25 @@ func bakeNodeArtifactName(major string) string {
 	return "node-" + major + ".zip"
 }
 
+// bakeCorepackArtifact pins Corepack separately from the Node archives: Node
+// stopped distributing it from Node 25 onwards, so the golden installs the
+// manifest tarball with npm instead of relying on the archive's copy.
+func bakeCorepackArtifact() bakeArtifact {
+	corepack := imageVersionManifest.Node.Corepack
+	return bakeArtifact{
+		Name:      "corepack.tgz",
+		Version:   corepack.Version,
+		URL:       corepack.URL,
+		Algorithm: "SHA512",
+		Digest:    corepack.SHA512,
+	}
+}
+
 func bakeNodeArtifacts(majors []string) []bakeArtifact {
-	artifacts := make([]bakeArtifact, 0, len(majors))
+	if len(majors) == 0 {
+		return nil
+	}
+	artifacts := make([]bakeArtifact, 0, len(majors)+1)
 	for _, major := range majors {
 		release := imageVersionManifest.Node.Releases[major]
 		artifacts = append(artifacts, bakeArtifact{
@@ -104,7 +121,7 @@ func bakeNodeArtifacts(majors []string) []bakeArtifact {
 			Digest:    release.WindowsX64SHA256,
 		})
 	}
-	return artifacts
+	return append(artifacts, bakeCorepackArtifact())
 }
 
 func bakeNodeInstallScript(majors []string) string {
@@ -135,13 +152,20 @@ func bakeNodeInstallScript(majors []string) string {
 	if selected != "" {
 		release := imageVersionManifest.Node.Releases[selected]
 		dest := `C:\hostedtoolcache\windows\node\` + release.Version + `\x64`
+		corepack := bakeCorepackArtifact()
 		_, _ = fmt.Fprintf(&script,
 			"                [Environment]::SetEnvironmentVariable('AGENT_TOOLSDIRECTORY', 'C:\\hostedtoolcache\\windows', 'Machine')\n"+
 				"                [Environment]::SetEnvironmentVariable('RUNNER_TOOL_CACHE', 'C:\\hostedtoolcache\\windows', 'Machine')\n"+
 				"                Add-MachinePath '%s'\n"+
 				"                Add-MachinePath '%s\\node_modules\\npm\\bin'\n"+
+				"                FetchOrStage '%s' '%s' C:\\%s SHA512 '%s'\n"+
+				"                & '%s\\npm.cmd' install -g --no-audit --no-fund --no-update-notifier C:\\%s\n"+
+				"                if ($LASTEXITCODE -ne 0) { throw 'Corepack install failed' }\n"+
+				"                Remove-Item C:\\%s\n"+
 				"                & '%s\\corepack.cmd' enable --install-directory '%s' 2>$null\n",
-			dest, dest, dest, dest)
+			dest, dest,
+			corepack.Name, corepack.URL, corepack.Name, corepack.Digest,
+			dest, corepack.Name, corepack.Name, dest, dest)
 	}
 	return strings.TrimSuffix(script.String(), "\n")
 }

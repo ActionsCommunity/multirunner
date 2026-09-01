@@ -6,6 +6,9 @@
 # so `actions/setup-node` resolves it from cache rather than downloading a copy
 # on every job.
 #
+# Corepack is installed from its own pinned npm tarball: Node stopped
+# distributing it in the release archive from Node 25 onwards.
+#
 # Build on a Windows-container daemon matching the host (ltsc2025):
 #   docker --host npipe:////./pipe/docker_engine_windows build \
 #     -f images/windows/flavors/node.Dockerfile \
@@ -49,6 +52,12 @@ RUN $manifest = Get-Content C:/image-versions.json -Raw | ConvertFrom-Json; \
     $defaultDest = 'C:\hostedtoolcache\windows\node\' + $defaultRelease.version + '\x64'; \
     $p = [Environment]::GetEnvironmentVariable('PATH','Machine'); \
     [Environment]::SetEnvironmentVariable('PATH', $defaultDest + ';' + $defaultDest + '\node_modules\npm\bin;' + $p, 'Machine'); \
+    $corepackTgz = 'C:/corepack.tgz'; \
+    Invoke-WebRequest -Uri $manifest.node.corepack.url -OutFile $corepackTgz; \
+    if ((Get-FileHash $corepackTgz -Algorithm SHA512).Hash -ne $manifest.node.corepack.sha512) { throw 'Corepack tarball checksum mismatch' }; \
+    & ($defaultDest + '\npm.cmd') install -g --no-audit --no-fund --no-update-notifier --cache C:/npm-cache $corepackTgz; \
+    if ($LASTEXITCODE -ne 0) { throw 'Corepack install failed' }; \
+    Remove-Item -Recurse -Force $corepackTgz, C:/npm-cache; \
     & ($defaultDest + '\corepack.cmd') enable --install-directory $defaultDest; \
     & ($defaultDest + '\node.exe') --version; \
     Remove-Item -Force C:/image-versions.json

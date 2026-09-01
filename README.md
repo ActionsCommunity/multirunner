@@ -198,6 +198,8 @@ the unqualified flavor aliases the `default_line` in `images/versions.json`.
 The Node flavor caches every declared LTS major on both operating
 systems; the manifest `default_major` is exposed on `PATH`, and
 `actions/setup-node` selects another cached major without downloading it.
+Corepack is pinned as its own entry in `images/versions.json` and installed from
+the npm registry tarball, because Node no longer bundles it from Node 25 onwards.
 The SDK channels assigned to Linux, Windows
 containers, and QEMU are declared in `images/versions.json`; Windows SDK
 archives include the WindowsDesktop packs. Windows jobs needing Node/.NET plus

@@ -398,6 +398,26 @@ func TestVersionedGoldenToolSelectors(t *testing.T) {
 			}
 		}
 	}
+	corepack := bakeCorepackArtifact()
+	for _, want := range []string{
+		corepack.Name, corepack.URL, corepack.Digest,
+		`npm.cmd' install -g --no-audit --no-fund --no-update-notifier C:\corepack.tgz`,
+		`if ($LASTEXITCODE -ne 0) { throw 'Corepack install failed' }`,
+		`corepack.cmd' enable`,
+	} {
+		if !strings.Contains(nodeScript, want) {
+			t.Errorf("generated Node script missing %q", want)
+		}
+	}
+	nodeArtifacts := bakeNodeArtifacts(plan.Node)
+	if len(nodeArtifacts) != len(plan.Node)+1 {
+		t.Fatalf("Node artifacts = %d, want one per major plus Corepack", len(nodeArtifacts))
+	}
+	staged := nodeArtifacts[len(nodeArtifacts)-1]
+	if staged.Name != "corepack.tgz" || staged.Algorithm != "SHA512" || staged.Version == "" ||
+		staged.URL != imageVersionManifest.Node.Corepack.URL || staged.Digest != imageVersionManifest.Node.Corepack.SHA512 {
+		t.Errorf("Corepack artifact = %#v", staged)
+	}
 	exactNode, err := resolveToolPlan([]string{"node:24"})
 	if err != nil {
 		t.Fatal(err)

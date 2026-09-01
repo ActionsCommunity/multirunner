@@ -6,6 +6,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/sha512"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -120,6 +122,9 @@ func (u updater) refresh(ctx context.Context, m *imageversions.Manifest) error {
 		return err
 	}
 	if err := u.refreshNode(ctx, m); err != nil {
+		return err
+	}
+	if err := u.refreshCorepack(ctx, m); err != nil {
 		return err
 	}
 	if err := u.refreshDotNet(ctx, m); err != nil {
@@ -272,6 +277,58 @@ func (u updater) refreshNode(ctx context.Context, m *imageversions.Manifest) err
 		return fmt.Errorf("Node default major %d is not supported", m.Node.DefaultMajor)
 	}
 	return nil
+}
+
+// refreshCorepack pins Corepack from the npm registry rather than the Node
+// archive: Node 25 stopped distributing it, so a manifest major that no longer
+// bundles it must still produce images with a working corepack.
+func (u updater) refreshCorepack(ctx context.Context, m *imageversions.Manifest) error {
+	var latest npmPackageVersion
+	if err := u.getJSON(ctx, "https://registry.npmjs.org/corepack/latest", &latest); err != nil {
+		return fmt.Errorf("Corepack release: %w", err)
+	}
+	corepack, err := latest.corepack()
+	if err != nil {
+		return fmt.Errorf("Corepack release: %w", err)
+	}
+	m.Node.Corepack = corepack
+	return nil
+}
+
+type npmPackageVersion struct {
+	Version string `json:"version"`
+	Dist    struct {
+		Tarball   string `json:"tarball"`
+		Integrity string `json:"integrity"`
+	} `json:"dist"`
+}
+
+func (p npmPackageVersion) corepack() (imageversions.Corepack, error) {
+	if p.Version == "" || p.Dist.Tarball == "" {
+		return imageversions.Corepack{}, errors.New("registry metadata has no version or tarball")
+	}
+	sha512Hex, err := integritySHA512Hex(p.Dist.Integrity)
+	if err != nil {
+		return imageversions.Corepack{}, err
+	}
+	return imageversions.Corepack{Version: p.Version, URL: p.Dist.Tarball, SHA512: sha512Hex}, nil
+}
+
+// integritySHA512Hex converts an npm subresource integrity value
+// ("sha512-<base64>") into the lowercase hex every manifest digest uses.
+func integritySHA512Hex(integrity string) (string, error) {
+	encoded, ok := strings.CutPrefix(strings.TrimSpace(integrity), "sha512-")
+	if !ok {
+		return "", fmt.Errorf("unsupported integrity %q", integrity)
+	}
+	raw, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return "", fmt.Errorf("decode integrity %q: %w", integrity, err)
+	}
+	if len(raw) != sha512.Size {
+		return "", fmt.Errorf("integrity %q decodes to %d bytes, want %d", integrity, len(raw), sha512.Size)
+	}
+	return hex.EncodeToString(raw), nil
 }
 
 type nodeLifecycle struct {

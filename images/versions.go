@@ -72,7 +72,16 @@ const NodeTrackSupportedLTS = "supported-lts"
 type Node struct {
 	Track        string                 `json:"track"`
 	DefaultMajor int                    `json:"default_major"`
+	Corepack     Corepack               `json:"corepack"`
 	Releases     map[string]NodeRelease `json:"releases"`
+}
+
+// Corepack is pinned on its own because Node stopped shipping it in the release
+// archive from Node 25 onwards; the images install this tarball instead.
+type Corepack struct {
+	Version string `json:"version"`
+	URL     string `json:"url"`
+	SHA512  string `json:"sha512"`
 }
 
 type NodeRelease struct {
@@ -262,6 +271,12 @@ func (m Manifest) Validate() error {
 				return fmt.Errorf("Node %s %s digest: %w", major, name, err)
 			}
 		}
+	}
+	if m.Node.Corepack.Version == "" || m.Node.Corepack.URL == "" {
+		return fmt.Errorf("Corepack version and URL are required")
+	}
+	if err := digest(m.Node.Corepack.SHA512, "", 128); err != nil {
+		return fmt.Errorf("Corepack digest: %w", err)
 	}
 	for channel, r := range m.DotNet.Channels {
 		if r.Version == "" || r.EOL == "" || r.ReleaseType == "" || r.SupportPhase == "" {

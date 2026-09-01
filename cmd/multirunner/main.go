@@ -22,6 +22,7 @@ import (
 	"github.com/GerardSmit/multirunner/internal/backend"
 	"github.com/GerardSmit/multirunner/internal/cache"
 	"github.com/GerardSmit/multirunner/internal/config"
+	"github.com/GerardSmit/multirunner/internal/gitcache"
 	"github.com/GerardSmit/multirunner/internal/github"
 	"github.com/GerardSmit/multirunner/internal/metrics"
 	"github.com/GerardSmit/multirunner/internal/pool"
@@ -807,6 +808,11 @@ func doctor(configPath string) error {
 	if err := warnStarvedRepos(cfg); err != nil {
 		allOK = false
 	}
+	// The git audit is local and quick; it must not inherit whatever the pool
+	// pings left of the shared budget.
+	auditCtx, cancelAudit := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	warnGitFileConfig(auditCtx, cfg)
+	cancelAudit()
 	// Each remote phase gets a budget of its own. They share nothing with the
 	// pool pings above, and a single hung daemon eating the 20s would otherwise
 	// starve them into reporting "could not check" for every repo, which reads
@@ -926,6 +932,26 @@ func repoTargetsSelfHosted(ctx context.Context, c *github.Client) (bool, error) 
 		}
 	}
 	return false, nil
+}
+
+// warnGitFileConfig surfaces file-based git configuration that would affect the
+// mirror cache's authenticated fetches. Environment-based config is filtered
+// out of mirror subprocesses, but the operator's own global or system config
+// still applies, and a rewrite of the GitHub URL or a stored Authorization
+// header there is almost always unintended for this host. Advisory only: the
+// operator owns those files and may have set them on purpose.
+func warnGitFileConfig(ctx context.Context, cfg *config.Config) {
+	if !cfg.GitCache.Enabled() {
+		return
+	}
+	warnings, err := gitcache.AuditFileConfig(ctx, cfg.GitHub.URL)
+	if err != nil {
+		fmt.Printf("\ncould not inspect git config: %v\n", err)
+		return
+	}
+	for _, warning := range warnings {
+		fmt.Printf("\nWARNING: git config %s\n        mirror fetches inherit file-based git config; review or remove it if unintended\n", warning)
+	}
 }
 
 // warnStarvedRepos flags the one config shape that silently strands work: pool
