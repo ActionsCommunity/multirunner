@@ -211,7 +211,7 @@ jobs:
               --build-arg "BUILDTOOLS_LINE=$line" \
               -t "$IMG:buildtools-$line-$SUFFIX" .
             docker run --rm --entrypoint cmd "$IMG:buildtools-$line-$SUFFIX" /s /c \
-              "call \"C:\BuildTools\Common7\Tools\VsDevCmd.bat\" && where cl && msbuild -version"
+              "call C:\BuildTools\Common7\Tools\VsDevCmd.bat && where cl && msbuild -version"
             docker push "$IMG:buildtools-$line-$SUFFIX"
             docker rmi -f "$IMG:buildtools-$line-$SUFFIX"
             docker builder prune -af
