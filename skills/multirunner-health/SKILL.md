@@ -13,7 +13,11 @@ description: >-
 # Check multirunner health
 
 Follow [safety and approvals](../references/safety-and-approvals.md) and
-[host assessment](../references/host-assessment.md). This skill is strictly read-only.
+[host assessment](../references/host-assessment.md). Use the applicable
+[Windows host](../references/windows-host.md) or [Linux host](../references/linux-host.md)
+checks, plus [runtimes and toolsets](../references/runtimes-and-toolsets.md),
+[caching](../references/caching.md), and [authentication](../references/authentication.md).
+This skill is strictly read-only.
 
 ## Report
 
