@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/actions/scaleset"
+
+	"github.com/GerardSmit/multirunner/internal/buildinfo"
 )
 
 type fakeScaleSetManager struct {
@@ -105,6 +107,25 @@ func TestDesiredScaleSetDefaultsLabelToName(t *testing.T) {
 	got := desiredScaleSet(SessionOptions{Name: "linux"}, 1)
 	if len(got.Labels) != 1 || got.Labels[0].Name != "linux" {
 		t.Fatalf("labels = %+v, want scale set name", got.Labels)
+	}
+}
+
+func TestSystemInfoIncludesBuildIdentity(t *testing.T) {
+	originalVersion, originalCommit := buildinfo.Version, buildinfo.Commit
+	buildinfo.Version, buildinfo.Commit = "v1.2.3", "abc123"
+	t.Cleanup(func() {
+		buildinfo.Version, buildinfo.Commit = originalVersion, originalCommit
+	})
+
+	got := systemInfo(42)
+	if got.System != "multirunner" || got.Subsystem != "multirunner" {
+		t.Errorf("system identity = %q/%q", got.System, got.Subsystem)
+	}
+	if got.Version != "v1.2.3" || got.CommitSHA != "abc123" {
+		t.Errorf("build identity = %q at %q", got.Version, got.CommitSHA)
+	}
+	if got.ScaleSetID != 42 {
+		t.Errorf("scale set ID = %d, want 42", got.ScaleSetID)
 	}
 }
 
