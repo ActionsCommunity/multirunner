@@ -20,6 +20,7 @@ import (
 
 	"github.com/GerardSmit/multirunner/internal/autoscale"
 	"github.com/GerardSmit/multirunner/internal/backend"
+	"github.com/GerardSmit/multirunner/internal/buildinfo"
 	"github.com/GerardSmit/multirunner/internal/cache"
 	"github.com/GerardSmit/multirunner/internal/config"
 	"github.com/GerardSmit/multirunner/internal/gitcache"
@@ -39,8 +40,6 @@ func main() {
 	}
 }
 
-const version = "0.1.0-dev"
-
 // remoteCheckTimeout bounds doctor's GitHub API phase. Sized for the workflow
 // scan, which is the only check that scales with repo count times workflow count
 // rather than repo count alone.
@@ -54,7 +53,7 @@ func rootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:     "multirunner",
 		Short:   "Parallel ephemeral GitHub Actions self-hosted runner pools",
-		Version: version,
+		Version: buildinfo.Current().String(),
 		Long: `multirunner runs many ephemeral GitHub Actions self-hosted runners in
 parallel on one host. Each runner takes a single job, then is torn down and
 re-provisioned with a fresh just-in-time registration. It also bundles a

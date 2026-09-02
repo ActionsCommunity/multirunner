@@ -12,6 +12,7 @@ import (
 	"github.com/actions/scaleset/listener"
 
 	"github.com/GerardSmit/multirunner/internal/backend"
+	"github.com/GerardSmit/multirunner/internal/buildinfo"
 )
 
 // SessionOptions describes one pool's scale set session.
@@ -196,9 +197,12 @@ func scaleSetMatches(existing, desired *scaleset.RunnerScaleSet) bool {
 }
 
 func systemInfo(scaleSetID int) scaleset.SystemInfo {
+	build := buildinfo.Current()
 	return scaleset.SystemInfo{
 		System:     "multirunner",
 		Subsystem:  "multirunner",
+		Version:    build.Version,
+		CommitSHA:  build.Commit,
 		ScaleSetID: scaleSetID,
 	}
 }
