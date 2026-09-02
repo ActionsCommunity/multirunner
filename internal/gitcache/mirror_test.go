@@ -271,6 +271,17 @@ func TestGitEnvIgnoresBogusCount(t *testing.T) {
 func TestGitEnvClampsOversizedInheritedConfig(t *testing.T) {
 	// A huge count must not drive a huge allocation, but the entries that do
 	// exist within the clamp (such as a hardening setting) must survive.
+	t.Setenv("GIT_CONFIG_KEY_1", "credential.interactive")
+	t.Setenv("GIT_CONFIG_VALUE_1", "never")
+	for _, item := range os.Environ() {
+		name, _, _ := strings.Cut(item, "=")
+		upper := strings.ToUpper(name)
+		if strings.HasPrefix(upper, "GIT_CONFIG_KEY_") || strings.HasPrefix(upper, "GIT_CONFIG_VALUE_") {
+			// Neutralize every inherited index before installing the fixture.
+			// Matching case-insensitively also covers Windows environment names.
+			t.Setenv(name, "")
+		}
+	}
 	t.Setenv("GIT_CONFIG_COUNT", "1000000000")
 	t.Setenv("GIT_CONFIG_KEY_0", "safe.bareRepository")
 	t.Setenv("GIT_CONFIG_VALUE_0", "explicit")
