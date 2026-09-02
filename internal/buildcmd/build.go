@@ -23,12 +23,13 @@ var (
 
 // Options controls one multirunner build.
 type Options struct {
-	Directory string
-	Output    string
-	Version   string
-	Commit    string
-	GOOS      string
-	GOARCH    string
+	Directory  string
+	Output     string
+	Version    string
+	Commit     string
+	GOOS       string
+	GOARCH     string
+	AllowDirty bool
 }
 
 type commands struct {
@@ -52,17 +53,20 @@ func build(ctx context.Context, opts Options, command commands) error {
 	}
 
 	commit := strings.TrimSpace(opts.Commit)
-	var err error
-	if commit == "" {
-		directory, commit, err = gitIdentity(ctx, directory, command.output)
-		if err != nil {
-			return err
+	directory, sourceCommit, dirty, inGit, err := gitIdentity(ctx, directory, command.output)
+	if err != nil {
+		return err
+	}
+	if !inGit {
+		if commit == "" {
+			return fmt.Errorf("resolve source checkout: not a Git checkout; provide -commit explicitly")
 		}
-	} else {
 		directory, err = moduleRoot(directory)
 		if err != nil {
 			return err
 		}
+	} else if commit == "" {
+		commit = sourceCommit
 	}
 	if !commitPattern.MatchString(commit) {
 		return fmt.Errorf("commit must be a full 40 or 64 character hexadecimal object ID")
@@ -71,6 +75,11 @@ func build(ctx context.Context, opts Options, command commands) error {
 	version := strings.TrimSpace(opts.Version)
 	if version == "" {
 		version = "dev-" + commit[:12]
+		if dirty {
+			version += "-dirty"
+		}
+	} else if dirty && !opts.AllowDirty {
+		return fmt.Errorf("source checkout is dirty; explicit version %q requires -allow-dirty", version)
 	}
 	if !versionPattern.MatchString(version) {
 		return fmt.Errorf("version %q contains unsupported characters", version)
@@ -105,17 +114,24 @@ func gitIdentity(
 	ctx context.Context,
 	directory string,
 	output func(context.Context, string, string, ...string) ([]byte, error),
-) (string, string, error) {
+) (string, string, bool, bool, error) {
 	root, err := output(ctx, directory, "git", "rev-parse", "--show-toplevel")
 	if err != nil {
-		return "", "", fmt.Errorf("resolve source checkout: %w; provide -commit when building outside Git", err)
+		return directory, "", false, false, nil
 	}
 	directory = strings.TrimSpace(string(root))
 	commit, err := output(ctx, directory, "git", "rev-parse", "HEAD")
 	if err != nil {
-		return "", "", fmt.Errorf("resolve source commit: %w", err)
+		return "", "", false, true, fmt.Errorf("resolve source commit: %w", err)
 	}
-	return directory, strings.TrimSpace(string(commit)), nil
+	// Normal untracked files count as dirty, while files excluded by Git ignore
+	// rules do not appear. This catches new source without treating ignored build
+	// outputs as source changes.
+	status, err := output(ctx, directory, "git", "status", "--porcelain", "--untracked-files=normal")
+	if err != nil {
+		return "", "", false, true, fmt.Errorf("resolve source status: %w", err)
+	}
+	return directory, strings.TrimSpace(string(commit)), len(strings.TrimSpace(string(status))) != 0, true, nil
 }
 
 func moduleRoot(directory string) (string, error) {

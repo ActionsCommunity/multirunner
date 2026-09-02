@@ -566,7 +566,10 @@ The build command records the source commit before compilation and embeds it
 with a development version. Use `-version` and `-commit` to provide an explicit
 release identity. A plain `go build ./cmd/multirunner` remains supported, but
 honestly reports `dev (commit unknown)` because it has no immutable build-time
-provenance.
+provenance. Tracked changes and unignored untracked files add `-dirty` to a
+development version. An explicit version fails on a dirty checkout unless
+`-allow-dirty` is deliberately supplied. Git-ignored build outputs do not mark
+the source dirty.
 
 ## Layout
 
