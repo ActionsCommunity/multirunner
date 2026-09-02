@@ -223,7 +223,7 @@ func TestProgramPersistsSanitizedWorkerFailure(t *testing.T) {
 
 func TestSuperviseServiceWorkerStopsAtCrashLoopBudgetBeforeConfigLoad(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
-	now := time.Now()
+	now := time.Now().Add(-time.Minute)
 	for attempt := 0; attempt < servicehost.CrashLoopFailureCount; attempt++ {
 		if err := servicehost.RecordFailure(configPath, now.Add(time.Duration(attempt)*time.Millisecond), "fatal"); err != nil {
 			t.Fatal(err)

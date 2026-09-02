@@ -42,6 +42,21 @@ func TestRecordFailureResetsAfterWindow(t *testing.T) {
 	}
 }
 
+func TestFailureCountExcludesFutureFailures(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	now := time.Date(2026, time.September, 1, 12, 0, 0, 0, time.UTC)
+	if err := RecordFailure(configPath, now.Add(time.Second), "future failure"); err != nil {
+		t.Fatal(err)
+	}
+	status, err := ReadFailureStatus(configPath, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Count != 0 || !status.LastFailure.IsZero() || status.LastError != "" {
+		t.Fatalf("future failure was included: %+v", status)
+	}
+}
+
 func TestClearFailuresRemovesCrashLoopState(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	if err := RecordFailure(configPath, time.Now(), "failure"); err != nil {
