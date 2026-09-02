@@ -54,6 +54,7 @@ jobs:
           # complete Linux, ARM64, and Windows image validation explicitly.
           gh workflow run image-build-check.yml --ref "$branch"
 
+          # shellcheck disable=SC2016 # Markdown backticks must remain literal.
           body='Automated consolidated refresh of runner image dependencies, vendor checksums, base-image digests, and the matching QEMU golden-image pins. See `images/versions.json` for the complete inventory and support dates. New Node LTS lines are added automatically; if a newly supported .NET channel appears under `unassigned_supported_channels`, the image check reports it and requires an explicit target assignment.'
           if gh pr view "$branch" >/dev/null 2>&1; then
             gh pr edit "$branch" \
