@@ -7,6 +7,7 @@ import (
 
 	"github.com/GerardSmit/multirunner/internal/backend"
 	"github.com/GerardSmit/multirunner/internal/config"
+	"github.com/GerardSmit/multirunner/internal/metrics"
 	"github.com/GerardSmit/multirunner/internal/pool"
 	scalesetmode "github.com/GerardSmit/multirunner/internal/scaleset"
 )
@@ -22,10 +23,30 @@ type scaleSetPool struct {
 	mounts []backend.Mount
 }
 
+type scaleSetStateReporter func(string, scalesetmode.SessionAvailability)
+
+func newScaleSetHealthReporter(m *metrics.Metrics, pools []config.Pool) scaleSetStateReporter {
+	for _, p := range pools {
+		// Config validation makes pool names stable and unique within this
+		// orchestrator, including when several sessions run concurrently.
+		m.SetRequiredSessionAvailable(p.Name, false)
+	}
+	return func(sessionKey string, state scalesetmode.SessionAvailability) {
+		m.SetRequiredSessionAvailable(sessionKey, state == scalesetmode.SessionAvailable)
+	}
+}
+
 // runScaleset holds one long-poll session per pool and provisions runners as
 // GitHub reports demand. Each pool has its own scale set, because a scale set
 // carries one label set and therefore one runner OS.
-func runScaleset(ctx context.Context, cfg *config.Config, pools []scaleSetPool, hooks pool.Hooks, logger *slog.Logger) error {
+func runScaleset(
+	ctx context.Context,
+	cfg *config.Config,
+	pools []scaleSetPool,
+	hooks pool.Hooks,
+	reportState scaleSetStateReporter,
+	logger *slog.Logger,
+) error {
 	target, err := scalesetmode.TargetURL(cfg.GitHub.URL, string(cfg.GitHub.Scope), cfg.GitHub.Owner, cfg.GitHub.Repo)
 	if err != nil {
 		return err
@@ -42,6 +63,7 @@ func runScaleset(ctx context.Context, cfg *config.Config, pools []scaleSetPool, 
 	sessions := make([]scalesetmode.SupervisedSession, 0, len(pools))
 	for _, p := range pools {
 		p := p
+		sessionKey := p.cfg.Name
 		client, err := scalesetmode.NewClient(clientOpts)
 		if err != nil {
 			return fmt.Errorf("pool %s: %w", p.cfg.Name, err)
@@ -73,8 +95,18 @@ func runScaleset(ctx context.Context, cfg *config.Config, pools []scaleSetPool, 
 		}
 		sessions = append(sessions, scalesetmode.SupervisedSession{
 			Name: p.cfg.ScaleSet,
-			Run: func(runCtx context.Context, _ func()) error {
-				return scalesetmode.Run(runCtx, client, p.be, sessionOptions, logger.With("pool", p.cfg.Name))
+			Run: func(runCtx context.Context, available func()) error {
+				runOptions := sessionOptions
+				runOptions.OnStateChange = func(state scalesetmode.SessionAvailability) {
+					reportState(sessionKey, state)
+					if state == scalesetmode.SessionAvailable {
+						available()
+					}
+				}
+				return scalesetmode.Run(runCtx, client, p.be, runOptions, logger.With("pool", p.cfg.Name))
+			},
+			OnStateChange: func(state scalesetmode.SessionAvailability) {
+				reportState(sessionKey, state)
 			},
 		})
 	}

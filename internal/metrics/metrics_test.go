@@ -12,14 +12,14 @@ func TestHealthIsDegradedWhenRequiredSessionIsUnavailable(t *testing.T) {
 	metrics.SetRequiredSessionAvailable("linux", false)
 
 	response := httptest.NewRecorder()
-	metrics.handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/health", nil))
+	metrics.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/health", nil))
 	if response.Code != http.StatusServiceUnavailable {
 		t.Fatalf("health status = %d, want %d", response.Code, http.StatusServiceUnavailable)
 	}
 
 	metrics.SetRequiredSessionAvailable("linux", true)
 	response = httptest.NewRecorder()
-	metrics.handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/health", nil))
+	metrics.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/health", nil))
 	if response.Code != http.StatusOK {
 		t.Fatalf("recovered health status = %d, want %d", response.Code, http.StatusOK)
 	}
@@ -27,7 +27,7 @@ func TestHealthIsDegradedWhenRequiredSessionIsUnavailable(t *testing.T) {
 
 func TestHealthStateIsConcurrencySafe(t *testing.T) {
 	metrics := New()
-	handler := metrics.handler()
+	handler := metrics.Handler()
 	var wg sync.WaitGroup
 	for worker := range 16 {
 		wg.Add(1)

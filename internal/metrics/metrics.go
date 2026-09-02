@@ -81,7 +81,8 @@ func (m *Metrics) healthy() bool {
 	return true
 }
 
-func (m *Metrics) handler() http.Handler {
+// Handler returns the metrics and health HTTP surface.
+func (m *Metrics) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(m.reg, promhttp.HandlerOpts{}))
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
@@ -97,7 +98,7 @@ func (m *Metrics) handler() http.Handler {
 
 // Serve runs the /metrics + /health endpoints until ctx is cancelled.
 func (m *Metrics) Serve(ctx context.Context, listen string, logger *slog.Logger) error {
-	srv := &http.Server{Addr: listen, Handler: m.handler()}
+	srv := &http.Server{Addr: listen, Handler: m.Handler()}
 	go func() {
 		logger.Info("metrics listening", "addr", listen)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {

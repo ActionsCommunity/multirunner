@@ -501,6 +501,10 @@ func runOrchestrator(ctx context.Context, configPath string, interactive, instal
 
 	// Metrics + lifecycle hooks (served only when a listen addr is set).
 	m := metrics.New()
+	var reportScaleSetState scaleSetStateReporter
+	if cfg.Provisioning.IsScaleset() {
+		reportScaleSetState = newScaleSetHealthReporter(m, cfg.Pools)
+	}
 	if cfg.Metrics.Listen != "" {
 		go func() {
 			if err := m.Serve(ctx, cfg.Metrics.Listen, logger); err != nil {
@@ -543,7 +547,7 @@ func runOrchestrator(ctx context.Context, configPath string, interactive, instal
 	logger.Info("orchestrator running", "mode", cfg.Provisioning)
 	switch {
 	case cfg.Provisioning.IsScaleset():
-		err = runScaleset(ctx, cfg, scaleSetPools, hooks, logger)
+		err = runScaleset(ctx, cfg, scaleSetPools, hooks, reportScaleSetState, logger)
 	case cfg.Provisioning.IsAutoscale():
 		err = runAutoscale(ctx, cfg, ghProvider, launchers, logger)
 	default:
