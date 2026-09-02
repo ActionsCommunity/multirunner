@@ -12,11 +12,16 @@ reachable from inside every runner container or guest, not merely from the
 host. Set `external_url` instead when an existing cache service should be used.
 
 Keep `access_token` in an environment reference or omit it so the embedded
-server generates one. Never display it. Leave `skip_token_validation` disabled
-unless the owner explicitly accepts weaker bearer validation. Bind only to the
-required interface, restrict network access, and approve firewall or service
-changes separately. Set `max_age_days`, `max_size_gb`, and `gc_interval_sec`
-from the storage budget. Don't delete cache data during assessment or update.
+server generates one. Never display it. The private path token is the cache's
+access gate. Set `skip_token_validation: true` when runner requests can carry
+opaque or missing Actions bearer claims, as in `config.example.yaml`. Set it to
+`false` only after proving every runner sends parsable cache scopes and a
+repository ID. This setting parses claims but does not verify a JWT signature,
+so it is not a replacement for the private path token or network restrictions.
+Bind only to the required interface, restrict network access, and approve
+firewall or service changes separately. Set `max_age_days`, `max_size_gb`, and
+`gc_interval_sec` from the storage budget. Don't delete cache data during
+assessment or update.
 
 ## Git cache
 

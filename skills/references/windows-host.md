@@ -9,7 +9,7 @@ Use this reference after the shared host assessment.
 | Windows containers | `containerd` | Preferred Windows-container path on current Windows builds. It uses containerd, runhcs, nerdctl, and CNI. |
 | Windows containers | `docker` or omitted | Use an existing Windows Docker daemon. A local named pipe may use `isolation: auto`; remote daemons require `process` or `hyperv`. |
 | Linux containers | `docker` or omitted | Point `docker.host` at a reachable Docker-compatible Linux daemon, such as a WSL2 engine. Doctor must report daemon OS `linux`. |
-| Windows virtual machines | `qemu` | Use a licensed Windows Server ISO and an x86-64 QEMU guest when containers don't meet workload requirements. |
+| Windows virtual machines | `qemu` | Use appropriately licensed Windows Server media, including supported evaluation media, and an x86-64 QEMU guest when containers don't meet workload requirements. |
 
 Windows Server normally supports process isolation. Windows client editions need
 Hyper-V isolation. `auto` detects this only for a local Windows daemon.

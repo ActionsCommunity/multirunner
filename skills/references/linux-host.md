@@ -7,7 +7,7 @@ Use this reference after the shared host assessment.
 | Workload | Backend | When to select it |
 |---|---|---|
 | Linux containers | `docker` or omitted | Use a reachable Docker API. A Podman Docker-compatible socket is also supported when it passes doctor. |
-| Windows virtual machines | `qemu` | Use a licensed Windows Server ISO and an x86-64 QEMU guest. KVM is the accelerated choice on x86-64 Linux. |
+| Windows virtual machines | `qemu` | Use appropriately licensed Windows Server media, including supported evaluation media, and an x86-64 QEMU guest. KVM is the accelerated choice on x86-64 Linux. |
 
 The `containerd` backend is the Windows containerd and runhcs implementation,
 not a Linux container backend. Don't select it for Linux pools.
