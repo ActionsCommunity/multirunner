@@ -109,7 +109,7 @@ func (b *Backend) Launch(ctx context.Context, req backend.LaunchRequest) (backen
 	if !req.Ownership.IsZero() && req.Ownership.RunnerID == 0 {
 		return nil, fmt.Errorf("qemu: runner ID is required for owned launches")
 	}
-	if filepath.Base(req.Name) != req.Name || req.Name == "." || req.Name == "" {
+	if !portableBaseName(req.Name) {
 		return nil, fmt.Errorf("invalid qemu runner name %q", req.Name)
 	}
 	if err := os.MkdirAll(b.opt.WorkDir, 0o755); err != nil {
@@ -245,10 +245,13 @@ func (b *Backend) ListOwnedRunners(_ context.Context, ownership backend.RunnerOw
 }
 
 func (b *Backend) RemoveOwnedRunner(ctx context.Context, resourceID string) error {
-	if filepath.Base(resourceID) != resourceID || !strings.HasSuffix(resourceID, ".runner.json") {
+	if !strings.HasSuffix(resourceID, ".runner.json") {
 		return fmt.Errorf("invalid qemu runner resource ID %q", resourceID)
 	}
-	recordPath := filepath.Join(b.opt.WorkDir, resourceID)
+	recordPath, err := containedRunnerPath(b.opt.WorkDir, resourceID)
+	if err != nil {
+		return fmt.Errorf("invalid qemu runner resource ID %q: %w", resourceID, err)
+	}
 	record, err := readRunnerRecord(recordPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -405,10 +408,51 @@ func removeRunnerRecord(workDir, recordPath string, record runnerRecord) error {
 }
 
 func runnerArtifactPath(workDir, name string) (string, error) {
-	if filepath.Base(name) != name || name == "." || name == "" {
-		return "", fmt.Errorf("invalid qemu artifact name %q", name)
+	path, err := containedRunnerPath(workDir, name)
+	if err != nil {
+		return "", fmt.Errorf("invalid qemu artifact name %q: %w", name, err)
 	}
-	return filepath.Join(workDir, name), nil
+	return path, nil
+}
+
+func containedRunnerPath(workDir, name string) (string, error) {
+	if !portableBaseName(name) {
+		return "", errors.New("must be a portable basename")
+	}
+	root, err := filepath.Abs(workDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve work directory: %w", err)
+	}
+	candidate := filepath.Join(root, name)
+	if _, err := os.Lstat(candidate); errors.Is(err, os.ErrNotExist) {
+		return candidate, nil
+	} else if err != nil {
+		return "", fmt.Errorf("inspect path: %w", err)
+	}
+
+	canonicalRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", fmt.Errorf("resolve work directory links: %w", err)
+	}
+	canonicalCandidate, err := filepath.EvalSymlinks(candidate)
+	if err != nil {
+		return "", fmt.Errorf("resolve path links: %w", err)
+	}
+	relative, err := filepath.Rel(canonicalRoot, canonicalCandidate)
+	if err != nil || filepath.IsAbs(relative) ||
+		relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("canonical path escapes work directory")
+	}
+	return candidate, nil
+}
+
+func portableBaseName(name string) bool {
+	if name == "" || name == "." || name == ".." ||
+		strings.ContainsAny(name, `/\:`) ||
+		filepath.IsAbs(name) || filepath.VolumeName(name) != "" {
+		return false
+	}
+	return true
 }
 
 func runnerRecordName(name string, ownership backend.RunnerOwnership) string {

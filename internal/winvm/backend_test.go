@@ -202,6 +202,24 @@ func TestRunnerRecordNameUsesStableOwnershipNamespace(t *testing.T) {
 	}
 }
 
+func TestQEMULaunchRejectsNonPortableRunnerName(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		value string
+	}{
+		{name: "slash traversal", value: "../runner"},
+		{name: "backslash traversal", value: `..\runner`},
+		{name: "drive relative", value: "C:runner"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			be := &Backend{}
+			if _, err := be.Launch(t.Context(), backend.LaunchRequest{Name: tc.value}); err == nil {
+				t.Fatalf("Launch accepted invalid runner name %q", tc.value)
+			}
+		})
+	}
+}
+
 func TestQEMUOwnedRunnerRemovalRequiresVerifiedProcessIdentity(t *testing.T) {
 	dir := t.TempDir()
 	recordPath := filepath.Join(dir, "runner.runner.json")
@@ -255,9 +273,61 @@ func TestQEMUOwnedRunnerRemovalStopsVerifiedProcess(t *testing.T) {
 }
 
 func TestQEMUOwnedRunnerRemovalRejectsTraversal(t *testing.T) {
-	be := &Backend{opt: Options{WorkDir: t.TempDir()}}
-	if err := be.RemoveOwnedRunner(t.Context(), `..\foreign.runner.json`); err == nil {
-		t.Fatal("RemoveOwnedRunner accepted path traversal")
+	for _, tc := range []struct {
+		name       string
+		resourceID string
+		valid      bool
+	}{
+		{name: "empty"},
+		{name: "dot", resourceID: "."},
+		{name: "dot dot", resourceID: ".."},
+		{name: "parent slash", resourceID: "../foreign.runner.json"},
+		{name: "parent backslash", resourceID: `..\foreign.runner.json`},
+		{name: "nested slash", resourceID: "nested/foreign.runner.json"},
+		{name: "nested backslash", resourceID: `nested\foreign.runner.json`},
+		{name: "mixed separators", resourceID: `nested/..\foreign.runner.json`},
+		{name: "absolute unix", resourceID: "/tmp/foreign.runner.json"},
+		{name: "absolute windows slash", resourceID: "C:/temp/foreign.runner.json"},
+		{name: "absolute windows backslash", resourceID: `C:\temp\foreign.runner.json`},
+		{name: "drive relative", resourceID: "C:foreign.runner.json"},
+		{name: "drive relative traversal", resourceID: `C:..\foreign.runner.json`},
+		{name: "rooted windows", resourceID: `\foreign.runner.json`},
+		{name: "UNC backslash", resourceID: `\\server\share\foreign.runner.json`},
+		{name: "UNC slash", resourceID: "//server/share/foreign.runner.json"},
+		{name: "valid simple", resourceID: "runner.runner.json", valid: true},
+		{name: "valid owned", resourceID: "0123456789abcdef.mr-scaleset-7-a1b2c3d4.runner.json", valid: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			be := &Backend{opt: Options{WorkDir: t.TempDir()}}
+			err := be.RemoveOwnedRunner(t.Context(), tc.resourceID)
+			if tc.valid && err != nil {
+				t.Fatalf("RemoveOwnedRunner(%q): %v", tc.resourceID, err)
+			}
+			if !tc.valid && err == nil {
+				t.Fatalf("RemoveOwnedRunner accepted invalid resource ID %q", tc.resourceID)
+			}
+		})
+	}
+}
+
+func TestQEMUOwnedRunnerRemovalRejectsSymlinkEscape(t *testing.T) {
+	workDir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside.runner.json")
+	if err := writeRunnerRecord(outside, runnerRecord{Name: "outside"}); err != nil {
+		t.Fatal(err)
+	}
+	resourceID := "linked.runner.json"
+	if err := os.Symlink(outside, filepath.Join(workDir, resourceID)); err != nil {
+		t.Skipf("symlink creation unavailable: %v", err)
+	}
+
+	be := &Backend{opt: Options{WorkDir: workDir}}
+	err := be.RemoveOwnedRunner(t.Context(), resourceID)
+	if err == nil || !strings.Contains(err.Error(), "escapes work directory") {
+		t.Fatalf("RemoveOwnedRunner error = %v, want symlink escape rejection", err)
+	}
+	if _, err := os.Stat(outside); err != nil {
+		t.Fatalf("outside runner record was changed: %v", err)
 	}
 }
 
