@@ -2,6 +2,7 @@
 package buildinfo
 
 import (
+	"runtime/debug"
 	"strings"
 )
 
@@ -28,17 +29,40 @@ type Info struct {
 
 // Current returns the linked build identity.
 func Current() Info {
-	return resolve(Version, Commit)
+	build, ok := debug.ReadBuildInfo()
+	return resolve(Version, Commit, build, ok)
 }
 
-func resolve(version, commit string) Info {
+func resolve(version, commit string, build *debug.BuildInfo, hasBuild bool) Info {
 	version = strings.TrimSpace(version)
+	linkedVersion := version != "" && version != defaultVersion
+	if !linkedVersion && hasBuild && build != nil &&
+		build.Main.Version != "" && build.Main.Version != "(devel)" {
+		version = build.Main.Version
+	}
 	if version == "" {
 		version = defaultVersion
 	}
 	commit = strings.TrimSpace(commit)
+	linkedCommit := commit != "" && commit != unknownCommit
+	dirty := false
+	if hasBuild && build != nil {
+		for _, setting := range build.Settings {
+			switch setting.Key {
+			case "vcs.revision":
+				if !linkedCommit && strings.TrimSpace(setting.Value) != "" {
+					commit = strings.TrimSpace(setting.Value)
+				}
+			case "vcs.modified":
+				dirty = setting.Value == "true"
+			}
+		}
+	}
 	if commit == "" {
 		commit = unknownCommit
+	}
+	if dirty && !linkedVersion && !strings.HasSuffix(version, "-dirty") {
+		version += "-dirty"
 	}
 	return Info{Version: version, Commit: commit}
 }

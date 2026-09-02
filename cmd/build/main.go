@@ -42,6 +42,7 @@ func parseArgs(args []string, stderr io.Writer) (buildcmd.Options, error) {
 	flags.StringVar(&opts.Output, "o", "", "output binary path")
 	flags.StringVar(&opts.GOOS, "goos", "", "target operating system")
 	flags.StringVar(&opts.GOARCH, "goarch", "", "target architecture")
+	flags.BoolVar(&opts.AllowDirty, "allow-dirty", false, "allow an explicit version from a dirty Git checkout")
 	if err := flags.Parse(args); err != nil {
 		return buildcmd.Options{}, err
 	}

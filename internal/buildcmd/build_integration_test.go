@@ -21,12 +21,13 @@ func TestBuildInjectsIdentityIntoRealCLI(t *testing.T) {
 	}
 	const version = "v9.8.7-integration"
 	if err := Build(context.Background(), Options{
-		Directory: filepath.Join("..", ".."),
-		Output:    binary,
-		Version:   version,
-		Commit:    testCommit,
-		GOOS:      runtime.GOOS,
-		GOARCH:    runtime.GOARCH,
+		Directory:  filepath.Join("..", ".."),
+		Output:     binary,
+		Version:    version,
+		Commit:     testCommit,
+		GOOS:       runtime.GOOS,
+		GOARCH:     runtime.GOARCH,
+		AllowDirty: true,
 	}); err != nil {
 		t.Fatalf("build real CLI: %v", err)
 	}
