@@ -12,9 +12,12 @@ import (
 const (
 	// StopTimeout leaves the service manager time to finish process teardown.
 	StopTimeout = 15 * time.Second
+	// LaunchdOutputPath receives unattended stdout and stderr on macOS.
+	LaunchdOutputPath = "/var/log/multirunner.out.log"
 
 	recoveryResetSeconds = 10 * 60
 	launchdThrottle      = 15
+	launchdLogDirectory  = "/var/log"
 )
 
 var restartDelays = [...]time.Duration{

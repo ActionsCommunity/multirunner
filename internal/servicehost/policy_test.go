@@ -93,4 +93,9 @@ func TestOptionsForLaunchdRestartsOnlyAfterFailure(t *testing.T) {
 			t.Errorf("launchd plist missing output destination %q", destination)
 		}
 	}
+	for _, obsolete := range []string{"newsyslog", ".pid", "SIGHUP"} {
+		if strings.Contains(plist, obsolete) {
+			t.Errorf("launchd plist retains signal-based rotation artifact %q", obsolete)
+		}
+	}
 }
