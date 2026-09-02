@@ -31,6 +31,9 @@ type SessionOptions struct {
 	Instance string
 	// Launch describes how to start each runner.
 	Launch Options
+	// OnStateChange reports whether this required session is serving,
+	// backing off, or permanently unavailable.
+	OnStateChange func(SessionAvailability)
 }
 
 // Run holds a long-poll session open for one pool and provisions runners onto
@@ -45,20 +48,23 @@ func Run(
 	opts SessionOptions,
 	logger *slog.Logger,
 ) error {
+	sessionCtx, cancelSession := context.WithCancel(ctx)
+	defer cancelSession()
+
 	if backend.OwnedRunnerStoreFor(be) == nil {
 		return permanentSessionError{fmt.Errorf(
 			"backend %q does not support scale-set ownership reconciliation", be.Name())}
 	}
-	if err := be.EnsureImage(ctx, opts.Launch.Image); err != nil {
+	if err := be.EnsureImage(sessionCtx, opts.Launch.Image); err != nil {
 		return fmt.Errorf("ensure image for %q: %w", opts.Name, err)
 	}
 
-	groupID, err := runnerGroupID(ctx, client, opts.RunnerGroup)
+	groupID, err := runnerGroupID(sessionCtx, client, opts.RunnerGroup)
 	if err != nil {
 		return classifySessionError(err)
 	}
 
-	set, err := ensureScaleSet(ctx, client, opts, groupID, logger)
+	set, err := ensureScaleSet(sessionCtx, client, opts, groupID, logger)
 	if err != nil {
 		return classifySessionError(err)
 	}
@@ -89,13 +95,13 @@ func Run(
 	launchOpts.ScaleSetID = set.ID
 	launchOpts.Ownership = ownership
 	launchOpts.Logger = logger.WithGroup("launcher")
-	launcher := New(client, be, launchOpts)
+	launcher := New(sessionCtx, client, be, launchOpts)
 	defer func() {
 		if err := launcher.Shutdown(context.WithoutCancel(ctx)); err != nil {
 			logger.Warn("stop scale set runners failed", slog.String("scaleSet", opts.Name), slog.Any("error", err))
 		}
 	}()
-	reconciled, err := launcher.Reconcile(ctx)
+	reconciled, err := launcher.Reconcile(sessionCtx)
 	if err != nil {
 		return classifySessionError(fmt.Errorf("reconcile scale set %q: %w", opts.Name, err))
 	}
@@ -104,6 +110,7 @@ func Run(
 			slog.String("scaleSet", opts.Name),
 			slog.Int("count", reconciled))
 	}
+	go launcher.reconcilePeriodically(sessionCtx)
 
 	logger.Info("listening for jobs",
 		slog.String("scaleSet", opts.Name),
@@ -115,9 +122,10 @@ func Run(
 		client: client, scaleSetID: set.ID, owner: owner,
 		opts: opts, launcher: launcher, logger: logger,
 	}
-	return superviseSession(ctx, SupervisedSession{
-		Name: opts.Name,
-		Run:  listenerSession.run,
+	return superviseSession(sessionCtx, SupervisedSession{
+		Name:          opts.Name,
+		Run:           listenerSession.run,
+		OnStateChange: opts.OnStateChange,
 	}, defaultSupervisorConfig(), logger)
 }
 
@@ -130,7 +138,7 @@ type listenerSession struct {
 	logger     *slog.Logger
 }
 
-func (s listenerSession) run(ctx context.Context) error {
+func (s listenerSession) run(ctx context.Context, available func()) error {
 	session, err := s.client.MessageSessionClient(ctx, s.scaleSetID, s.owner)
 	if err != nil {
 		return classifySessionError(fmt.Errorf("open message session for %q: %w", s.opts.Name, err))
@@ -151,6 +159,7 @@ func (s listenerSession) run(ctx context.Context) error {
 	if err != nil {
 		return classifySessionError(fmt.Errorf("create listener for %q: %w", s.opts.Name, err))
 	}
+	available()
 	if err := l.Run(ctx, s.launcher); err != nil && !errors.Is(err, context.Canceled) {
 		return classifySessionError(fmt.Errorf("listener for %q stopped: %w", s.opts.Name, err))
 	}

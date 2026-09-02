@@ -50,11 +50,11 @@ func (l *Launcher) finishRunner(name string, state *runnerState, code int, waitE
 		}
 	}
 
-	if state.runnerID != 0 && state.needsDeregistration {
+	if state.runnerID != 0 && state.needsDeregistration && !state.registrationRemoved {
 		if err := l.removeRunner(context.Background(), state.runnerID); err != nil {
 			return fmt.Errorf("remove runner %s: %w", name, err)
 		}
-		state.runnerID = 0
+		state.registrationRemoved = true
 	}
 
 	store := backend.OwnedRunnerStoreFor(l.be)
@@ -127,7 +127,7 @@ func (l *Launcher) removeRunner(ctx context.Context, runnerID int64) error {
 	}
 	l.removeMu.Lock()
 	defer l.removeMu.Unlock()
-	removeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), l.cleanupDuration())
+	removeCtx, cancel := context.WithTimeout(ctx, l.cleanupDuration())
 	defer cancel()
 	err := l.jit.RemoveRunner(removeCtx, runnerID)
 	if errors.Is(err, upstream.RunnerNotFoundError) || isHTTPStatus(err, "404") {

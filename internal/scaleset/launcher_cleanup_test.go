@@ -16,7 +16,7 @@ import (
 func TestShutdownKillsAndDeregistersRunners(t *testing.T) {
 	jit := &fakeJIT{}
 	be := &fakeBackend{}
-	l := New(jit, be, Options{ScaleSetID: 1})
+	l := New(t.Context(), jit, be, Options{ScaleSetID: 1})
 
 	if _, err := l.HandleDesiredRunnerCount(t.Context(), 2); err != nil {
 		t.Fatalf("launch: %v", err)
@@ -38,7 +38,7 @@ func TestShutdownKillsAndDeregistersRunners(t *testing.T) {
 func TestShutdownGivesEveryRunnerIndependentCleanupContexts(t *testing.T) {
 	jit := &fakeJIT{}
 	be := &fakeBackend{}
-	l := New(jit, be, Options{ScaleSetID: 1, cleanupTimeout: 20 * time.Millisecond})
+	l := New(t.Context(), jit, be, Options{ScaleSetID: 1, cleanupTimeout: 20 * time.Millisecond})
 
 	if _, err := l.HandleDesiredRunnerCount(t.Context(), 3); err != nil {
 		t.Fatalf("launch: %v", err)
@@ -80,7 +80,7 @@ func TestShutdownGivesEveryRunnerIndependentCleanupContexts(t *testing.T) {
 func TestShutdownStartsRemovalTimeoutAfterClientLockIsAvailable(t *testing.T) {
 	jit := &fakeJIT{blockFirstRemove: true}
 	be := &fakeBackend{}
-	l := New(jit, be, Options{ScaleSetID: 1, cleanupTimeout: 20 * time.Millisecond})
+	l := New(t.Context(), jit, be, Options{ScaleSetID: 1, cleanupTimeout: 20 * time.Millisecond})
 
 	if _, err := l.HandleDesiredRunnerCount(t.Context(), 3); err != nil {
 		t.Fatalf("launch: %v", err)
@@ -113,7 +113,7 @@ func TestAlreadyRemovedRegistrationIsSuccessfulCleanup(t *testing.T) {
 	} {
 		jit := &fakeJIT{removeErr: removeErr}
 		be := &fakeBackend{}
-		l := New(jit, be, Options{ScaleSetID: 1})
+		l := New(t.Context(), jit, be, Options{ScaleSetID: 1})
 
 		if _, err := l.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
 			t.Fatalf("launch: %v", err)
@@ -129,7 +129,7 @@ func TestAlreadyRemovedRegistrationIsSuccessfulCleanup(t *testing.T) {
 func TestIdleExitAndShutdownCleanupAreNotDuplicated(t *testing.T) {
 	jit := &fakeJIT{}
 	be := &fakeBackend{}
-	l := New(jit, be, Options{ScaleSetID: 1})
+	l := New(t.Context(), jit, be, Options{ScaleSetID: 1})
 
 	if _, err := l.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
 		t.Fatalf("launch: %v", err)
@@ -148,7 +148,7 @@ func TestIdleExitReportsStopWhileCleanupRemainsRetryable(t *testing.T) {
 	jit := &fakeJIT{blockFirstRemove: true}
 	be := &fakeBackend{}
 	stopped := make(chan error, 1)
-	l := New(jit, be, Options{
+	l := New(t.Context(), jit, be, Options{
 		ScaleSetID:     1,
 		cleanupTimeout: 20 * time.Millisecond,
 		OnStop: func(_ int, err error) {
@@ -199,7 +199,7 @@ func TestReconcileRemovesOwnedBackendResourcesAndRegistrations(t *testing.T) {
 		{ResourceID: "container-2", Name: "runner-2", RunnerID: 12},
 	}}
 	jit := &fakeJIT{}
-	l := New(jit, be, Options{ScaleSetID: 7, Ownership: ownership})
+	l := New(t.Context(), jit, be, Options{ScaleSetID: 7, Ownership: ownership})
 
 	count, err := l.Reconcile(t.Context())
 	if err != nil {
@@ -220,7 +220,7 @@ func TestReconcileRemovesOwnedBackendResourcesAndRegistrations(t *testing.T) {
 }
 
 func TestReconcileRejectsBackendWithoutOwnershipCapability(t *testing.T) {
-	l := New(&fakeJIT{}, unsupportedBackend{}, Options{ScaleSetID: 7})
+	l := New(t.Context(), &fakeJIT{}, unsupportedBackend{}, Options{ScaleSetID: 7})
 	if _, err := l.Reconcile(t.Context()); err == nil ||
 		!strings.Contains(err.Error(), "does not support scale-set ownership reconciliation") {
 		t.Fatalf("Reconcile error = %v, want unsupported ownership capability", err)
@@ -233,7 +233,7 @@ func TestReconcilePreservesBackendRecordWhenRemovalTimesOut(t *testing.T) {
 		blockOwnedRemoval: true,
 	}
 	jit := &fakeJIT{}
-	l := New(jit, be, Options{
+	l := New(t.Context(), jit, be, Options{
 		ScaleSetID: 7,
 		Ownership: backend.RunnerOwnership{
 			Instance: "host-a", Target: "https://github.com/o/r", Pool: "linux", ScaleSetID: 7,
@@ -258,7 +258,7 @@ func TestReconcilePreservesBackendRecordWhenDeregistrationFails(t *testing.T) {
 		owned: []backend.OwnedRunner{{ResourceID: "container-1", Name: "runner-1", RunnerID: 11}},
 	}
 	jit := &fakeJIT{removeErr: errors.New("service unavailable")}
-	l := New(jit, be, Options{
+	l := New(t.Context(), jit, be, Options{
 		ScaleSetID: 7,
 		Ownership: backend.RunnerOwnership{
 			Instance: "host-a", Target: "https://github.com/o/r", Pool: "linux", ScaleSetID: 7,
@@ -277,7 +277,7 @@ func TestReconcilePreservesBackendRecordWhenDeregistrationFails(t *testing.T) {
 func TestIdleExitPreservesBackendRecordUntilDeregistrationConverges(t *testing.T) {
 	jit := &fakeJIT{removeErr: errors.New("service unavailable")}
 	be := &fakeBackend{}
-	l := New(jit, be, Options{ScaleSetID: 1})
+	l := New(t.Context(), jit, be, Options{ScaleSetID: 1})
 
 	if _, err := l.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
 		t.Fatalf("launch: %v", err)
@@ -302,7 +302,7 @@ func TestIdleExitPreservesBackendRecordUntilDeregistrationConverges(t *testing.T
 func TestBusyExitCleanupRetryDoesNotDeregisterCompletedRunner(t *testing.T) {
 	jit := &fakeJIT{}
 	be := &fakeBackend{removeOwnedErr: errors.New("daemon unavailable")}
-	l := New(jit, be, Options{ScaleSetID: 1})
+	l := New(t.Context(), jit, be, Options{ScaleSetID: 1})
 
 	if _, err := l.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
 		t.Fatalf("launch: %v", err)
@@ -341,7 +341,7 @@ func TestReconcileDeregistersBeforeRemovingBackendResource(t *testing.T) {
 		owned:           []backend.OwnedRunner{{ResourceID: "container-1", Name: "runner-1", RunnerID: 11}},
 		removeOwnedHook: func(string) { record("backend") },
 	}
-	l := New(jit, be, Options{
+	l := New(t.Context(), jit, be, Options{
 		ScaleSetID: 7,
 		Ownership: backend.RunnerOwnership{
 			Instance: "host-a", Target: "https://github.com/o/r", Pool: "linux", ScaleSetID: 7,
@@ -359,7 +359,7 @@ func TestReconcileDeregistersBeforeRemovingBackendResource(t *testing.T) {
 func TestLifecycleCallbacksTrackRunner(t *testing.T) {
 	be := &fakeBackend{}
 	var starts, stops atomic.Int32
-	l := New(&fakeJIT{}, be, Options{
+	l := New(t.Context(), &fakeJIT{}, be, Options{
 		ScaleSetID: 1,
 		OnStart:    func() { starts.Add(1) },
 		OnStop:     func(int, error) { stops.Add(1) },
@@ -377,7 +377,7 @@ func TestLifecycleCallbacksTrackRunner(t *testing.T) {
 
 func TestJobCallbacksDoNotProvision(t *testing.T) {
 	be := &fakeBackend{}
-	l := New(&fakeJIT{}, be, Options{ScaleSetID: 1})
+	l := New(t.Context(), &fakeJIT{}, be, Options{ScaleSetID: 1})
 
 	if err := l.HandleJobStarted(t.Context(), &upstream.JobStarted{}); err != nil {
 		t.Fatalf("HandleJobStarted: %v", err)
@@ -387,5 +387,66 @@ func TestJobCallbacksDoNotProvision(t *testing.T) {
 	}
 	if n := len(be.requests()); n != 0 {
 		t.Fatalf("job callbacks launched %d runners, want 0", n)
+	}
+}
+
+func TestRunnerIdentityRemainsRaceSafeDuringExitCleanup(t *testing.T) {
+	jit := &fakeJIT{}
+	be := &fakeBackend{}
+	l := New(t.Context(), jit, be, Options{ScaleSetID: 1})
+	if _, err := l.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
+		t.Fatalf("launch: %v", err)
+	}
+	request := be.requests()[0]
+
+	var wg sync.WaitGroup
+	for range 32 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 100 {
+				if err := l.HandleJobStarted(t.Context(), &upstream.JobStarted{
+					RunnerID: 1, RunnerName: request.Name,
+				}); err != nil {
+					t.Errorf("HandleJobStarted: %v", err)
+					return
+				}
+			}
+		}()
+	}
+	be.finish(0)
+	wg.Wait()
+	waitFor(t, func() bool { return l.Running() == 0 })
+}
+
+func TestReconcileSkipsCurrentlyTrackedRunner(t *testing.T) {
+	ownership := backend.RunnerOwnership{
+		Instance: "host-a", Target: "https://github.com/o/r", Pool: "linux", ScaleSetID: 7,
+	}
+	jit := &fakeJIT{}
+	be := &fakeBackend{}
+	l := New(t.Context(), jit, be, Options{ScaleSetID: 7, Ownership: ownership})
+	if _, err := l.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
+		t.Fatalf("launch: %v", err)
+	}
+	request := be.requests()[0]
+	be.mu.Lock()
+	be.owned = []backend.OwnedRunner{{
+		ResourceID: request.Name, Name: request.Name, RunnerID: 1,
+	}}
+	be.mu.Unlock()
+
+	reconciled, err := l.Reconcile(t.Context())
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if reconciled != 0 {
+		t.Fatalf("reconciled active runners = %d, want zero", reconciled)
+	}
+	if removed := jit.removedIDs(); len(removed) != 0 {
+		t.Fatalf("removed active registrations = %v", removed)
+	}
+	if attempts := be.ownedRemovalAttempts(); len(attempts) != 0 {
+		t.Fatalf("removed active backend resources = %v", attempts)
 	}
 }
