@@ -119,18 +119,19 @@ func (b *dockerBackend) Launch(ctx context.Context, req LaunchRequest) (RunnerHa
 		host.ExtraHosts = append(host.ExtraHosts, ch+":host-gateway")
 	}
 
+	handle := &dockerHandle{
+		cli:      b.cli,
+		id:       req.Name,
+		preserve: !req.Ownership.IsZero(),
+	}
 	created, err := b.cli.ContainerCreate(ctx, cfg, host, nil, nil, req.Name)
 	if err != nil {
 		// A lost create response can still leave a container behind. Docker APIs
 		// accept the deterministic name anywhere an ID is accepted, so return a
 		// cleanup handle even when the daemon did not return the created ID.
-		return &dockerHandle{cli: b.cli, id: req.Name}, fmt.Errorf("create container %s: %w", req.Name, err)
+		return handle, fmt.Errorf("create container %s: %w", req.Name, err)
 	}
-	handle := &dockerHandle{
-		cli:      b.cli,
-		id:       created.ID,
-		preserve: !req.Ownership.IsZero(),
-	}
+	handle.id = created.ID
 	if err := b.cli.ContainerStart(ctx, created.ID, container.StartOptions{}); err != nil {
 		// The daemon may have started the container before the response was lost.
 		// Return its handle so the lifecycle owner can terminate it with a

@@ -135,6 +135,97 @@ func TestDockerLaunchPersistsRunnerOwnership(t *testing.T) {
 	}
 }
 
+func TestDockerCreateFailureCleanupByOwnership(t *testing.T) {
+	owned := RunnerOwnership{
+		Instance: "host-a", Target: "https://github.com/o/r", Pool: "linux", ScaleSetID: 7, RunnerID: 41,
+	}
+	for _, tc := range []struct {
+		name      string
+		ownership RunnerOwnership
+	}{
+		{name: "owned", ownership: owned},
+		{name: "unowned"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var events []string
+			containerExists := true
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch {
+				case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/containers/create"):
+					events = append(events, "create")
+					http.Error(w, `{"message":"create response lost"}`, http.StatusInternalServerError)
+				case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/stop"):
+					events = append(events, "stop")
+					if !containerExists {
+						http.Error(w, `{"message":"No such container"}`, http.StatusNotFound)
+						return
+					}
+					w.WriteHeader(http.StatusNoContent)
+				case r.Method == http.MethodDelete:
+					events = append(events, "delete")
+					if !containerExists {
+						http.Error(w, `{"message":"No such container"}`, http.StatusNotFound)
+						return
+					}
+					containerExists = false
+					w.WriteHeader(http.StatusNoContent)
+				default:
+					http.Error(w, `{"message":"unexpected request"}`, http.StatusNotFound)
+				}
+			}))
+			defer server.Close()
+
+			cli, err := client.NewClientWithOpts(
+				client.WithHost(server.URL),
+				client.WithHTTPClient(server.Client()),
+				client.WithVersion("1.47"),
+			)
+			if err != nil {
+				t.Fatalf("docker client: %v", err)
+			}
+			store := &dockerBackend{cli: cli, name: "test"}
+			defer store.Close()
+			handle, err := store.Launch(t.Context(), LaunchRequest{
+				Name: "runner-create-uncertain", Image: "runner:latest", Ownership: tc.ownership,
+			})
+			if err == nil || handle == nil {
+				t.Fatalf("Launch = (%v, %v), want failure with cleanup handle", handle, err)
+			}
+			if err := handle.Kill(t.Context()); err != nil {
+				t.Fatalf("cleanup handle Kill: %v", err)
+			}
+
+			if tc.ownership.IsZero() {
+				if got := strings.Join(events, ","); got != "create,stop,delete" {
+					t.Fatalf("cleanup order = %q, want immediate unowned deletion", got)
+				}
+				if err := handle.Kill(t.Context()); err != nil {
+					t.Fatalf("idempotent cleanup handle Kill: %v", err)
+				}
+				if got := strings.Join(events, ","); got != "create,stop,delete,stop,delete" {
+					t.Fatalf("idempotent cleanup order = %q, want repeated stop and delete", got)
+				}
+				return
+			}
+
+			if got := strings.Join(events, ","); got != "create,stop" {
+				t.Fatalf("cleanup order = %q, want owned record preserved after stop", got)
+			}
+			events = append(events, "registration")
+			if err := store.RemoveOwnedRunner(t.Context(), handle.ID()); err != nil {
+				t.Fatalf("ordered backend cleanup: %v", err)
+			}
+			if err := store.RemoveOwnedRunner(t.Context(), handle.ID()); err != nil {
+				t.Fatalf("idempotent backend cleanup: %v", err)
+			}
+			if got := strings.Join(events, ","); got != "create,stop,registration,delete,delete" {
+				t.Fatalf("cleanup order = %q, want registration before idempotent backend deletion", got)
+			}
+		})
+	}
+}
+
 func TestDockerOwnedRunnerRemovalToleratesMissingResource(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
