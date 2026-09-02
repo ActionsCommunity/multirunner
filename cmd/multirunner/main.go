@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -28,6 +29,7 @@ import (
 	"github.com/GerardSmit/multirunner/internal/metrics"
 	"github.com/GerardSmit/multirunner/internal/pool"
 	scalesetmode "github.com/GerardSmit/multirunner/internal/scaleset"
+	"github.com/GerardSmit/multirunner/internal/servicehost"
 	"github.com/GerardSmit/multirunner/internal/vmview"
 	"github.com/GerardSmit/multirunner/internal/webhook"
 	"github.com/GerardSmit/multirunner/internal/winsetup"
@@ -35,9 +37,20 @@ import (
 )
 
 func main() {
-	if err := rootCmd().Execute(); err != nil {
-		os.Exit(1)
+	err := rootCmd().Execute()
+	if err == nil {
+		return
 	}
+	code := servicehost.FailureExitCode
+	var managedErr *managedServiceError
+	if errors.As(err, &managedErr) {
+		var accountingErr error
+		code, accountingErr = managedServiceExitCode(managedErr.configPath, managedErr.interactive, time.Now(), managedErr.Error())
+		if accountingErr != nil {
+			fmt.Fprintln(os.Stderr, "multirunner: recovery accounting: "+sanitizeLogText(accountingErr.Error()))
+		}
+	}
+	os.Exit(code)
 }
 
 const version = "0.1.0-dev"
@@ -395,8 +408,29 @@ install/uninstall/start/stop require administrator/root.`,
 				if dryRun {
 					return servicePlan(cmd.OutOrStdout(), svc, action, abs)
 				}
+				if action == "start" || action == "restart" {
+					if err := servicehost.ResetRecovery("multirunner", svc.Platform()); err != nil {
+						return fmt.Errorf("reset native service recovery: %w", err)
+					}
+					if err := servicehost.ClearFailures(abs); err != nil {
+						return fmt.Errorf("clear service failure state: %w", err)
+					}
+				}
 				if err := service.Control(svc, action); err != nil {
 					return err
+				}
+				if action == "install" {
+					if err := servicehost.ConfigureRecovery("multirunner"); err != nil {
+						if rollbackErr := svc.Uninstall(); rollbackErr != nil {
+							return fmt.Errorf("configure service recovery: %w; rollback install: %v", err, rollbackErr)
+						}
+						return fmt.Errorf("configure service recovery: %w; installation rolled back", err)
+					}
+				}
+				if action == "install" || action == "uninstall" {
+					if err := servicehost.ClearFailures(abs); err != nil {
+						return fmt.Errorf("clear service failure state: %w", err)
+					}
 				}
 				fmt.Printf("service 'multirunner': %s ok\n", action)
 				return nil
@@ -436,8 +470,13 @@ func newService(absCfg string, installDeps bool) (service.Service, *program, err
 		Description:      "Parallel ephemeral GitHub Actions self-hosted runner pool",
 		Arguments:        []string{"run", "--config", absCfg},
 		WorkingDirectory: filepath.Dir(absCfg),
+		Option:           servicehost.Options(),
 	}
-	prg := &program{cfgPath: absCfg, installDeps: installDeps}
+	prg := &program{
+		cfgPath:     absCfg,
+		installDeps: installDeps,
+		stopTimeout: servicehost.StopTimeout,
+	}
 	svc, err := service.New(prg, cfg)
 	if err != nil {
 		return nil, nil, fmt.Errorf("service: %w", err)
@@ -454,10 +493,30 @@ func runService(cfgPath string, installDeps bool) error {
 	}
 	svc, prg, err := newService(abs, installDeps)
 	if err != nil {
-		return err
+		return &managedServiceError{configPath: abs, interactive: service.Interactive(), err: err}
 	}
 	prg.interactive = service.Interactive()
-	return svc.Run()
+	prg.terminate = func(_ int, summary string) {
+		code, accountingErr := managedServiceExitCode(abs, prg.interactive, time.Now(), summary)
+		if accountingErr != nil && prg.logger != nil {
+			_ = prg.logger.Error("record service failure: " + sanitizeLogText(accountingErr.Error()))
+		}
+		os.Exit(code)
+	}
+	logger, err := svc.Logger(nil)
+	if err != nil {
+		return &managedServiceError{configPath: abs, interactive: prg.interactive, err: fmt.Errorf("service logger: %w", err)}
+	}
+	prg.logger = logger
+	restoreOutput, err := captureServiceOutput(prg.interactive, logger)
+	if err != nil {
+		return &managedServiceError{configPath: abs, interactive: prg.interactive, err: err}
+	}
+	defer restoreOutput()
+	if err := svc.Run(); err != nil {
+		return &managedServiceError{configPath: abs, interactive: prg.interactive, err: err}
+	}
+	return nil
 }
 
 func planRun(w io.Writer, configPath string, installDeps bool) error {
@@ -552,47 +611,22 @@ func planRun(w io.Writer, configPath string, installDeps bool) error {
 	return nil
 }
 
-// program adapts the orchestrator to the kardianos service lifecycle.
-type program struct {
-	cfgPath     string
-	installDeps bool
-	interactive bool
-	cancel      context.CancelFunc
-	done        chan struct{}
-}
-
-func (p *program) Start(s service.Service) error {
-	ctx, cancel := context.WithCancel(context.Background())
-	p.cancel = cancel
-	p.done = make(chan struct{})
-	go func() {
-		defer close(p.done)
-		if err := runOrchestrator(ctx, p.cfgPath, p.interactive, p.installDeps); err != nil && ctx.Err() == nil {
-			fmt.Fprintln(os.Stderr, "multirunner: "+err.Error())
-		}
-	}()
-	return nil
-}
-
-func (p *program) Stop(s service.Service) error {
-	if p.cancel != nil {
-		p.cancel()
-	}
-	select {
-	case <-p.done:
-	case <-time.After(20 * time.Second):
-	}
-	return nil
-}
-
 // runOrchestrator loads config, runs preflight, starts the cache + pools, and
 // blocks until ctx is cancelled.
-func runOrchestrator(ctx context.Context, configPath string, interactive, installDeps bool) error {
+func runOrchestrator(ctx context.Context, configPath string, interactive, installDeps bool, output io.Writer) (err error) {
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		return err
 	}
-	logger := newLogger(cfg.Log)
+	secrets := []string{cfg.Auth.PAT, cfg.Webhook.Secret, cfg.Cache.AccessToken}
+	logger := newLogger(cfg.Log, output, secrets...)
+	defer func() {
+		if err != nil && ctx.Err() == nil {
+			message := sanitizeLogTextWithSecrets(err.Error(), secrets...)
+			logger.Error("orchestrator failed", "err", message)
+			err = errors.New(message)
+		}
+	}()
 	for _, warn := range cfg.Warnings() {
 		logger.Warn(warn)
 	}
@@ -933,6 +967,31 @@ func readYes() bool {
 
 // doctor checks each pool's daemon reachability and container mode.
 func doctor(configPath string) error {
+	allOK := true
+	serviceInstalled := false
+	if svc, _, err := newService(configPath, false); err == nil {
+		status, statusErr := servicehost.Status("multirunner", svc)
+		message, unhealthy, report := classifyServiceHealth(status, statusErr)
+		serviceInstalled = report
+		if report {
+			fmt.Println("[service] " + message)
+		}
+		if unhealthy {
+			allOK = false
+		}
+	}
+	if recovery, err := servicehost.ReadFailureStatus(configPath, time.Now()); serviceInstalled && err != nil {
+		fmt.Println("[service] DEGRADED: " + sanitizeLogText(err.Error()))
+		allOK = false
+	} else if serviceInstalled && recovery.Count >= servicehost.CrashLoopFailureCount {
+		fmt.Printf("[service] CRASH LOOP: %d fatal exits within %s; last error: %s\n",
+			recovery.Count, servicehost.FailureWindow, recovery.LastError)
+		allOK = false
+	} else if serviceInstalled && recovery.Count > 0 {
+		fmt.Printf("[service] DEGRADED: recovery attempt %d of %d; last error: %s\n",
+			recovery.Count, servicehost.CrashLoopFailureCount, recovery.LastError)
+		allOK = false
+	}
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		return err
@@ -943,7 +1002,6 @@ func doctor(configPath string) error {
 	fmt.Printf("config: %s\nscope=%s owner=%s pools=%d cache=%v\n\n",
 		configPath, cfg.GitHub.Scope, cfg.GitHub.Owner, len(cfg.Pools), cfg.Cache.Enabled)
 
-	allOK := true
 	for _, pc := range cfg.Pools {
 		be, err := newBackend(pc)
 		if err != nil {
@@ -1223,24 +1281,4 @@ func runRepoChecks(
 	}
 	wg.Wait()
 	return results
-}
-
-func newLogger(l config.Log) *slog.Logger {
-	level := slog.LevelInfo
-	switch strings.ToLower(l.Level) {
-	case "debug":
-		level = slog.LevelDebug
-	case "warn":
-		level = slog.LevelWarn
-	case "error":
-		level = slog.LevelError
-	}
-	opts := &slog.HandlerOptions{Level: level}
-	var h slog.Handler
-	if strings.ToLower(l.Format) == "json" {
-		h = slog.NewJSONHandler(os.Stderr, opts)
-	} else {
-		h = slog.NewTextHandler(os.Stderr, opts)
-	}
-	return slog.New(h)
 }
