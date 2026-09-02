@@ -48,7 +48,7 @@ func TestSupervisorResetsBackoffAfterHealthyRun(t *testing.T) {
 	}
 	err := superviseSession(t.Context(), SupervisedSession{
 		Name: "linux",
-		Run:  func(context.Context) error { return errors.New("temporary") },
+		Run:  func(context.Context, func()) error { return errors.New("temporary") },
 	}, cfg, testLogger())
 	if err != nil {
 		t.Fatalf("superviseSession: %v", err)
@@ -72,7 +72,7 @@ func TestSupervisorCancellationInterruptsBackoff(t *testing.T) {
 	go func() {
 		done <- superviseSession(ctx, SupervisedSession{
 			Name: "linux",
-			Run:  func(context.Context) error { return errors.New("temporary") },
+			Run:  func(context.Context, func()) error { return errors.New("temporary") },
 		}, cfg, testLogger())
 	}()
 	<-startedSleep
@@ -87,7 +87,7 @@ func TestRunSupervisedReturnsForCanceledContext(t *testing.T) {
 	cancel()
 	err := RunSupervised(ctx, []SupervisedSession{{
 		Name: "linux",
-		Run:  func(context.Context) error { t.Fatal("session ran after cancellation"); return nil },
+		Run:  func(context.Context, func()) error { t.Fatal("session ran after cancellation"); return nil },
 	}}, nil)
 	if err != nil {
 		t.Fatalf("RunSupervised: %v", err)
@@ -118,10 +118,11 @@ func TestRunSupervisedIsolatesTransientSiblingFailure(t *testing.T) {
 	sessions := []SupervisedSession{
 		{
 			Name: "failing",
-			Run: func(ctx context.Context) error {
+			Run: func(ctx context.Context, available func()) error {
 				if failedRuns.Add(1) == 1 {
 					return errors.New("network reset")
 				}
+				available()
 				close(retried)
 				<-ctx.Done()
 				return ctx.Err()
@@ -129,7 +130,8 @@ func TestRunSupervisedIsolatesTransientSiblingFailure(t *testing.T) {
 		},
 		{
 			Name: "healthy",
-			Run: func(ctx context.Context) error {
+			Run: func(ctx context.Context, available func()) error {
+				available()
 				close(healthyStarted)
 				<-ctx.Done()
 				return ctx.Err()
@@ -154,14 +156,15 @@ func TestRunSupervisedSurfacesPermanentFailure(t *testing.T) {
 	sessions := []SupervisedSession{
 		{
 			Name: "unauthorized",
-			Run: func(context.Context) error {
+			Run: func(context.Context, func()) error {
 				close(permanentReturned)
 				return errors.New(`request failed(status="401 Unauthorized")`)
 			},
 		},
 		{
 			Name: "healthy",
-			Run: func(ctx context.Context) error {
+			Run: func(ctx context.Context, available func()) error {
+				available()
 				close(healthyStarted)
 				<-ctx.Done()
 				close(siblingCanceled)
@@ -196,7 +199,7 @@ func TestHTTPNotFoundIsRecoverable(t *testing.T) {
 
 	err := superviseSession(t.Context(), SupervisedSession{
 		Name: "recreated",
-		Run: func(context.Context) error {
+		Run: func(context.Context, func()) error {
 			runs.Add(1)
 			return errors.New(`request failed(status="404 Not Found")`)
 		},
@@ -219,5 +222,53 @@ func TestAuthenticationAndConfigurationErrorsRemainPermanent(t *testing.T) {
 		if !isPermanentSessionError(err) {
 			t.Errorf("error %q was not permanent", err)
 		}
+	}
+}
+
+func TestSupervisorReportsAvailabilityTransitions(t *testing.T) {
+	var states []SessionAvailability
+	cfg := defaultSupervisorConfig()
+	cfg.sleep = func(context.Context, time.Duration) bool { return false }
+	err := superviseSession(t.Context(), SupervisedSession{
+		Name: "linux",
+		Run: func(_ context.Context, available func()) error {
+			available()
+			return errors.New("connection lost")
+		},
+		OnStateChange: func(state SessionAvailability) {
+			states = append(states, state)
+		},
+	}, cfg, testLogger())
+	if err != nil {
+		t.Fatalf("superviseSession: %v", err)
+	}
+	want := []SessionAvailability{SessionBackingOff, SessionAvailable, SessionBackingOff}
+	if len(states) != len(want) {
+		t.Fatalf("states = %v, want %v", states, want)
+	}
+	for i := range want {
+		if states[i] != want[i] {
+			t.Fatalf("states = %v, want %v", states, want)
+		}
+	}
+}
+
+func TestSupervisorReportsPermanentUnavailability(t *testing.T) {
+	var states []SessionAvailability
+	err := superviseSession(t.Context(), SupervisedSession{
+		Name: "linux",
+		Run: func(context.Context, func()) error {
+			return errors.New(`request failed(status="401 Unauthorized")`)
+		},
+		OnStateChange: func(state SessionAvailability) {
+			states = append(states, state)
+		},
+	}, defaultSupervisorConfig(), testLogger())
+	if err == nil {
+		t.Fatal("superviseSession returned nil for permanent failure")
+	}
+	want := []SessionAvailability{SessionBackingOff, SessionPermanentlyUnavailable}
+	if len(states) != len(want) || states[0] != want[0] || states[1] != want[1] {
+		t.Fatalf("states = %v, want %v", states, want)
 	}
 }

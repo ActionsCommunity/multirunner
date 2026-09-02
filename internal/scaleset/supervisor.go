@@ -20,9 +20,19 @@ const (
 
 // SupervisedSession describes one independently restarted scale-set session.
 type SupervisedSession struct {
-	Name string
-	Run  func(context.Context) error
+	Name          string
+	Run           func(context.Context, func()) error
+	OnStateChange func(SessionAvailability)
 }
+
+// SessionAvailability is the externally observable state of a required session.
+type SessionAvailability uint8
+
+const (
+	SessionBackingOff SessionAvailability = iota
+	SessionAvailable
+	SessionPermanentlyUnavailable
+)
 
 type supervisorConfig struct {
 	initialBackoff time.Duration
@@ -82,10 +92,17 @@ func runSupervised(ctx context.Context, sessions []SupervisedSession, cfg superv
 
 func superviseSession(ctx context.Context, session SupervisedSession, cfg supervisorConfig, logger *slog.Logger) error {
 	failures := 0
+	reportSessionState(session, SessionBackingOff)
 	for ctx.Err() == nil {
 		started := cfg.now()
-		err := session.Run(ctx)
+		var availableOnce sync.Once
+		err := session.Run(ctx, func() {
+			availableOnce.Do(func() {
+				reportSessionState(session, SessionAvailable)
+			})
+		})
 		if isPermanentSessionError(err) {
+			reportSessionState(session, SessionPermanentlyUnavailable)
 			return fmt.Errorf("scale set %q failed permanently: %w", session.Name, err)
 		}
 		if ctx.Err() != nil {
@@ -99,6 +116,7 @@ func superviseSession(ctx context.Context, session SupervisedSession, cfg superv
 		}
 		failures++
 		delay := supervisorBackoff(failures, cfg.initialBackoff, cfg.maxBackoff)
+		reportSessionState(session, SessionBackingOff)
 		logger.Error("scale set session failed; retrying",
 			slog.Int("consecutiveFailures", failures),
 			slog.Duration("retryAfter", delay),
@@ -108,6 +126,12 @@ func superviseSession(ctx context.Context, session SupervisedSession, cfg superv
 		}
 	}
 	return nil
+}
+
+func reportSessionState(session SupervisedSession, state SessionAvailability) {
+	if session.OnStateChange != nil {
+		session.OnStateChange(state)
+	}
 }
 
 func supervisorBackoff(failures int, initial, maximum time.Duration) time.Duration {

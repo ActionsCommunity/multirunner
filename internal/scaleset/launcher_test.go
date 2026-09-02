@@ -26,13 +26,21 @@ type fakeJIT struct {
 	removeErr        error
 	removeHook       func(int64)
 	omitRunner       bool
+	blockGenerate    bool
+	generateStarted  chan struct{}
+	generateOnce     sync.Once
 }
 
 func (f *fakeJIT) GenerateJitRunnerConfig(
-	_ context.Context,
+	ctx context.Context,
 	setting *scaleset.RunnerScaleSetJitRunnerSetting,
 	_ int,
 ) (*scaleset.RunnerScaleSetJitRunnerConfig, error) {
+	if f.blockGenerate {
+		f.generateOnce.Do(func() { close(f.generateStarted) })
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.err != nil {
@@ -137,6 +145,13 @@ type fakeBackend struct {
 	removeOwnedErr      error
 	blockOwnedRemoval   bool
 	removeOwnedHook     func(string)
+	blockLaunch         bool
+	launchStarted       chan struct{}
+	launchOnce          sync.Once
+	blockList           bool
+	listStarted         chan struct{}
+	listOnce            sync.Once
+	listCalls           int
 }
 
 type unsupportedBackend struct{}
@@ -156,11 +171,20 @@ func (b *fakeBackend) OSType(context.Context) (string, error)    { return "linux
 func (b *fakeBackend) EnsureImage(context.Context, string) error { return nil }
 func (b *fakeBackend) Close() error                              { return nil }
 
-func (b *fakeBackend) ListOwnedRunners(_ context.Context, ownership backend.RunnerOwnership) ([]backend.OwnedRunner, error) {
+func (b *fakeBackend) ListOwnedRunners(ctx context.Context, ownership backend.RunnerOwnership) ([]backend.OwnedRunner, error) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	b.listOwnership = ownership
-	return append([]backend.OwnedRunner(nil), b.owned...), b.listErr
+	b.listCalls++
+	block := b.blockList
+	owned := append([]backend.OwnedRunner(nil), b.owned...)
+	err := b.listErr
+	b.mu.Unlock()
+	if block {
+		b.listOnce.Do(func() { close(b.listStarted) })
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	return owned, err
 }
 
 func (b *fakeBackend) RemoveOwnedRunner(ctx context.Context, resourceID string) error {
@@ -179,7 +203,12 @@ func (b *fakeBackend) RemoveOwnedRunner(ctx context.Context, resourceID string) 
 	return err
 }
 
-func (b *fakeBackend) Launch(_ context.Context, req backend.LaunchRequest) (backend.RunnerHandle, error) {
+func (b *fakeBackend) Launch(ctx context.Context, req backend.LaunchRequest) (backend.RunnerHandle, error) {
+	if b.blockLaunch {
+		b.launchOnce.Do(func() { close(b.launchStarted) })
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	h := &fakeHandle{name: req.Name, done: make(chan struct{})}
@@ -223,6 +252,12 @@ func (b *fakeBackend) setOwnedRemovalError(err error) {
 	b.removeOwnedErr = err
 }
 
+func (b *fakeBackend) ownedListCalls() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.listCalls
+}
+
 func (f *fakeJIT) removedIDs() []int64 {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -260,7 +295,7 @@ func waitFor(t *testing.T, cond func() bool) {
 func TestDesiredCountLaunchesRunnersCarryingTheJITConfig(t *testing.T) {
 	jit := &fakeJIT{}
 	be := &fakeBackend{}
-	l := New(jit, be, Options{
+	l := New(t.Context(), jit, be, Options{
 		ScaleSetID: 7,
 		Image:      "runner:latest",
 		WorkFolder: "_work",
@@ -308,7 +343,7 @@ func TestDesiredCountLaunchesRunnersCarryingTheJITConfig(t *testing.T) {
 }
 
 func TestDesiredCountIsIdempotentWhileRunnersAreUp(t *testing.T) {
-	l := New(&fakeJIT{}, &fakeBackend{}, Options{ScaleSetID: 1})
+	l := New(t.Context(), &fakeJIT{}, &fakeBackend{}, Options{ScaleSetID: 1})
 
 	if _, err := l.HandleDesiredRunnerCount(t.Context(), 2); err != nil {
 		t.Fatalf("first call: %v", err)
@@ -329,7 +364,7 @@ func TestDesiredCountIsIdempotentWhileRunnersAreUp(t *testing.T) {
 func TestExitedRunnerFreesItsSlot(t *testing.T) {
 	be := &fakeBackend{}
 	jit := &fakeJIT{}
-	l := New(jit, be, Options{ScaleSetID: 1})
+	l := New(t.Context(), jit, be, Options{ScaleSetID: 1})
 
 	if _, err := l.HandleDesiredRunnerCount(t.Context(), 2); err != nil {
 		t.Fatalf("launch: %v", err)
@@ -350,7 +385,7 @@ func TestExitedRunnerFreesItsSlot(t *testing.T) {
 func TestBusyRunnerExitDoesNotDeregister(t *testing.T) {
 	jit := &fakeJIT{}
 	be := &fakeBackend{}
-	l := New(jit, be, Options{ScaleSetID: 1})
+	l := New(t.Context(), jit, be, Options{ScaleSetID: 1})
 
 	if _, err := l.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
 		t.Fatalf("launch: %v", err)
@@ -377,7 +412,7 @@ func TestBusyRunnerExitDoesNotDeregister(t *testing.T) {
 
 func TestMaxRunnersCapsWhatTheHostAdvertises(t *testing.T) {
 	be := &fakeBackend{}
-	l := New(&fakeJIT{}, be, Options{ScaleSetID: 1, MaxRunners: 2})
+	l := New(t.Context(), &fakeJIT{}, be, Options{ScaleSetID: 1, MaxRunners: 2})
 
 	got, err := l.HandleDesiredRunnerCount(t.Context(), 5)
 	if err != nil {
@@ -394,7 +429,7 @@ func TestMaxRunnersCapsWhatTheHostAdvertises(t *testing.T) {
 func TestPartialLaunchReportsWhatStarted(t *testing.T) {
 	jit := &fakeJIT{}
 	be := &fakeBackend{err: errors.New("daemon unreachable")}
-	l := New(jit, be, Options{ScaleSetID: 1})
+	l := New(t.Context(), jit, be, Options{ScaleSetID: 1})
 
 	got, err := l.HandleDesiredRunnerCount(t.Context(), 3)
 	if err != nil {
@@ -414,7 +449,7 @@ func TestPartialLaunchHandleStaysCountedUntilCleanupConverges(t *testing.T) {
 		err:           errors.New("launch response lost"),
 		handleOnError: true,
 	}
-	l := New(jit, be, Options{
+	l := New(t.Context(), jit, be, Options{
 		ScaleSetID: 1,
 		Ownership: backend.RunnerOwnership{
 			Instance: "host", Target: "https://github.com/o/r", Pool: "linux", ScaleSetID: 1,
@@ -441,7 +476,7 @@ func TestPartialLaunchHandleStaysCountedUntilCleanupConverges(t *testing.T) {
 func TestMissingRunnerIdentityDoesNotLaunchBackend(t *testing.T) {
 	jit := &fakeJIT{omitRunner: true}
 	be := &fakeBackend{}
-	l := New(jit, be, Options{ScaleSetID: 1})
+	l := New(t.Context(), jit, be, Options{ScaleSetID: 1})
 
 	got, err := l.HandleDesiredRunnerCount(t.Context(), 1)
 	if err != nil {
@@ -458,7 +493,7 @@ func TestMissingRunnerIdentityDoesNotLaunchBackend(t *testing.T) {
 func TestFailedLaunchRegistrationCleanupRetriesWithoutStoppingListener(t *testing.T) {
 	jit := &fakeJIT{removeErr: errors.New("service unavailable")}
 	be := &fakeBackend{err: errors.New("daemon unreachable")}
-	l := New(jit, be, Options{ScaleSetID: 1})
+	l := New(t.Context(), jit, be, Options{ScaleSetID: 1})
 
 	got, err := l.HandleDesiredRunnerCount(t.Context(), 1)
 	if err != nil || got != 0 {
@@ -479,7 +514,7 @@ func TestFailedLaunchRegistrationCleanupRetriesWithoutStoppingListener(t *testin
 
 func TestPermanentLaunchFailureStopsListenerCallback(t *testing.T) {
 	jit := &fakeJIT{err: errors.New(`request failed(status="401 Unauthorized")`)}
-	l := New(jit, &fakeBackend{}, Options{ScaleSetID: 1})
+	l := New(t.Context(), jit, &fakeBackend{}, Options{ScaleSetID: 1})
 
 	got, err := l.HandleDesiredRunnerCount(t.Context(), 1)
 	if err == nil {
@@ -493,8 +528,8 @@ func TestPermanentLaunchFailureStopsListenerCallback(t *testing.T) {
 func TestRunnerNamesAreUniqueAcrossLaunchers(t *testing.T) {
 	be1 := &fakeBackend{}
 	be2 := &fakeBackend{}
-	l1 := New(&fakeJIT{}, be1, Options{ScaleSetID: 1})
-	l2 := New(&fakeJIT{}, be2, Options{ScaleSetID: 1})
+	l1 := New(t.Context(), &fakeJIT{}, be1, Options{ScaleSetID: 1})
+	l2 := New(t.Context(), &fakeJIT{}, be2, Options{ScaleSetID: 1})
 
 	if _, err := l1.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
 		t.Fatalf("first launcher: %v", err)
@@ -504,5 +539,104 @@ func TestRunnerNamesAreUniqueAcrossLaunchers(t *testing.T) {
 	}
 	if got1, got2 := be1.requests()[0].Name, be2.requests()[0].Name; got1 == got2 {
 		t.Fatalf("runner names collided: %q", got1)
+	}
+}
+
+func TestHungJITLaunchStopsWhenSessionIsCanceled(t *testing.T) {
+	sessionCtx, cancel := context.WithCancel(t.Context())
+	jit := &fakeJIT{blockGenerate: true, generateStarted: make(chan struct{})}
+	l := New(sessionCtx, jit, &fakeBackend{}, Options{
+		ScaleSetID:    1,
+		launchTimeout: time.Hour,
+	})
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := l.HandleDesiredRunnerCount(context.WithoutCancel(sessionCtx), 1)
+		done <- err
+	}()
+	<-jit.generateStarted
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("desired count after cancellation: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("hung JIT generation ignored session cancellation")
+	}
+	if running := l.Running(); running != 0 {
+		t.Fatalf("running after cancellation = %d, want zero", running)
+	}
+	if err := l.Shutdown(t.Context()); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+}
+
+func TestHungBackendLaunchStopsWhenSessionIsCanceled(t *testing.T) {
+	sessionCtx, cancel := context.WithCancel(t.Context())
+	jit := &fakeJIT{}
+	be := &fakeBackend{blockLaunch: true, launchStarted: make(chan struct{})}
+	l := New(sessionCtx, jit, be, Options{
+		ScaleSetID:    1,
+		launchTimeout: time.Hour,
+	})
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := l.HandleDesiredRunnerCount(context.WithoutCancel(sessionCtx), 1)
+		done <- err
+	}()
+	<-be.launchStarted
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("desired count after cancellation: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("hung backend launch ignored session cancellation")
+	}
+	if removed := jit.removedIDs(); len(removed) != 1 {
+		t.Fatalf("removed registrations = %v, want timed-out launch registration cleaned", removed)
+	}
+	if err := l.Shutdown(t.Context()); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+}
+
+func TestHungLaunchOperationsHaveBoundedTimeouts(t *testing.T) {
+	tests := []struct {
+		name string
+		jit  *fakeJIT
+		be   *fakeBackend
+	}{
+		{
+			name: "JIT generation",
+			jit:  &fakeJIT{blockGenerate: true, generateStarted: make(chan struct{})},
+			be:   &fakeBackend{},
+		},
+		{
+			name: "backend launch",
+			jit:  &fakeJIT{},
+			be:   &fakeBackend{blockLaunch: true, launchStarted: make(chan struct{})},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			l := New(t.Context(), test.jit, test.be, Options{
+				ScaleSetID:    1,
+				launchTimeout: 20 * time.Millisecond,
+			})
+			started := time.Now()
+			if _, err := l.HandleDesiredRunnerCount(context.WithoutCancel(t.Context()), 1); err != nil {
+				t.Fatalf("HandleDesiredRunnerCount: %v", err)
+			}
+			if elapsed := time.Since(started); elapsed > time.Second {
+				t.Fatalf("hung operation returned after %s, want bounded timeout", elapsed)
+			}
+		})
 	}
 }

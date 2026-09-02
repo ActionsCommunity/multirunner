@@ -73,7 +73,7 @@ func runScaleset(ctx context.Context, cfg *config.Config, pools []scaleSetPool, 
 		}
 		sessions = append(sessions, scalesetmode.SupervisedSession{
 			Name: p.cfg.ScaleSet,
-			Run: func(runCtx context.Context) error {
+			Run: func(runCtx context.Context, _ func()) error {
 				return scalesetmode.Run(runCtx, client, p.be, sessionOptions, logger.With("pool", p.cfg.Name))
 			},
 		})
