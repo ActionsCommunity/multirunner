@@ -1,11 +1,10 @@
 ---
 name: multirunner-update
 description: >-
-  **WORKFLOW SKILL**: Upgrade multirunner binaries and images with checksums,
-  rollback, validation, and an approved canary. INVOKES: release API reads,
-  checksum tools, multirunner doctor, runtime and service tools, GitHub CLI
-  dispatch commands. USE FOR: update multirunner, upgrade runner host, refresh
-  multirunner images, verify multirunner upgrade. DO NOT USE FOR: first installation
+  **WORKFLOW SKILL**: Upgrade multirunner with checksums, rollback, validation,
+  and an approved canary. INVOKES: release API reads, checksum, doctor, runtime
+  and service tools, GitHub CLI reads and approved dispatch. USE FOR: update
+  multirunner, upgrade runner host, refresh images. DO NOT USE FOR: installation
   (use multirunner-setup), health-only checks (use multirunner-health), target changes
   (use multirunner-targets), unrelated runtime upgrades.
 ---
@@ -23,7 +22,7 @@ the applicable [Windows host](../references/windows-host.md) or
 
 ## Workflow
 
-1. Record version, paths, service, runtimes, images, disk, and doctor baseline.
+1. Record version, service, runtimes, images, disk, and doctor baseline.
 2. Compare with the latest stable release and read its notes.
 3. Verify the staged release and its reported version.
 4. Present service actions, image pulls, compatibility diff, canary, and rollback.
@@ -35,3 +34,8 @@ the applicable [Windows host](../references/windows-host.md) or
 9. Ask before service start or restart. Verify service, doctor, `/health`, runtime,
    capacity, and reprovision errors.
 10. Complete the approved canary procedure. Retain rollback assets.
+
+## Success criteria
+
+Checksum, service, doctor, `/health`, and canary pass; rollback remains available;
+configuration is unchanged or matches the exact approved diff.

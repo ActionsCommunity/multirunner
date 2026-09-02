@@ -1,9 +1,9 @@
 ---
 name: multirunner-troubleshoot
 description: >-
-  **ANALYSIS SKILL**: Diagnose multirunner runtime, image, authentication, queue,
-  and service failures from bounded, secret-safe evidence. INVOKES: multirunner
-  doctor, service and runtime tools, HTTP health checks, GitHub CLI read commands.
+  **ANALYSIS SKILL**: Diagnose runtime, image, auth, queue, and service failures
+  from bounded, secret-safe evidence. INVOKES: multirunner doctor, host tools,
+  HTTP health checks, GitHub CLI reads.
   USE FOR: troubleshoot multirunner, jobs stuck queued, runtime unreachable, wrong
   container mode, service crash loop. DO NOT USE FOR: initial setup
   (use multirunner-setup), routine health checks (use multirunner-health), target
@@ -21,7 +21,7 @@ Diagnosis stays read-only until remediation is approved.
 
 ## Workflow
 
-1. Capture symptom, target, pool, time, and last healthy state.
+1. Capture symptom, target, pool, and last healthy state.
 2. Run doctor and inspect at most 200 redacted service log lines.
 3. Trace the first broken boundary:
 
@@ -33,7 +33,12 @@ Diagnosis stays read-only until remediation is approved.
 | Queued jobs | Scope, labels, Actions setting, `runs-on`, capacity |
 | Crash loop | Exit state, config, bounded logs, runtime dependencies |
 
-4. Correlate `/health`, bounded metrics, and GitHub run timestamps.
+4. Correlate `/health`, bounded metrics, and run timestamps.
 5. State a verified cause or the missing evidence. Don't guess.
 6. Propose one minimal correction and request required approvals.
-7. Rerun the failed check, doctor, and `/health`. A canary needs separate approval.
+7. Rerun failed check, doctor, and `/health`. A canary needs approval.
+
+## Success criteria
+
+Evidence proves the cause and repaired boundary; doctor and `/health` pass; no
+mutation occurred without approval.
