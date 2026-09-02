@@ -2,19 +2,22 @@
 package buildinfo
 
 import (
-	"runtime/debug"
 	"strings"
 )
 
 const (
 	defaultVersion = "dev"
 	unknownCommit  = "unknown"
+
+	// VersionVariable and CommitVariable are the canonical linker variable paths.
+	VersionVariable = "github.com/GerardSmit/multirunner/internal/buildinfo.Version"
+	CommitVariable  = "github.com/GerardSmit/multirunner/internal/buildinfo.Commit"
 )
 
 // Version and Commit are set by release builds using the Go linker's -X flag.
 var (
 	Version = defaultVersion
-	Commit  string
+	Commit  = unknownCommit
 )
 
 // Info identifies one multirunner build.
@@ -23,30 +26,17 @@ type Info struct {
 	Commit  string
 }
 
-// Current returns the linked release identity, falling back to Go's embedded
-// VCS revision for local builds.
+// Current returns the linked build identity.
 func Current() Info {
-	build, ok := debug.ReadBuildInfo()
-	if !ok {
-		return resolve(Version, Commit, nil)
-	}
-	return resolve(Version, Commit, build.Settings)
+	return resolve(Version, Commit)
 }
 
-func resolve(version, commit string, settings []debug.BuildSetting) Info {
+func resolve(version, commit string) Info {
 	version = strings.TrimSpace(version)
 	if version == "" {
 		version = defaultVersion
 	}
 	commit = strings.TrimSpace(commit)
-	if commit == "" {
-		for _, setting := range settings {
-			if setting.Key == "vcs.revision" {
-				commit = strings.TrimSpace(setting.Value)
-				break
-			}
-		}
-	}
 	if commit == "" {
 		commit = unknownCommit
 	}

@@ -1,26 +1,16 @@
 package buildinfo
 
-import (
-	"runtime/debug"
-	"testing"
-)
+import "testing"
 
 func TestResolveUsesLocalBuildDefaults(t *testing.T) {
-	got := resolve("", "", []debug.BuildSetting{{Key: "vcs.revision", Value: "abc123"}})
-	if got.Version != "dev" || got.Commit != "abc123" {
-		t.Fatalf("resolve local build = %+v, want dev at abc123", got)
-	}
-}
-
-func TestResolveMarksUnavailableLocalCommit(t *testing.T) {
-	got := resolve("", "", nil)
+	got := resolve("", "")
 	if got.Version != "dev" || got.Commit != "unknown" {
 		t.Fatalf("resolve local build = %+v, want dev at unknown", got)
 	}
 }
 
 func TestResolvePrefersInjectedValues(t *testing.T) {
-	got := resolve("v1.2.3", "release456", []debug.BuildSetting{{Key: "vcs.revision", Value: "local123"}})
+	got := resolve("v1.2.3", "release456")
 	if got.Version != "v1.2.3" || got.Commit != "release456" {
 		t.Fatalf("resolve release build = %+v", got)
 	}

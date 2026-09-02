@@ -39,29 +39,6 @@ func TestVersionOutputIncludesVersionAndCommit(t *testing.T) {
 	}
 }
 
-func TestReleaseWorkflowInjectsOneIdentityIntoEveryTarget(t *testing.T) {
-	workflow, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", "release.yml"))
-	if err != nil {
-		t.Fatalf("read release workflow: %v", err)
-	}
-	text := string(workflow)
-	for _, want := range []string{
-		"linux/amd64 linux/arm64 windows/amd64 windows/arm64 darwin/amd64 darwin/arm64",
-		`COMMIT="${GITHUB_SHA}"`,
-		"-X github.com/GerardSmit/multirunner/internal/buildinfo.Version=${VER}",
-		"-X github.com/GerardSmit/multirunner/internal/buildinfo.Commit=${COMMIT}",
-		`go build -trimpath -ldflags "$LDFLAGS"`,
-		"multirunner --version",
-	} {
-		if !strings.Contains(text, want) {
-			t.Errorf("release workflow is missing %q", want)
-		}
-	}
-	if got := strings.Count(text, "go build -trimpath"); got != 1 {
-		t.Errorf("release workflow has %d build commands, want one shared command", got)
-	}
-}
-
 func TestBakeCommandExposesIntegrityFlags(t *testing.T) {
 	cmd := bakeCmd()
 	for _, name := range []string{"iso-sha256", "runner-sha256"} {

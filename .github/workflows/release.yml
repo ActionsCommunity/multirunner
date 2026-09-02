@@ -28,7 +28,6 @@ jobs:
             VER="dev-$(git rev-parse --short HEAD)"
           fi
           COMMIT="${GITHUB_SHA}"
-          LDFLAGS="-s -w -X github.com/GerardSmit/multirunner/internal/buildinfo.Version=${VER} -X github.com/GerardSmit/multirunner/internal/buildinfo.Commit=${COMMIT}"
           echo "version=$VER" >> "$GITHUB_ENV"
           mkdir -p dist
           for t in linux/amd64 linux/arm64 windows/amd64 windows/arm64 darwin/amd64 darwin/arm64; do
@@ -36,8 +35,9 @@ jobs:
             [ "$os" = "windows" ] && ext=".exe"
             out="dist/multirunner_${VER}_${os}_${arch}${ext}"
             echo "building $out"
-            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
-              go build -trimpath -ldflags "$LDFLAGS" -o "$out" ./cmd/multirunner
+            go run ./cmd/build \
+              -version "$VER" -commit "$COMMIT" \
+              -goos "$os" -goarch "$arch" -o "$out"
           done
           ( cd dist && sha256sum * > SHA256SUMS.txt )
           ls -la dist
