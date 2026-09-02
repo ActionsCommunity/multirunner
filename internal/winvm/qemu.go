@@ -33,6 +33,9 @@ type LaunchOpts struct {
 	Golden     string // base (golden) qcow2, read-only backing file
 	Overlay    string // per-job copy-on-write overlay qcow2
 	JITISOPath string // config ISO carrying the JIT blob
+	Name       string // process identity returned by QMP
+	QMPAddr    string // loopback QMP endpoint used for restart cleanup
+	PIDFile    string // QEMU-owned process ID record
 	MemMB      int
 	CPUs       int
 	Accel      string // "" = tcg; callers normally resolve host-compatible auto mode
@@ -150,6 +153,15 @@ func QEMUArgs(o LaunchOpts) []string {
 		"-m", strconv.Itoa(mem),
 		"-smp", strconv.Itoa(cpus),
 	}
+	if o.Name != "" {
+		args = append(args, "-name", o.Name)
+	}
+	if o.PIDFile != "" {
+		args = append(args, "-pidfile", o.PIDFile)
+	}
+	if o.QMPAddr != "" {
+		args = append(args, "-qmp", "tcp:"+o.QMPAddr+",server=on,wait=off")
+	}
 	if o.Firmware.CodeFD != "" {
 		// UEFI: skips the BIOS "Press any key to boot from CD" prompt.
 		args = append(args,
@@ -172,7 +184,10 @@ func QEMUArgs(o LaunchOpts) []string {
 	)
 	// Debug: MULTIRUNNER_VM_VNC="0.0.0.0:2,websocket=5702" attaches a viewer + QMP.
 	if vnc := os.Getenv("MULTIRUNNER_VM_VNC"); vnc != "" {
-		args = append(args, "-vnc", vnc, "-qmp", "tcp:127.0.0.1:4457,server,nowait")
+		args = append(args, "-vnc", vnc)
+		if o.QMPAddr == "" {
+			args = append(args, "-qmp", "tcp:127.0.0.1:4457,server=on,wait=off")
+		}
 	} else {
 		args = append(args, "-display", "none")
 	}

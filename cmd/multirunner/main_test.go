@@ -43,7 +43,7 @@ func TestQEMUHousekeepingRejectsUnexpectedISO(t *testing.T) {
 	}}}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	if err := runQEMUHousekeeping(t.Context(), cfg, logger); err == nil ||
-		!strings.Contains(err.Error(), "Windows ISO SHA256 mismatch") {
+		!strings.Contains(err.Error(), "windows ISO SHA256 mismatch") {
 		t.Fatalf("housekeeping error = %v", err)
 	}
 }

@@ -468,7 +468,7 @@ func ToolsHash(o BakeOptions) (string, error) {
 	if o.WindowsISO != "" {
 		if o.WindowsISOSHA256 != "" {
 			if err := validateSHA256(o.WindowsISOSHA256); err != nil {
-				return "", fmt.Errorf("Windows ISO SHA256: %w", err)
+				return "", fmt.Errorf("windows ISO SHA256: %w", err)
 			}
 		}
 		var err error
@@ -477,7 +477,7 @@ func ToolsHash(o BakeOptions) (string, error) {
 			return "", fmt.Errorf("hash Windows ISO: %w", err)
 		}
 		if o.WindowsISOSHA256 != "" && !strings.EqualFold(isoDigest, o.WindowsISOSHA256) {
-			return "", fmt.Errorf("Windows ISO SHA256 mismatch: got %s, want %s", isoDigest, o.WindowsISOSHA256)
+			return "", fmt.Errorf("windows ISO SHA256 mismatch: got %s, want %s", isoDigest, o.WindowsISOSHA256)
 		}
 	}
 	plan, err := resolveToolPlan(o.Tools)

@@ -43,11 +43,14 @@ func TestOverlayCreateArgs(t *testing.T) {
 func TestQEMUArgs(t *testing.T) {
 	got := strings.Join(QEMUArgs(LaunchOpts{
 		Overlay: "job.qcow2", JITISOPath: "jit.iso", MemMB: 8192, CPUs: 4, Accel: "kvm",
+		Name: "runner-1", QMPAddr: "127.0.0.1:4567", PIDFile: "runner-1.pid",
 	}), " ")
 	for _, want := range []string{
 		"-accel kvm", "-m 8192", "-smp 4",
 		"file=job.qcow2,if=none,id=osdisk,format=qcow2", "ide-hd,drive=osdisk",
 		"file=jit.iso,media=cdrom,readonly=on",
+		"-name runner-1", "-pidfile runner-1.pid",
+		"-qmp tcp:127.0.0.1:4567,server=on,wait=off",
 		"-display none", "e1000", "-serial",
 	} {
 		if !strings.Contains(got, want) {

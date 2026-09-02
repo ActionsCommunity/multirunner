@@ -1,10 +1,11 @@
 module github.com/GerardSmit/multirunner
 
-go 1.26.4
+go 1.26.6
 
 require (
 	github.com/actions/scaleset v0.4.0
 	github.com/bradleyfalzon/ghinstallation/v2 v2.19.0
+	github.com/containerd/errdefs v1.0.0
 	github.com/docker/docker v28.5.2+incompatible
 	github.com/google/go-github/v66 v66.0.0
 	github.com/kardianos/service v1.2.4
@@ -22,7 +23,6 @@ require (
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
-	github.com/containerd/errdefs v1.0.0 // indirect
 	github.com/containerd/errdefs/pkg v0.3.0 // indirect
 	github.com/distribution/reference v0.6.0 // indirect
 	github.com/docker/go-connections v0.6.0 // indirect
