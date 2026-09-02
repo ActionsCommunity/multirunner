@@ -3,80 +3,18 @@ package main
 import (
 	"bytes"
 	"errors"
-	"fmt"
+	"io"
 	"log/slog"
-	"os"
-	"runtime"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/GerardSmit/multirunner/internal/config"
 )
 
-func TestServiceLogWriterRoutesLevels(t *testing.T) {
-	logger := &recordingServiceLogger{}
-	writer := &serviceLogWriter{logger: logger}
-	for _, message := range []string{
-		"time=x level=INFO msg=ready\n",
-		"time=x level=WARN msg=slow\n",
-		"time=x level=ERROR msg=failed\n",
-	} {
-		if _, err := writer.Write([]byte(message)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if len(logger.infos) != 1 || len(logger.warnings) != 1 || len(logger.errors) != 1 {
-		t.Fatalf("routed info=%v warn=%v error=%v", logger.infos, logger.warnings, logger.errors)
-	}
-}
-
-func TestServiceLogWriterRedactsRuntimeOutput(t *testing.T) {
-	logger := &recordingServiceLogger{}
-	writer := &serviceLogWriter{logger: logger}
-	input := "authorization=Bearer-secret token=github_pat_abcdefghijklmnopqrstuvwxyz JIT_CONFIG=BASE64-JIT-BLOB"
-	if _, err := writer.Write([]byte(input)); err != nil {
-		t.Fatal(err)
-	}
-	logged := strings.Join(logger.infos, "\n")
-	for _, secret := range []string{"Bearer-secret", "github_pat_abcdefghijklmnopqrstuvwxyz", "BASE64-JIT-BLOB"} {
-		if strings.Contains(logged, secret) {
-			t.Errorf("runtime log leaked %q: %q", secret, logged)
-		}
-	}
-}
-
-func TestServiceLogWriterRedactsGeneratedCacheTokenPath(t *testing.T) {
-	logger := &recordingServiceLogger{}
-	writer := &serviceLogWriter{logger: logger}
-	input := "launch failed: ACTIONS_RESULTS_URL=http://cache:3000/_mr/generated-secret/results"
-	if _, err := writer.Write([]byte(input)); err != nil {
-		t.Fatal(err)
-	}
-	logged := strings.Join(logger.infos, "\n")
-	if strings.Contains(logged, "generated-secret") {
-		t.Fatalf("runtime log leaked generated cache token: %q", logged)
-	}
-	if !strings.Contains(logged, "/_mr/<redacted>/results") {
-		t.Fatalf("runtime log lost cache URL context: %q", logged)
-	}
-}
-
-func TestServiceLogWriterRedactsBareEncodedJITValue(t *testing.T) {
-	logger := &recordingServiceLogger{}
-	writer := &serviceLogWriter{logger: logger}
-	jit := strings.Repeat("AbCdEf0123456789", 16)
-	if _, err := writer.Write([]byte("job output: " + jit)); err != nil {
-		t.Fatal(err)
-	}
-	logged := strings.Join(logger.infos, "\n")
-	if strings.Contains(logged, jit) || !strings.Contains(logged, "<redacted-encoded-secret>") {
-		t.Fatalf("runtime log did not redact bare encoded JIT config: %q", logged)
-	}
-}
-
 func TestCopyServiceOutputRoutesLinesAndRedactsJSON(t *testing.T) {
 	logger := &recordingServiceLogger{}
-	copyServiceOutput(strings.NewReader("ready\n{\"jit_config\":\"secret-jit\"}\n"), logger)
+	copyServiceOutputWithSecrets(strings.NewReader("ready\n{\"jit_config\":\"secret-jit\"}\n"), logger, nil)
 	if len(logger.infos) != 2 {
 		t.Fatalf("captured lines = %v, want 2", logger.infos)
 	}
@@ -86,10 +24,22 @@ func TestCopyServiceOutputRoutesLinesAndRedactsJSON(t *testing.T) {
 	}
 }
 
+func TestCopyServiceOutputPreservesStructuredLogSeverity(t *testing.T) {
+	logger := &recordingServiceLogger{}
+	copyServiceOutputWithSecrets(strings.NewReader(strings.Join([]string{
+		"time=x level=INFO msg=ready",
+		"time=x level=WARN msg=slow",
+		`{"level":"ERROR","msg":"failed"}`,
+	}, "\n")+"\n"), logger, nil)
+	if len(logger.infos) != 1 || len(logger.warnings) != 1 || len(logger.errors) != 1 {
+		t.Fatalf("routed info=%v warn=%v error=%v", logger.infos, logger.warnings, logger.errors)
+	}
+}
+
 func TestCopyServiceOutputRedactsMultilinePrivateKey(t *testing.T) {
 	logger := &recordingServiceLogger{}
 	input := "before\n-----BEGIN PRIVATE KEY-----\nPRIVATE-BODY\n-----END PRIVATE KEY-----\nafter\n"
-	copyServiceOutput(strings.NewReader(input), logger)
+	copyServiceOutputWithSecrets(strings.NewReader(input), logger, nil)
 	logged := strings.Join(logger.infos, "\n")
 	if strings.Contains(logged, "PRIVATE-BODY") || strings.Contains(logged, "BEGIN PRIVATE KEY") {
 		t.Fatalf("captured output leaked private key: %q", logged)
@@ -133,6 +83,19 @@ func TestSanitizeLogTextWithSecretsRedactsLiteralValues(t *testing.T) {
 	}
 }
 
+func TestSanitizeLogTextRemovesTerminalControlSequences(t *testing.T) {
+	input := "\x1b[31mfailed\x1b[0m\r\ntag\u202ereversed"
+	got := sanitizeLogText(input)
+	for _, control := range []string{"\x1b", "\r", "\u202e"} {
+		if strings.Contains(got, control) {
+			t.Fatalf("sanitized output retains control %q: %q", control, got)
+		}
+	}
+	if !strings.Contains(got, "failed") || !strings.Contains(got, "\n") {
+		t.Fatalf("sanitized output lost safe context: %q", got)
+	}
+}
+
 func TestCaptureServiceOutputLeavesInteractiveStreamsAttached(t *testing.T) {
 	restore, err := captureServiceOutput(true, &recordingServiceLogger{})
 	if err != nil {
@@ -141,25 +104,94 @@ func TestCaptureServiceOutputLeavesInteractiveStreamsAttached(t *testing.T) {
 	restore()
 }
 
-func TestCaptureServiceOutputRoutesWindowsRuntimeStreams(t *testing.T) {
-	if runtime.GOOS != "windows" {
-		t.Skip("Windows redirects runtime streams into the native service logger")
-	}
+func TestCaptureServiceOutputDoesNotRedirectRawParentStreams(t *testing.T) {
 	logger := &recordingServiceLogger{}
 	restore, err := captureServiceOutput(false, logger)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, stdoutErr := fmt.Fprintln(os.Stdout, "runtime stdout")
-	_, stderrErr := fmt.Fprintln(os.Stderr, "runtime stderr")
 	restore()
-	if stdoutErr != nil || stderrErr != nil {
-		t.Fatalf("write runtime streams: stdout=%v stderr=%v", stdoutErr, stderrErr)
+	if len(logger.infos)+len(logger.warnings)+len(logger.errors) != 0 {
+		t.Fatalf("parent output unexpectedly logged: %+v", logger)
+	}
+}
+
+func TestCopyServiceOutputBoundsOversizedRecordsAndKeepsDraining(t *testing.T) {
+	logger := &recordingServiceLogger{}
+	secret := "configured-secret-after-boundary"
+	input := strings.Repeat("x", maxServiceLogRecordBytes+serviceLogReadBuffer) +
+		" " + secret + "\nafter\n"
+	copyServiceOutputWithSecrets(strings.NewReader(input), logger, nil, secret)
+	if len(logger.infos) != 2 {
+		t.Fatalf("captured lines = %d, want 2", len(logger.infos))
+	}
+	if len(logger.infos[0]) > maxServiceLogRecordBytes+len(" <truncated>") {
+		t.Fatalf("oversized record length = %d", len(logger.infos[0]))
 	}
 	logged := strings.Join(logger.infos, "\n")
-	for _, want := range []string{"runtime stdout", "runtime stderr"} {
-		if !strings.Contains(logged, want) {
-			t.Errorf("captured output missing %q: %q", want, logged)
+	if strings.Contains(logged, secret) || !strings.Contains(logged, "<truncated>") || !strings.Contains(logged, "after") {
+		t.Fatalf("oversized output was not safely drained: %q", logged)
+	}
+}
+
+func TestCopyServiceOutputTracksPrivateKeyMarkersAcrossReadBoundaries(t *testing.T) {
+	logger := &recordingServiceLogger{}
+	input := strings.Repeat("x", serviceLogReadBuffer-10) +
+		"-----BEGIN PRIVATE KEY-----\nPRIVATE-BODY\n-----END PRIVATE KEY-----\nafter\n"
+	copyServiceOutputWithSecrets(strings.NewReader(input), logger, nil)
+	logged := strings.Join(logger.infos, "\n")
+	for _, secret := range []string{"BEGIN PRIVATE KEY", "PRIVATE-BODY"} {
+		if strings.Contains(logged, secret) {
+			t.Fatalf("fragmented PEM leaked %q: %q", secret, logged)
 		}
+	}
+	if !strings.Contains(logged, "<redacted-private-key>") || !strings.Contains(logged, "after") {
+		t.Fatalf("fragmented PEM lost safe context: %q", logged)
+	}
+}
+
+func TestSanitizedLogTailIsBoundedAndConcurrent(t *testing.T) {
+	tail := &sanitizedLogTail{}
+	var writers sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		writers.Add(1)
+		go func() {
+			defer writers.Done()
+			tail.add(strings.Repeat("x", 512))
+		}()
+	}
+	writers.Wait()
+	if got := len(tail.String()); got > maxServiceLogTailBytes {
+		t.Fatalf("tail length = %d, want at most %d", got, maxServiceLogTailBytes)
+	}
+}
+
+func TestSanitizedLogTailRetainsCrashSummaryWithLatestDiagnostics(t *testing.T) {
+	tail := &sanitizedLogTail{}
+	tail.add("panic: token=<redacted>")
+	for i := 0; i < 20; i++ {
+		tail.add(strings.Repeat("stack", 128))
+	}
+	got := tail.String()
+	if len(got) > maxServiceLogTailBytes {
+		t.Fatalf("tail length = %d, want at most %d", len(got), maxServiceLogTailBytes)
+	}
+	if !strings.Contains(got, "panic: token=<redacted>") || !strings.Contains(got, "stack") {
+		t.Fatalf("tail lost crash summary or diagnostics: %q", got)
+	}
+}
+
+type failingReader struct{}
+
+func (failingReader) Read([]byte) (int, error) {
+	return 0, io.ErrUnexpectedEOF
+}
+
+func TestCopyServiceOutputSanitizesReadErrors(t *testing.T) {
+	logger := &recordingServiceLogger{}
+	tail := &sanitizedLogTail{}
+	copyServiceOutputWithSecrets(failingReader{}, logger, tail, "configured-secret")
+	if len(logger.errors) != 1 || !strings.Contains(tail.String(), "capture failed") {
+		t.Fatalf("capture error logger=%v tail=%q", logger.errors, tail.String())
 	}
 }

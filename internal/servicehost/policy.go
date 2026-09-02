@@ -12,12 +12,9 @@ import (
 const (
 	// StopTimeout leaves the service manager time to finish process teardown.
 	StopTimeout = 15 * time.Second
-	// LaunchdOutputPath receives unattended stdout and stderr on macOS.
-	LaunchdOutputPath = "/var/log/multirunner.out.log"
 
 	recoveryResetSeconds = 10 * 60
 	launchdThrottle      = 15
-	launchdLogDirectory  = "/var/log"
 )
 
 var restartDelays = [...]time.Duration{
@@ -54,7 +51,6 @@ func OptionsFor(goos string) service.KeyValue {
 		}
 	case "darwin":
 		return service.KeyValue{
-			"LogDirectory":  launchdLogDirectory,
 			"LaunchdConfig": launchdPlist,
 		}
 	default:
@@ -75,8 +71,11 @@ ExecStart={{.Path|cmdEscape}}{{range .Arguments}} {{.|cmd}}{{end}}
 {{if .UserName}}User={{.UserName}}{{end}}
 Restart=on-failure
 RestartSec=15s
-StandardOutput=journal
-StandardError=journal
+KillMode=mixed
+TimeoutStopSec=20s
+# The supervisor sends sanitized worker records through the native logger.
+StandardOutput=null
+StandardError=null
 {{range $k, $v := .EnvVars}}Environment={{$k}}={{$v}}
 {{end}}
 [Install]
@@ -105,9 +104,10 @@ var launchdPlist = fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 	{{if .WorkingDirectory}}<key>WorkingDirectory</key>
 	<string>{{html .WorkingDirectory}}</string>{{end}}
 	<key>StandardErrorPath</key>
-	<string>{{html .StandardOutPath}}</string>
+	<string>/dev/null</string>
 	<key>StandardOutPath</key>
-	<string>{{html .StandardOutPath}}</string>
+	<string>/dev/null</string>
+	<!-- Sanitized worker records are emitted through the native logger. -->
 </dict>
 </plist>
 `, launchdThrottle)

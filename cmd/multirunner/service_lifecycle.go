@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"runtime/debug"
 	"sync"
 	"time"
 
@@ -13,7 +12,7 @@ import (
 	"github.com/GerardSmit/multirunner/internal/servicehost"
 )
 
-type orchestratorRunner func(context.Context) error
+type serviceRunner func(context.Context) error
 type processTerminator func(int, string)
 
 type managedServiceError struct {
@@ -44,13 +43,14 @@ func managedServiceExitCode(configPath string, interactive bool, now time.Time, 
 // program coordinates the orchestrator lifecycle while the platform service
 // adapter owns process controls.
 type program struct {
-	cfgPath     string
-	installDeps bool
-	interactive bool
-	run         orchestratorRunner
-	terminate   processTerminator
-	logger      service.Logger
-	stopTimeout time.Duration
+	cfgPath        string
+	installDeps    bool
+	interactive    bool
+	run            serviceRunner
+	terminate      processTerminator
+	terminateClean processTerminator
+	logger         service.Logger
+	stopTimeout    time.Duration
 
 	mu       sync.Mutex
 	cancel   context.CancelFunc
@@ -77,21 +77,43 @@ func (p *program) Start(service.Service) error {
 
 func (p *program) runOrchestrator(ctx context.Context, done chan struct{}) {
 	defer close(done)
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			p.fail(ctx, "orchestrator panic", fmt.Errorf("%s\n%s", sanitizeLogText(fmt.Sprint(recovered)), debug.Stack()))
-		}
-	}()
 
 	run := p.run
 	if run == nil {
 		run = func(ctx context.Context) error {
-			return runOrchestrator(ctx, p.cfgPath, p.interactive, p.installDeps, p.logWriter())
+			return superviseServiceWorker(ctx, p.cfgPath, p.interactive, p.installDeps, p.logger)
 		}
 	}
 	if err := run(ctx); err != nil {
+		var exhausted *recoveryExhaustedError
+		if errors.As(err, &exhausted) {
+			p.stopCrashLoop(exhausted.Error())
+			return
+		}
 		p.fail(ctx, "orchestrator stopped with a fatal error", err)
 	}
+}
+
+func (p *program) stopCrashLoop(summary string) {
+	p.mu.Lock()
+	if p.stopping {
+		p.mu.Unlock()
+		return
+	}
+	p.stopping = true
+	terminate := p.terminateClean
+	logger := p.logger
+	p.mu.Unlock()
+
+	summary = sanitizeLogText(summary)
+	if logger != nil {
+		_ = logger.Error(summary)
+	}
+	if terminate != nil {
+		terminate(0, summary)
+		return
+	}
+	terminateServiceProcess(0)
 }
 
 func (p *program) fail(ctx context.Context, message string, err error) {
@@ -146,10 +168,6 @@ func (p *program) Stop(service.Service) error {
 		}
 	}
 	return nil
-}
-
-func (p *program) logWriter() *serviceLogWriter {
-	return &serviceLogWriter{logger: p.logger}
 }
 
 func classifyServiceHealth(status service.Status, err error) (message string, unhealthy, report bool) {

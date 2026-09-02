@@ -148,36 +148,6 @@ func TestProgramStopIsBounded(t *testing.T) {
 	}
 }
 
-func TestProgramPanicIsLoggedWithoutJITValueAndTerminates(t *testing.T) {
-	logger := &recordingServiceLogger{}
-	exitCode := make(chan int, 1)
-	p := &program{
-		run: func(context.Context) error {
-			panic("JIT_CONFIG=BASE64-JIT-SECRET")
-		},
-		terminate: func(code int, _ string) { exitCode <- code },
-		logger:    logger,
-	}
-	if err := p.Start(nil); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case <-exitCode:
-	case <-time.After(time.Second):
-		t.Fatal("panic did not terminate the process")
-	}
-	logged := strings.Join(logger.errors, "\n")
-	if !strings.Contains(logged, "orchestrator panic") {
-		t.Fatalf("panic log = %q", logged)
-	}
-	if strings.Contains(logged, "BASE64-JIT-SECRET") {
-		t.Fatalf("panic log leaked JIT config: %q", logged)
-	}
-	if !strings.Contains(logged, "service_lifecycle_test.go") {
-		t.Fatalf("panic stack was not preserved: %q", logged)
-	}
-}
-
 func TestClassifyServiceHealth(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -255,13 +225,33 @@ func TestManagedServiceErrorUnwrapsCause(t *testing.T) {
 	}
 }
 
-func TestProgramLogWriterUsesServiceLogger(t *testing.T) {
+func TestProgramStopsCrashLoopWithCleanExit(t *testing.T) {
 	logger := &recordingServiceLogger{}
-	writer := (&program{logger: logger}).logWriter()
-	if _, err := writer.Write([]byte("time=x level=INFO msg=ready")); err != nil {
+	cleanExit := make(chan int, 1)
+	failureExit := make(chan int, 1)
+	p := &program{
+		run:            func(context.Context) error { return &recoveryExhaustedError{count: servicehost.CrashLoopFailureCount} },
+		terminate:      func(code int, _ string) { failureExit <- code },
+		terminateClean: func(code int, _ string) { cleanExit <- code },
+		logger:         logger,
+	}
+	if err := p.Start(nil); err != nil {
 		t.Fatal(err)
 	}
-	if len(logger.infos) != 1 {
-		t.Fatalf("service logs = %v", logger.infos)
+	select {
+	case code := <-cleanExit:
+		if code != 0 {
+			t.Fatalf("crash-loop exit code = %d, want 0", code)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("crash-loop suppression did not terminate")
+	}
+	select {
+	case code := <-failureExit:
+		t.Fatalf("crash-loop suppression used failure exit %d", code)
+	default:
+	}
+	if len(logger.errors) != 1 || !strings.Contains(logger.errors[0], "recovery stopped") {
+		t.Fatalf("crash-loop log = %v", logger.errors)
 	}
 }

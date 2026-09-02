@@ -116,15 +116,15 @@ func writeFailureHistory(configPath string, history failureHistory) error {
 	tempName := temp.Name()
 	defer os.Remove(tempName)
 	if err := temp.Chmod(0o600); err != nil {
-		temp.Close()
+		_ = temp.Close()
 		return fmt.Errorf("secure service failure state: %w", err)
 	}
 	if _, err := temp.Write(data); err != nil {
-		temp.Close()
+		_ = temp.Close()
 		return fmt.Errorf("write service failure state: %w", err)
 	}
 	if err := temp.Sync(); err != nil {
-		temp.Close()
+		_ = temp.Close()
 		return fmt.Errorf("sync service failure state: %w", err)
 	}
 	if err := temp.Close(); err != nil {

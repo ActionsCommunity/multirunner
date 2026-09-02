@@ -52,8 +52,10 @@ func TestOptionsForSystemdRestartsOnlyOnFailure(t *testing.T) {
 		"RestartSec=15s",
 		"StartLimitIntervalSec=10min",
 		"StartLimitBurst=4",
-		"StandardOutput=journal",
-		"StandardError=journal",
+		"KillMode=mixed",
+		"TimeoutStopSec=20s",
+		"StandardOutput=null",
+		"StandardError=null",
 	} {
 		if !strings.Contains(unit, directive) {
 			t.Errorf("systemd unit missing %q", directive)
@@ -85,10 +87,10 @@ func TestOptionsForLaunchdRestartsOnlyAfterFailure(t *testing.T) {
 	if strings.Contains(plist, "<key>KeepAlive</key>\n\t<false/>") {
 		t.Error("launchd plist disables failure recovery")
 	}
-	if options["LogDirectory"] != launchdLogDirectory {
-		t.Errorf("LogDirectory = %v, want %s", options["LogDirectory"], launchdLogDirectory)
+	if _, exists := options["LogDirectory"]; exists {
+		t.Error("launchd retains obsolete file logging")
 	}
-	for _, destination := range []string{"StandardErrorPath", "StandardOutPath", "{{html .StandardOutPath}}"} {
+	for _, destination := range []string{"StandardErrorPath", "StandardOutPath", "/dev/null"} {
 		if !strings.Contains(plist, destination) {
 			t.Errorf("launchd plist missing output destination %q", destination)
 		}

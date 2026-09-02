@@ -2,15 +2,25 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"io"
 	"log/slog"
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/kardianos/service"
 
 	"github.com/GerardSmit/multirunner/internal/config"
+)
+
+const (
+	maxServiceLogRecordBytes = 8 * 1024
+	maxServiceLogTailBytes   = 2 * 1024
+	serviceLogReadBuffer     = 4 * 1024
 )
 
 var (
@@ -21,27 +31,6 @@ var (
 	cacheTokenPath      = regexp.MustCompile(`/_mr/[^/?\s]+`)
 	bareEncodedSecret   = regexp.MustCompile(`\b[A-Za-z0-9+/]{128,}={0,2}\b`)
 )
-
-type serviceLogWriter struct {
-	logger service.Logger
-}
-
-func (w *serviceLogWriter) Write(data []byte) (int, error) {
-	if w == nil || w.logger == nil {
-		return len(data), nil
-	}
-	message := sanitizeLogText(strings.TrimSpace(string(data)))
-	var err error
-	switch {
-	case strings.Contains(message, "level=ERROR"), strings.Contains(message, `"level":"ERROR"`):
-		err = w.logger.Error(message)
-	case strings.Contains(message, "level=WARN"), strings.Contains(message, `"level":"WARN"`):
-		err = w.logger.Warning(message)
-	default:
-		err = w.logger.Info(message)
-	}
-	return len(data), err
-}
 
 type redactingWriter struct {
 	writer  io.Writer
@@ -80,6 +69,16 @@ func sanitizeLogTextWithSecrets(message string, secrets ...string) string {
 }
 
 func sanitizeLogText(message string) string {
+	message = strings.Map(func(value rune) rune {
+		switch {
+		case value == '\n', value == '\t':
+			return value
+		case value < 0x20, value == 0x7f, unicode.Is(unicode.Cf, value):
+			return -1
+		default:
+			return value
+		}
+	}, message)
 	message = privateKey.ReplaceAllString(message, "<redacted-private-key>")
 	message = githubToken.ReplaceAllString(message, "<redacted-token>")
 	message = cacheTokenPath.ReplaceAllString(message, "/_mr/<redacted>")
@@ -88,28 +87,160 @@ func sanitizeLogText(message string) string {
 	return sensitiveAssignment.ReplaceAllString(message, "$1$2<redacted>")
 }
 
-func copyServiceOutput(reader io.Reader, logger service.Logger) {
-	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+type sanitizedLogTail struct {
+	mu      sync.Mutex
+	summary string
+	content string
+}
+
+func (t *sanitizedLogTail) add(message string) {
+	if t == nil || message == "" {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.summary == "" && (strings.HasPrefix(message, "panic:") || strings.HasPrefix(message, "fatal error:")) {
+		t.summary = truncateLogSummary(message, maxServiceLogTailBytes/4)
+	}
+	if t.content != "" {
+		t.content += "\n"
+	}
+	t.content += message
+	contentBudget := maxServiceLogTailBytes
+	if t.summary != "" {
+		contentBudget -= len(t.summary) + 1
+	}
+	t.content = truncateLogTailValue(t.content, contentBudget)
+}
+
+func (t *sanitizedLogTail) String() string {
+	if t == nil {
+		return ""
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.summary != "" && !strings.Contains(t.content, t.summary) {
+		return t.summary + "\n" + t.content
+	}
+	return t.content
+}
+
+func truncateLogTailValue(value string, maxBytes int) string {
+	if len(value) <= maxBytes {
+		return value
+	}
+	value = value[len(value)-maxBytes:]
+	for !utf8.ValidString(value) {
+		value = value[1:]
+	}
+	return value
+}
+
+func truncateLogSummary(value string, maxBytes int) string {
+	if len(value) <= maxBytes {
+		return value
+	}
+	value = value[:maxBytes]
+	for !utf8.ValidString(value) {
+		value = value[:len(value)-1]
+	}
+	return value
+}
+
+func copyServiceOutputWithSecrets(reader io.Reader, logger service.Logger, tail *sanitizedLogTail, secrets ...string) {
+	buffered := bufio.NewReaderSize(reader, serviceLogReadBuffer)
+	line := make([]byte, 0, serviceLogReadBuffer)
+	truncated := false
 	inPrivateKey := false
-	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.Contains(line, "-----BEGIN") && strings.Contains(line, "PRIVATE KEY-----") {
-			inPrivateKey = true
-			_ = logger.Info("<redacted-private-key>")
-			continue
-		}
-		if inPrivateKey {
-			if strings.Contains(line, "-----END") && strings.Contains(line, "PRIVATE KEY-----") {
-				inPrivateKey = false
+	beginMarker := false
+	endMarker := false
+	markerTail := ""
+
+	for {
+		fragment, err := buffered.ReadSlice('\n')
+		if len(fragment) > 0 {
+			markerProbe := markerTail + string(fragment)
+			beginMarker = beginMarker || containsPrivateKeyMarker(markerProbe, "BEGIN")
+			endMarker = endMarker || containsPrivateKeyMarker(markerProbe, "END")
+			if len(markerProbe) > 64 {
+				markerTail = markerProbe[len(markerProbe)-64:]
+			} else {
+				markerTail = markerProbe
 			}
-			continue
+
+			if !truncated {
+				remaining := maxServiceLogRecordBytes - len(line)
+				if len(fragment) > remaining {
+					line = append(line, fragment[:remaining]...)
+					truncated = true
+				} else {
+					line = append(line, fragment...)
+				}
+			}
 		}
-		_ = logger.Info(sanitizeLogText(line))
+
+		lineComplete := err == nil || errors.Is(err, io.EOF)
+		if lineComplete && (len(line) > 0 || truncated) {
+			message := strings.TrimRight(string(line), "\r\n")
+			if truncated {
+				message += " <truncated>"
+			}
+			emitServiceOutputLine(message, beginMarker, endMarker, &inPrivateKey, logger, tail, secrets...)
+			line = line[:0]
+			truncated = false
+			beginMarker = false
+			endMarker = false
+			markerTail = ""
+		}
+
+		switch {
+		case err == nil, errors.Is(err, bufio.ErrBufferFull):
+			continue
+		case errors.Is(err, io.EOF):
+			return
+		default:
+			message := sanitizeLogTextWithSecrets("service output capture failed: "+err.Error(), secrets...)
+			if logger != nil {
+				_ = logger.Error(message)
+			}
+			tail.add(message)
+			return
+		}
 	}
-	if err := scanner.Err(); err != nil {
-		_ = logger.Error("service output capture failed: " + sanitizeLogText(err.Error()))
+}
+
+func emitServiceOutputLine(message string, beginMarker, endMarker bool, inPrivateKey *bool, logger service.Logger, tail *sanitizedLogTail, secrets ...string) {
+	if beginMarker {
+		*inPrivateKey = !endMarker
+		message = "<redacted-private-key>"
+	} else if *inPrivateKey {
+		if endMarker {
+			*inPrivateKey = false
+		}
+		return
+	} else {
+		message = sanitizeLogTextWithSecrets(message, secrets...)
 	}
+	writeServiceLog(logger, message)
+	tail.add(message)
+}
+
+func writeServiceLog(logger service.Logger, message string) {
+	if logger == nil {
+		return
+	}
+	switch {
+	case strings.Contains(message, "level=ERROR"), strings.Contains(message, `"level":"ERROR"`):
+		_ = logger.Error(message)
+	case strings.Contains(message, "level=WARN"), strings.Contains(message, `"level":"WARN"`):
+		_ = logger.Warning(message)
+	default:
+		_ = logger.Info(message)
+	}
+}
+
+func containsPrivateKeyMarker(message, boundary string) bool {
+	return strings.Contains(message, "-----"+boundary) && strings.Contains(message, "PRIVATE KEY-----")
 }
 
 func newLogger(logConfig config.Log, output io.Writer, secrets ...string) *slog.Logger {
