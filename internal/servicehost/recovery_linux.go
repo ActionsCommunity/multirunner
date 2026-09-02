@@ -21,3 +21,7 @@ func ResetRecovery(name, platform string) error {
 	}
 	return nil
 }
+
+func cleanupRecoveryArtifacts() error {
+	return nil
+}

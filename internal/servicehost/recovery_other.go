@@ -1,4 +1,4 @@
-//go:build !windows && !linux
+//go:build !windows && !linux && !darwin
 
 package servicehost
 
@@ -9,5 +9,9 @@ func ConfigureRecovery(string) error {
 
 // ResetRecovery has no persistent native counter on this platform.
 func ResetRecovery(string, string) error {
+	return nil
+}
+
+func cleanupRecoveryArtifacts() error {
 	return nil
 }

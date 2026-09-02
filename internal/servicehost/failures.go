@@ -71,10 +71,13 @@ func ReadFailureStatus(configPath string, now time.Time) (FailureStatus, error) 
 // ClearFailures resets the crash-loop budget after an intentional stop.
 func ClearFailures(configPath string) error {
 	err := os.Remove(failurePath(configPath))
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		if cleanupErr := cleanupRecoveryArtifacts(); cleanupErr != nil {
+			return fmt.Errorf("%v; clean service artifacts: %w", err, cleanupErr)
+		}
+		return err
 	}
-	return err
+	return cleanupRecoveryArtifacts()
 }
 
 func recentFailures(failures []time.Time, now time.Time) []time.Time {

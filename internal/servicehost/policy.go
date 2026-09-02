@@ -2,6 +2,7 @@
 package servicehost
 
 import (
+	"fmt"
 	"runtime"
 	"time"
 
@@ -13,6 +14,7 @@ const (
 	StopTimeout = 15 * time.Second
 
 	recoveryResetSeconds = 10 * 60
+	launchdThrottle      = 15
 )
 
 var restartDelays = [...]time.Duration{
@@ -49,7 +51,7 @@ func OptionsFor(goos string) service.KeyValue {
 		}
 	case "darwin":
 		return service.KeyValue{
-			"KeepAlive":     false,
+			"LogDirectory":  launchdLogDirectory,
 			"LaunchdConfig": launchdPlist,
 		}
 	default:
@@ -78,7 +80,7 @@ StandardError=journal
 WantedBy=multi-user.target
 `
 
-const launchdPlist = `<?xml version="1.0" encoding="UTF-8"?>
+var launchdPlist = fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -91,15 +93,18 @@ const launchdPlist = `<?xml version="1.0" encoding="UTF-8"?>
 		{{end}}
 	</array>
 	<key>KeepAlive</key>
-	<false/>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
 	<key>ThrottleInterval</key>
-	<integer>15</integer>
+	<integer>%d</integer>
 	{{if .WorkingDirectory}}<key>WorkingDirectory</key>
 	<string>{{html .WorkingDirectory}}</string>{{end}}
-	{{if .StandardErrorPath}}<key>StandardErrorPath</key>
-	<string>{{html .StandardErrorPath}}</string>{{end}}
-	{{if .StandardOutPath}}<key>StandardOutPath</key>
-	<string>{{html .StandardOutPath}}</string>{{end}}
+	<key>StandardErrorPath</key>
+	<string>{{html .StandardOutPath}}</string>
+	<key>StandardOutPath</key>
+	<string>{{html .StandardOutPath}}</string>
 </dict>
 </plist>
-`
+`, launchdThrottle)

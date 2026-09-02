@@ -58,3 +58,7 @@ func setRecoveryActions(svc *mgr.Service, resetPeriod uint32) error {
 	}
 	return nil
 }
+
+func cleanupRecoveryArtifacts() error {
+	return nil
+}

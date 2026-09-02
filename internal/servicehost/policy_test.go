@@ -64,17 +64,33 @@ func TestOptionsForSystemdRestartsOnlyOnFailure(t *testing.T) {
 	}
 }
 
-func TestOptionsForLaunchdDoesNotLoopAfterFailure(t *testing.T) {
-	plist, ok := OptionsFor("darwin")["LaunchdConfig"].(string)
+func TestOptionsForLaunchdRestartsOnlyAfterFailure(t *testing.T) {
+	options := OptionsFor("darwin")
+	plist, ok := options["LaunchdConfig"].(string)
 	if !ok {
 		t.Fatal("LaunchdConfig is missing")
 	}
-	for _, element := range []string{"<key>KeepAlive</key>", "<false/>"} {
+	for _, element := range []string{
+		"<key>KeepAlive</key>",
+		"<dict>",
+		"<key>SuccessfulExit</key>",
+		"<false/>",
+		"<key>ThrottleInterval</key>",
+		"<integer>15</integer>",
+	} {
 		if !strings.Contains(plist, element) {
 			t.Errorf("launchd plist missing %q", element)
 		}
 	}
-	if strings.Contains(plist, "SuccessfulExit") {
-		t.Error("launchd plist enables an unbounded failure loop")
+	if strings.Contains(plist, "<key>KeepAlive</key>\n\t<false/>") {
+		t.Error("launchd plist disables failure recovery")
+	}
+	if options["LogDirectory"] != launchdLogDirectory {
+		t.Errorf("LogDirectory = %v, want %s", options["LogDirectory"], launchdLogDirectory)
+	}
+	for _, destination := range []string{"StandardErrorPath", "StandardOutPath", "{{html .StandardOutPath}}"} {
+		if !strings.Contains(plist, destination) {
+			t.Errorf("launchd plist missing output destination %q", destination)
+		}
 	}
 }

@@ -1,4 +1,4 @@
-//go:build linux || darwin
+//go:build linux
 
 package main
 
@@ -7,6 +7,6 @@ import (
 )
 
 func captureServiceOutput(bool, service.Logger) (func(), error) {
-	// systemd and launchd own these handles, so crash output survives the process.
+	// systemd owns these handles, so crash output survives the process.
 	return func() {}, nil
 }
