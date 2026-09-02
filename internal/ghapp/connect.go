@@ -130,7 +130,7 @@ func Connect(ctx context.Context, opt Options) (*Credentials, error) {
 	case id := <-installID:
 		result.InstallationID = id
 	case <-time.After(5 * time.Minute):
-		return nil, fmt.Errorf("App created but timed out waiting for installation; install it and re-run with the printed app_id")
+		return nil, fmt.Errorf("app created but timed out waiting for installation; install it and re-run with the printed app_id")
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}

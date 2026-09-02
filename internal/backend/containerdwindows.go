@@ -3,6 +3,8 @@ package backend
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -19,11 +21,14 @@ import (
 // used rather than the raw containerd Go client because it also wires up CNI
 // networking and isolation, which the runner container needs to reach GitHub.
 type containerdBackend struct {
-	nerdctl   string // path to nerdctl.exe
-	address   string // containerd pipe, e.g. \\.\pipe\containerd-multirunner
-	namespace string
-	isolation string // "process" | "hyperv"
+	nerdctl    string // path to nerdctl.exe
+	address    string // containerd pipe, e.g. \\.\pipe\containerd-multirunner
+	namespace  string
+	isolation  string // "process" | "hyperv"
+	runCommand func(context.Context, ...string) (string, error)
 }
+
+var _ OwnedRunnerStore = (*containerdBackend)(nil)
 
 // NewContainerdWindows builds a Windows-container backend on containerd/runhcs.
 // isolation "" or "auto" picks process on Windows Server, hyperv on client.
@@ -51,6 +56,9 @@ func (b *containerdBackend) Name() string { return "containerd-windows" }
 
 // run executes nerdctl with the configured address+namespace and returns stdout.
 func (b *containerdBackend) run(ctx context.Context, args ...string) (string, error) {
+	if b.runCommand != nil {
+		return b.runCommand(ctx, args...)
+	}
 	full := append([]string{"--address", b.address, "--namespace", b.namespace}, args...)
 	cmd := exec.CommandContext(ctx, b.nerdctl, full...)
 	var out, errb bytes.Buffer
@@ -84,6 +92,12 @@ func (b *containerdBackend) EnsureImage(ctx context.Context, imageRef string) er
 }
 
 func (b *containerdBackend) Launch(ctx context.Context, req LaunchRequest) (RunnerHandle, error) {
+	if err := req.Ownership.Validate(); err != nil {
+		return nil, fmt.Errorf("containerd: %w", err)
+	}
+	if !req.Ownership.IsZero() && req.Ownership.RunnerID == 0 {
+		return nil, fmt.Errorf("containerd: runner ID is required for owned launches")
+	}
 	args := []string{"run", "-d", "--name", req.Name, "--isolation", b.isolation}
 
 	// nerdctl can't --add-host on Windows, and host.docker.internal doesn't
@@ -114,24 +128,50 @@ func (b *containerdBackend) Launch(ctx context.Context, req LaunchRequest) (Runn
 		args = append(args, "-v", v)
 	}
 	args = append(args,
-		"--label", "multirunner=true",
-		"--label", "multirunner.name="+req.Name,
+		"--label", labelManaged+"=true",
+		"--label", labelName+"="+req.Name,
 		req.Image,
 	)
+	if labels := ownershipLabels(req.Ownership); len(labels) > 0 {
+		keys := make([]string, 0, len(labels))
+		for key := range labels {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		imageIndex := len(args) - 1
+		ownershipArgs := make([]string, 0, len(keys)*2)
+		for _, key := range keys {
+			ownershipArgs = append(ownershipArgs, "--label", key+"="+labels[key])
+		}
+		args = append(args[:imageIndex], append(ownershipArgs, args[imageIndex:]...)...)
+	}
 
 	out, err := b.run(ctx, args...)
 	if err != nil {
 		// `nerdctl run -d` can create/start the container before its process is
 		// cancelled or its response is lost. The deterministic name remains a
 		// valid cleanup handle even when no container ID was printed.
-		return &containerdHandle{b: b, name: req.Name, id: req.Name},
+		expected := ownershipLabels(req.Ownership)
+		if expected == nil {
+			expected = make(map[string]string)
+		}
+		expected[labelManaged] = "true"
+		expected[labelName] = req.Name
+		return &containerdHandle{
+				b: b, name: req.Name, id: req.Name,
+				preserve:           !req.Ownership.IsZero(),
+				failedLaunchLabels: expected,
+			},
 			fmt.Errorf("run container %s: %w", req.Name, err)
 	}
 	id := strings.TrimSpace(out)
 	if id == "" {
 		id = req.Name
 	}
-	return &containerdHandle{b: b, name: req.Name, id: id}, nil
+	return &containerdHandle{
+		b: b, name: req.Name, id: id,
+		preserve: !req.Ownership.IsZero(),
+	}, nil
 }
 
 // hostGatewayIP returns the host's IPv4 on the "vEthernet (nat)" interface — the
@@ -159,11 +199,66 @@ func (b *containerdBackend) hostGatewayIP(ctx context.Context) string {
 
 func (b *containerdBackend) Close() error { return nil }
 
+func (b *containerdBackend) ListOwnedRunners(ctx context.Context, ownership RunnerOwnership) ([]OwnedRunner, error) {
+	if err := ownership.Validate(); err != nil || ownership.IsZero() {
+		return nil, fmt.Errorf("containerd: complete runner ownership is required")
+	}
+	labels := reconciliationLabels(ownership)
+	args := []string{"ps", "-a"}
+	keys := make([]string, 0, len(labels))
+	for key := range labels {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		args = append(args, "--filter", "label="+key+"="+labels[key])
+	}
+	args = append(args, "--format", "{{.ID}}")
+	out, err := b.run(ctx, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list owned containers: %w", err)
+	}
+
+	ids := strings.Fields(out)
+	owned := make([]OwnedRunner, 0, len(ids))
+	for _, id := range ids {
+		raw, err := b.run(ctx, "inspect", "--format", "{{json .Config.Labels}}", id)
+		if err != nil {
+			return nil, fmt.Errorf("inspect owned container %s: %w", id, err)
+		}
+		var actual map[string]string
+		if err := json.Unmarshal([]byte(strings.TrimSpace(raw)), &actual); err != nil {
+			return nil, fmt.Errorf("decode labels for owned container %s: %w", id, err)
+		}
+		if !labelsMatch(actual, labels) {
+			continue
+		}
+		if runner, ok := ownedRunner(id, actual); ok {
+			owned = append(owned, runner)
+		}
+	}
+	return owned, nil
+}
+
+func (b *containerdBackend) RemoveOwnedRunner(ctx context.Context, resourceID string) error {
+	_, err := b.run(ctx, "rm", "-f", resourceID)
+	if isMissingContainerError(err) {
+		return nil
+	}
+	return err
+}
+
+func isMissingContainerError(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "no such")
+}
+
 // containerdHandle is one running container, addressed by its name.
 type containerdHandle struct {
-	b    *containerdBackend
-	name string
-	id   string
+	b                  *containerdBackend
+	name               string
+	id                 string
+	preserve           bool
+	failedLaunchLabels map[string]string
 }
 
 func (h *containerdHandle) ID() string { return h.id }
@@ -171,8 +266,14 @@ func (h *containerdHandle) ID() string { return h.id }
 func (h *containerdHandle) Wait(ctx context.Context) (int, error) {
 	// nerdctl wait blocks until the container exits and prints its exit code.
 	out, err := h.b.run(ctx, "wait", h.name)
-	// Clean up the stopped container regardless (no --rm so wait can read the code).
-	_, _ = h.b.run(context.WithoutCancel(ctx), "rm", "-f", h.name)
+	if !h.preserve {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), backendCleanupTimeout)
+		_, cleanupErr := h.b.run(cleanupCtx, "rm", "-f", h.name)
+		cancel()
+		if !isMissingContainerError(cleanupErr) {
+			err = errors.Join(err, cleanupErr)
+		}
+	}
 	if err != nil {
 		return -1, err
 	}
@@ -197,8 +298,30 @@ func (h *containerdHandle) Logs(ctx context.Context) (io.ReadCloser, error) {
 }
 
 func (h *containerdHandle) Kill(ctx context.Context) error {
-	_, err := h.b.run(ctx, "rm", "-f", h.name)
-	if err != nil && strings.Contains(err.Error(), "no such") {
+	if h.failedLaunchLabels != nil {
+		raw, err := h.b.run(ctx, "inspect", "--format", "{{json .Config.Labels}}", h.name)
+		if isMissingContainerError(err) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("inspect failed container: %w", err)
+		}
+		var actual map[string]string
+		if err := json.Unmarshal([]byte(strings.TrimSpace(raw)), &actual); err != nil {
+			return fmt.Errorf("decode failed container labels: %w", err)
+		}
+		if !labelsMatch(actual, h.failedLaunchLabels) {
+			return fmt.Errorf("refusing to remove container with mismatched ownership")
+		}
+	}
+	command := "rm"
+	args := []string{"-f", h.name}
+	if h.preserve {
+		command = "stop"
+		args = []string{h.name}
+	}
+	_, err := h.b.run(ctx, append([]string{command}, args...)...)
+	if isMissingContainerError(err) {
 		return nil
 	}
 	return err
