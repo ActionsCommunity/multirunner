@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -77,6 +78,15 @@ func (p *program) Start(service.Service) error {
 
 func (p *program) runOrchestrator(ctx context.Context, done chan struct{}) {
 	defer close(done)
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			const separator = "\nstack:\n"
+			panicValue := truncateLogSummary(sanitizeLogText(fmt.Sprint(recovered)), maxServiceLogTailBytes/4)
+			stackBudget := maxServiceLogTailBytes - len("panic: ") - len(panicValue) - len(separator)
+			stack := truncateLogSummary(sanitizeLogText(string(debug.Stack())), stackBudget)
+			p.fail(ctx, "orchestrator panicked", errors.New("panic: "+panicValue+separator+stack))
+		}
+	}()
 
 	run := p.run
 	if run == nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -78,6 +79,109 @@ func TestProgramFatalReturnTerminatesWithFailure(t *testing.T) {
 	if len(logger.errors) != 1 || !strings.Contains(logger.errors[0], "worker failed") {
 		t.Fatalf("fatal log = %v", logger.errors)
 	}
+}
+
+func TestProgramRecoversParentSupervisorPanic(t *testing.T) {
+	type termination struct {
+		code    int
+		summary string
+		err     error
+	}
+
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	logger := &recordingServiceLogger{}
+	terminations := make(chan termination, 2)
+	panicValue := strings.Join([]string{
+		"token=" + serviceSupervisorGitHubToken,
+		"JIT_CONFIG=" + serviceSupervisorJIT,
+		"http://cache:3000/_mr/" + serviceSupervisorCacheToken + "/results",
+		"-----BEGIN PRIVATE KEY-----",
+		serviceSupervisorPrivateValue,
+		"-----END PRIVATE KEY-----",
+		"control=\x00\x01\x1b[31m",
+		strings.Repeat("diagnostic", maxServiceLogTailBytes),
+	}, "\n")
+	p := &program{
+		cfgPath: configPath,
+		run: func(context.Context) error {
+			panic(panicValue)
+		},
+		terminate: func(code int, summary string) {
+			recordedCode, err := managedServiceExitCode(configPath, false, time.Now(), summary)
+			if recordedCode != code && err == nil {
+				err = fmt.Errorf("recorded exit code = %d, want %d", recordedCode, code)
+			}
+			terminations <- termination{code: code, summary: summary, err: err}
+		},
+		logger: logger,
+	}
+	if err := p.Start(nil); err != nil {
+		t.Fatal(err)
+	}
+
+	var result termination
+	select {
+	case result = <-terminations:
+	case <-time.After(3 * time.Second):
+		t.Fatal("parent panic did not invoke the terminator")
+	}
+	if result.err != nil {
+		t.Fatal(result.err)
+	}
+	if result.code != servicehost.FailureExitCode {
+		t.Fatalf("exit code = %d, want %d", result.code, servicehost.FailureExitCode)
+	}
+
+	p.mu.Lock()
+	done := p.done
+	p.mu.Unlock()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("parent panic recovery deadlocked")
+	}
+	select {
+	case duplicate := <-terminations:
+		t.Fatalf("terminator invoked more than once: %+v", duplicate)
+	default:
+	}
+
+	if !strings.Contains(result.summary, "orchestrator panicked") ||
+		!strings.Contains(result.summary, "stack:") ||
+		!strings.Contains(result.summary, "service_lifecycle") {
+		t.Fatalf("panic diagnostic is incomplete: %q", result.summary)
+	}
+	assertServiceOutputRedacted(t, result.summary)
+	for _, forbidden := range []string{"PRIVATE KEY", "\x00", "\x01", "\x1b"} {
+		if strings.Contains(result.summary, forbidden) {
+			t.Fatalf("panic diagnostic retained %q: %q", forbidden, result.summary)
+		}
+	}
+
+	status, err := servicehost.ReadFailureStatus(configPath, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Count != 1 || len(status.LastError) > maxServiceLogTailBytes {
+		t.Fatalf("failure status = %+v", status)
+	}
+	if !strings.Contains(status.LastError, "panic: token=<redacted>") ||
+		!strings.Contains(status.LastError, "stack:") {
+		t.Fatalf("durable failure diagnostic is incomplete: %q", status.LastError)
+	}
+	assertServiceOutputRedacted(t, status.LastError)
+	state, err := os.ReadFile(filepath.Join(filepath.Dir(configPath), ".multirunner-service-state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state) > 4096 {
+		t.Fatalf("failure state size = %d", len(state))
+	}
+	if len(logger.errors) != 1 {
+		t.Fatalf("panic log count = %d, want 1", len(logger.errors))
+	}
+	assertServiceOutputRedacted(t, string(state))
+	assertServiceOutputRedacted(t, logger.errors[0])
 }
 
 func TestProgramIntentionalStopDoesNotTerminate(t *testing.T) {
