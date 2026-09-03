@@ -36,7 +36,7 @@ func TestSecretFilesAreOwnerOnly(t *testing.T) {
 		t.Fatalf("rewrite: %v", err)
 	}
 	for _, p := range []string{secret, tokenPath} {
-		if err := checkOwnerOnly(p); err != nil {
+		if err := CheckOwnerOnly(p); err != nil {
 			t.Errorf("%s: %v", filepath.Base(p), err)
 		}
 	}

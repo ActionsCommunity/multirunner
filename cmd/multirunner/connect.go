@@ -318,7 +318,7 @@ func runOwnAppConnect(cfgPath string, f connectFlags, in io.Reader, out io.Write
 	if keyOut == "" {
 		keyOut = filepath.Join(filepath.Dir(cfgPath), "multirunner-app.private-key.pem")
 	}
-	if err := os.WriteFile(keyOut, []byte(creds.PEM), 0o600); err != nil {
+	if err := ghapp.WriteSecretFile(keyOut, []byte(creds.PEM)); err != nil {
 		return postConnectErr("write private key", err)
 	}
 
@@ -328,7 +328,7 @@ func runOwnAppConnect(cfgPath string, f connectFlags, in io.Reader, out io.Write
 	var webhookSecretPath, webhookSecretWarning string
 	if creds.WebhookSecret != "" {
 		webhookSecretPath = filepath.Join(filepath.Dir(keyOut), "multirunner-app.webhook-secret")
-		if err := os.WriteFile(webhookSecretPath, []byte(creds.WebhookSecret), 0o600); err != nil {
+		if err := ghapp.WriteSecretFile(webhookSecretPath, []byte(creds.WebhookSecret)); err != nil {
 			webhookSecretPath = ""
 			webhookSecretWarning = fmt.Sprintf("could not save the webhook secret (%v); regenerate it under App settings > Webhook secret", err)
 		}

@@ -19,11 +19,16 @@ type storedToken struct {
 }
 
 // LoadUserToken reads a user access token sidecar written by SaveUserToken.
+//
+// A sidecar other accounts can read is reported, not rejected: the token is
+// already on disk by then, and refusing to start would take a host down over a
+// file mode that drifted rather than protect anything still secret.
 func LoadUserToken(path string) (*UserToken, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
+	warnIfPermissive(path)
 	var s storedToken
 	if err := json.Unmarshal(data, &s); err != nil {
 		return nil, fmt.Errorf("parse token store %s: %w", path, err)
