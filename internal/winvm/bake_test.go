@@ -517,12 +517,13 @@ func TestStageArtifactsRejectsDigestMismatch(t *testing.T) {
 func TestBakeQEMUArgs(t *testing.T) {
 	got := strings.Join(bakeQEMUArgs(BakeOptions{
 		Golden: "g.qcow2", WindowsISO: "win.iso", MemMB: 4096, CPUs: 2, Accel: "kvm",
-		OVMFCode: "code.fd",
+		OVMFCode: "code.fd", VNC: "127.0.0.1:5905", VNCWebSocket: "127.0.0.1:61234",
 	}, "auto.iso", "vars.fd"), " ")
 	for _, want := range []string{
 		"-accel kvm", "file=g.qcow2,if=none,id=osdisk", "file=win.iso,media=cdrom",
 		"file=auto.iso,media=cdrom", "e1000", "-qmp", "-serial",
 		"if=pflash,format=raw,unit=0,readonly=on,file=code.fd", "unit=1,file=vars.fd",
+		"-vnc 127.0.0.1:5,websocket=61234",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("bake args missing %q:\n%s", want, got)
@@ -530,6 +531,68 @@ func TestBakeQEMUArgs(t *testing.T) {
 	}
 	if strings.Contains(got, "-no-reboot") {
 		t.Error("bake must NOT use -no-reboot (Windows Setup reboots mid-install)")
+	}
+}
+
+func TestPrepareVNCUsesWebHostAndFreePorts(t *testing.T) {
+	o := BakeOptions{VNC: "127.0.0.1:0", VNCWeb: "0.0.0.0:8090"}
+	if err := prepareVNC(&o); err != nil {
+		t.Fatal(err)
+	}
+	host, port, err := splitAddress(o.VNC)
+	if err != nil || host != "0.0.0.0" || port < 5900 {
+		t.Fatalf("VNC = %q, want 0.0.0.0 with allocated port: %v", o.VNC, err)
+	}
+	wsHost, wsPort, err := splitAddress(o.VNCWebSocket)
+	if err != nil || wsHost != host || wsPort == port || wsPort == 8090 {
+		t.Fatalf("WebSocket = %q, want distinct port on %s: %v", o.VNCWebSocket, host, err)
+	}
+}
+
+func TestPrepareVNCValidation(t *testing.T) {
+	for _, test := range []BakeOptions{
+		{VNC: "127.0.0.1:5899"},
+		{VNC: "bad"},
+		{VNC: "127.0.0.1:5901", VNCWeb: "127.0.0.1:5901"},
+		{VNC: "127.0.0.1:5901", VNCWeb: "127.0.0.1:0"},
+	} {
+		if err := prepareVNC(&test); err == nil {
+			t.Errorf("prepareVNC(%+v) succeeded", test)
+		}
+	}
+}
+
+func TestPrepareVNCRawOnly(t *testing.T) {
+	o := BakeOptions{VNC: "127.0.0.1:5905"}
+	if err := prepareVNC(&o); err != nil {
+		t.Fatal(err)
+	}
+	if o.VNCWebSocket != "" {
+		t.Fatalf("raw-only VNC opened WebSocket %q", o.VNCWebSocket)
+	}
+}
+
+func TestPlanBakeDoesNotCreateArtifacts(t *testing.T) {
+	dir := t.TempDir()
+	iso := filepath.Join(dir, "windows.iso")
+	if err := os.WriteFile(iso, []byte("test ISO"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	golden := filepath.Join(dir, "golden.qcow2")
+	opts := BakeOptions{WindowsISO: iso, Golden: golden, VNC: "127.0.0.1:0", VNCWeb: "127.0.0.1:8090"}
+	plan, err := PlanBake(&opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"no changes", golden, "automatic", "rerun this command without --dry-run"} {
+		if !strings.Contains(plan, want) {
+			t.Errorf("plan missing %q:\n%s", want, plan)
+		}
+	}
+	for _, path := range []string{golden, golden + ".autounattend.iso", GoldenVarsPath(golden), GoldenSerialPath(golden)} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("dry run created %s: %v", path, err)
+		}
 	}
 }
 

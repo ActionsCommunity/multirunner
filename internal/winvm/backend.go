@@ -53,19 +53,16 @@ func NewBackend(opt Options) (*Backend, error) {
 		accel = DetectAccel(runtime.GOOS, runtime.GOARCH)
 	}
 	code, _ := DetectOVMF(opt.QEMUBin)
-	sweepOrphans(opt.WorkDir)
 	return &Backend{opt: opt, accel: accel, ovmfCode: code}, nil
 }
 
-// sweepOrphans clears leftover per-VM artifacts in the work dir at startup. A
-// clean shutdown removes them (vmHandle.cleanup); these remain only after a hard
-// kill/crash. Safe to delete at startup: no VM from this process is running yet.
-func sweepOrphans(workDir string) {
-	if workDir == "" {
-		return
-	}
+// CleanupOrphans clears leftover per-VM artifacts in the work dir at startup.
+// A clean shutdown removes its overlay, JIT ISO, and NVRAM; its serial log stays
+// for diagnosis until this next startup. Safe to delete at startup: no VM from
+// this process is running yet.
+func (b *Backend) CleanupOrphans() {
 	for _, pat := range []string{"*.qcow2", "*.iso", "*.vars.fd", "*.serial.log"} {
-		matches, _ := filepath.Glob(filepath.Join(workDir, pat))
+		matches, _ := filepath.Glob(filepath.Join(b.opt.WorkDir, pat))
 		for _, p := range matches {
 			_ = os.Remove(p)
 		}

@@ -1,41 +1,94 @@
 ---
 name: multirunner-setup
-description: >-
-  **WORKFLOW SKILL**: Set up multirunner on Windows or Linux with a verified
-  release and canary. INVOKES: multirunner, GitHub CLI reads, host tools.
-  USE FOR: set up multirunner, install multirunner, configure a runner host.
-  DO NOT USE FOR: read-only health checks (use multirunner-health), changing
-  configured targets (use multirunner-targets), diagnosing an existing failure
-  (use multirunner-troubleshoot), upgrades (use multirunner-update).
+description: Set up a new Multirunner host end to end - verified binary, container runtime or QEMU golden, config, GitHub credentials, doctor, service, and canary. Use for first-time installation; use multirunner-host for changes to an existing host.
 ---
 
-# Set up multirunner
+# Set up Multirunner
 
-Set up without source or Go. Follow [safety and approvals](../references/safety-and-approvals.md),
-[host assessment](../references/host-assessment.md), [verified release](../references/verified-release.md),
-[Windows host](../references/windows-host.md), [Linux host](../references/linux-host.md),
-[runtimes and toolsets](../references/runtimes-and-toolsets.md),
-[caching](../references/caching.md), [authentication](../references/authentication.md),
-and [canary verification](../references/canary-verification.md).
+Use this for a host that does not yet run Multirunner. Follow the steps in
+order; each names the reference to read and the approval it needs. Route
+changes to an already-configured host to
+[multirunner-host](../multirunner-host/SKILL.md), GitHub-side work beyond the
+first credential to [multirunner-github](../multirunner-github/SKILL.md), and
+any Windows VM golden bake to [multirunner-qemu](../multirunner-qemu/SKILL.md).
+Apply [safety and approvals](../references/safety-and-approvals.md)
+throughout: no source build or Go toolchain is needed, and no step writes,
+installs, elevates, or registers anything without a separate approval.
 
-## Workflow
+## Steps
 
-1. Ask for target, OS, capacity, tools, and service intent.
-2. Assess read-only; propose backend, toolset, and redacted config.
-4. Install the verified release. If needed, propose `multirunner install-containerd`,
-   `multirunner install-windows-daemon --data-root <path>`, or an approved Linux
-   package action.
-4. After reboot, reassess incomplete steps.
-5. Ask before config backup and write. Preserve other fields, reference secrets
-   from the environment, then run doctor.
-6. Prefer approved `multirunner connect --repo <owner/repo> --config <path>` or
-   `multirunner connect --org <organization> --config <path>`.
-7. After doctor passes, ask before `multirunner service install --config <path>` and
-   `multirunner service start --config <path>`.
-8. Verify service state, then complete canary verification.
+1. **Capture intent.** Target scope (`repo`, `repos`, `org`, or `enterprise`)
+   and owner, host OS and architecture, workloads (Linux containers, Windows
+   containers, Windows VMs), capacity per pool, required tools, provisioning
+   mode (`pool`, `autoscale`, or `scaleset`), service or foreground, and
+   whether an Actions or git cache is wanted. Do not infer any of these.
+2. **Assess the host read-only.** Follow
+   [host assessment](../references/host-assessment.md) and the OS note
+   ([Linux](../references/linux-host.md),
+   [Windows](../references/windows-host.md),
+   [macOS](../references/macos-host.md)). Report every blocker together
+   before proposing anything.
+3. **Install the binary.** Follow
+   [verified release](../references/verified-release.md): download the
+   matching asset and `SHA256SUMS.txt`, verify the checksum (the binary's
+   `--version` prints a fixed development string and proves nothing), then
+   show the destination and required elevation before placing it on `PATH`.
+4. **Provide the runtime.** Pick the backend from
+   [runtimes and toolsets](../references/runtimes-and-toolsets.md):
+   - Linux containers: a reachable Docker or Podman API. Multirunner has no
+     Linux installer; show the exact package action and ask before elevation.
+   - Windows containers: run `multirunner install-containerd --dry-run` (or
+     `install-windows-daemon --dry-run --data-root <path>`), report the
+     planned features, downloads, service, and reboot outcome, then ask before
+     the real command. Reassess after any reboot.
+   - Windows VMs: hand the golden bake to multirunner-qemu and return with the
+     golden path and tool selectors.
+5. **Write the config.** Start from the matching file under "Minimal complete
+   configurations" in [host configuration](../docs/host-configuration.md)
+   (one per provisioning mode and backend, each valid under current
+   validation) and look up every other key in its "Complete key index". Use
+   `multirunner detect --path <checkout> --os <linux-or-windows>` to
+   recommend a container tier. Every non-QEMU pool needs a nonempty
+   `docker.host`, including `backend: containerd`; a `scaleset` pool needs a
+   unique `scale_set`. Reference secrets as `${VAR}` and supply them through
+   the service environment or a `.env` file next to the config; never inline
+   values. Show the redacted file and ask before writing it. Back up any
+   existing file first.
+6. **Add credentials.** Follow
+   [authentication](../references/authentication.md): preview
+   `multirunner connect --repo <owner/repo> --config <path> --dry-run` or the
+   `--org` form, then run it after approval. It creates and installs a GitHub
+   App, writes the PEM, and rewrites the config at mode 0600 (check the
+   service account can still read it). Use a PAT only for a scope `connect`
+   cannot create, a private git cache, or an approved existing deployment.
+7. **Preflight.** Run `multirunner doctor --config <path>` and clear every
+   failed boundary. Then run `multirunner run --config <path> --dry-run` and
+   review the printed plan and warnings. Neither proves webhook ingress, cache
+   reachability, guest boot, or workflow routing; see
+   [triage signals](../references/triage-signals.md) for what `doctor`
+   does and does not check.
+8. **Enable optional caches** only after the core path works, following
+   [caching](../references/caching.md). Use a host name, not an IP
+   literal, in `advertise_url`; bind listeners privately.
+9. **Wire autoscale or scale sets.** For `autoscale`, the webhook receiver,
+   secret, and public TLS boundary are a separate approved change through
+   multirunner-github; `connect` does not finish webhook setup. For
+   `scaleset`, the first start creates or updates the GitHub scale set.
+10. **Install the service.** Run `multirunner service install --config <abs
+    path> --dry-run`, then `service install`, then `service start --dry-run`
+    and `service start`, each after approval. The service records the absolute
+    config path and runs from the config directory, so its `.env` and PEM must
+    be readable there. Confirm state with `service start --dry-run` or the OS
+    service tool, and look for `multirunner: <error>` in the service log,
+    because a running service can hold a failed orchestrator.
+11. **Prove it end to end.** Follow
+    [canary verification](../references/canary-verification.md) with an
+    approved trusted workflow. Report queue-to-start latency, the run URL,
+    and that the ephemeral runner exited and capacity recovered.
 
 ## Success criteria
 
-Checksum and doctor pass; service is healthy; the canary completes with
-queue-to-start latency reported. Output is secret-free and only approved config
-fields changed.
+Checksum verified, `doctor` clean, `run --dry-run` plan reviewed, service
+running with the orchestrator alive, canary completed. Only approved config
+fields were written, and no secret, private key, JIT configuration, or cache
+token appeared in chat or logs. List every boundary the canary did not cover.

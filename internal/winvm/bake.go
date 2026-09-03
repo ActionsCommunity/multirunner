@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -604,7 +605,9 @@ type BakeOptions struct {
 	ImgBin           string
 	OVMFCode         string        // UEFI firmware code (auto-detected if empty)
 	OVMFVarsTemplate string        // UEFI vars template to copy
+	VNC              string        // raw VNC host:port; port 0 selects a free port
 	VNCWeb           string        // if set (host:port), serve a noVNC viewer to watch the install
+	VNCWebSocket     string        // resolved QEMU WebSocket host:port (set by Prepare)
 	Timeout          time.Duration // max install wall-clock before the bake kills a hung guest (default: derived from Tools)
 }
 
@@ -794,8 +797,14 @@ func bakeQEMUArgs(o BakeOptions, autounattendISO, varsFD string) []string {
 		// sentinel here so the host can verify the bake actually provisioned.
 		"-serial", "file:"+GoldenSerialPath(o.Golden),
 	)
-	if o.VNCWeb != "" {
-		args = append(args, "-vnc", fmt.Sprintf("0.0.0.0:%d,websocket=%d", bakeVNCDisplay, bakeVNCWSPort))
+	if o.VNC != "" {
+		host, port, _ := splitAddress(o.VNC)
+		vnc := net.JoinHostPort(host, strconv.Itoa(port-5900))
+		if o.VNCWebSocket != "" {
+			_, wsPort, _ := splitAddress(o.VNCWebSocket)
+			vnc += fmt.Sprintf(",websocket=%d", wsPort)
+		}
+		args = append(args, "-vnc", vnc)
 	} else {
 		args = append(args, "-display", "none")
 	}
@@ -806,14 +815,188 @@ const (
 	// bakeQMPAddr is where the bake's QEMU exposes QMP (to dismiss the "press any
 	// key to boot from CD" prompt via keypresses).
 	bakeQMPAddr = "127.0.0.1:4455"
-	// VNC display + websocket port for the optional noVNC viewer.
-	bakeVNCDisplay = 1
-	bakeVNCWSPort  = 5701
 	// bakeInstallCDDev is the block-backend id of the Windows install CD, ejected
 	// on the first guest reset so reboots boot the HDD instead of re-entering the
 	// DVD UEFI loader (which triple-faults under WHPX).
 	bakeInstallCDDev = "instcd"
 )
+
+func splitAddress(address string) (string, int, error) {
+	host, portText, err := net.SplitHostPort(address)
+	if err != nil || host == "" {
+		return "", 0, fmt.Errorf("invalid host:port %q", address)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil || port < 0 || port > 65535 {
+		return "", 0, fmt.Errorf("invalid port in %q", address)
+	}
+	return host, port, nil
+}
+
+func freePort(host string, excluded ...int) (int, error) {
+	for {
+		listener, err := net.Listen("tcp", net.JoinHostPort(host, "0"))
+		if err != nil {
+			return 0, err
+		}
+		port := listener.Addr().(*net.TCPAddr).Port
+		_ = listener.Close()
+		if port < 5900 {
+			continue
+		}
+		available := true
+		for _, other := range excluded {
+			available = available && port != other
+		}
+		if available {
+			return port, nil
+		}
+	}
+}
+
+type vncConfig struct {
+	host          string
+	port, webPort int
+}
+
+func parseVNC(o BakeOptions) (vncConfig, error) {
+	if o.VNC == "" && o.VNCWeb == "" {
+		return vncConfig{}, nil
+	}
+
+	var webHost string
+	var webPort int
+	var err error
+	if o.VNCWeb != "" {
+		webHost, webPort, err = splitAddress(o.VNCWeb)
+		if err != nil {
+			return vncConfig{}, fmt.Errorf("bake: --vnc-web: %w", err)
+		}
+		if webPort == 0 {
+			return vncConfig{}, fmt.Errorf("bake: --vnc-web port must not be 0")
+		}
+	}
+
+	host, port := webHost, 0
+	if o.VNC != "" {
+		host, port, err = splitAddress(o.VNC)
+		if err != nil {
+			return vncConfig{}, fmt.Errorf("bake: --vnc: %w", err)
+		}
+	}
+	if webHost != "" {
+		host = webHost
+	}
+	if port != 0 && port < 5900 {
+		return vncConfig{}, fmt.Errorf("bake: --vnc port must be 0 or at least 5900")
+	}
+	if port == webPort && port != 0 {
+		return vncConfig{}, fmt.Errorf("bake: --vnc and --vnc-web cannot use the same port")
+	}
+	return vncConfig{host: host, port: port, webPort: webPort}, nil
+}
+
+func prepareVNC(o *BakeOptions) error {
+	cfg, err := parseVNC(*o)
+	if err != nil {
+		return err
+	}
+	if cfg.host == "" {
+		o.VNCWebSocket = ""
+		return nil
+	}
+	host, port, webPort := cfg.host, cfg.port, cfg.webPort
+	if port == 0 {
+		port, err = freePort(host, webPort)
+		if err != nil {
+			return fmt.Errorf("bake: allocate VNC port on %s: %w", host, err)
+		}
+	}
+	o.VNC = net.JoinHostPort(host, strconv.Itoa(port))
+	if o.VNCWeb == "" {
+		o.VNCWebSocket = ""
+		return nil
+	}
+	wsPort, err := freePort(host, port, webPort)
+	if err != nil {
+		return fmt.Errorf("bake: allocate VNC WebSocket port on %s: %w", host, err)
+	}
+	o.VNCWebSocket = net.JoinHostPort(host, strconv.Itoa(wsPort))
+	return nil
+}
+
+func validateBake(o *BakeOptions) error {
+	o.defaults()
+	if o.WindowsISO == "" || o.Golden == "" {
+		return fmt.Errorf("bake: WindowsISO and Golden are required")
+	}
+	if _, err := os.Stat(o.WindowsISO); err != nil {
+		return fmt.Errorf("bake: windows iso: %w", err)
+	}
+	if _, err := parseVNC(*o); err != nil {
+		return err
+	}
+	hash, err := ToolsHash(*o)
+	if err != nil {
+		return fmt.Errorf("bake inputs: %w", err)
+	}
+	o.WorkflowsHash = hash
+	return nil
+}
+
+// PlanBake validates bake inputs and describes its writes without creating
+// disks, images, listeners, downloads, or processes.
+func PlanBake(o *BakeOptions) (string, error) {
+	if err := validateBake(o); err != nil {
+		return "", err
+	}
+	cfg, _ := parseVNC(*o)
+	vnc := "disabled"
+	if cfg.host != "" {
+		port := strconv.Itoa(cfg.port)
+		if cfg.port == 0 {
+			port = "automatic"
+		}
+		vnc = net.JoinHostPort(cfg.host, port)
+	}
+	qemu, qemuErr := exec.LookPath(o.QEMUBin)
+	if qemuErr != nil {
+		qemu = o.QEMUBin + " (not found on PATH)"
+	}
+	img, imgErr := exec.LookPath(o.ImgBin)
+	if imgErr != nil {
+		img = o.ImgBin + " (not found on PATH)"
+	}
+	isoCheck := "SHA256 computed"
+	if o.WindowsISOSHA256 != "" {
+		isoCheck = "SHA256 matched expected digest"
+	}
+	nvram := "disabled (legacy BIOS)"
+	if o.OVMFCode != "" {
+		nvram = GoldenVarsPath(o.Golden)
+	}
+	websocket, webViewer := "disabled", "disabled"
+	if o.VNCWeb != "" {
+		websocket = "automatic on the VNC host"
+		webViewer = "http://" + o.VNCWeb
+	}
+	tools := strings.Join(o.Tools, ",")
+	if tools == "" {
+		tools = "minimal"
+	}
+	return fmt.Sprintf(`Dry run: no changes will be made.
+Windows ISO: %s (%s)
+Golden disk: %s (%d GB; create)
+Autounattend ISO: %s
+NVRAM: %s; serial log: %s
+QEMU: %s; qemu-img: %s
+VM: %d MB RAM; %d CPUs; accel=%s; timeout=%s
+VNC: %s; WebSocket: %s; web viewer: %s
+Tools: %s; runner and tool payloads are staged when available
+Apply: rerun this command without --dry-run
+`, o.WindowsISO, isoCheck, o.Golden, o.DiskGB, o.Golden+".autounattend.iso", nvram, GoldenSerialPath(o.Golden),
+		qemu, img, o.MemMB, o.CPUs, o.Accel, o.Timeout, vnc, websocket, webViewer, tools), nil
+}
 
 // cpuArg picks the QEMU -cpu model for an accelerator. The bake and runtime must
 // agree so the golden boots on the vCPU it was installed on.
@@ -899,18 +1082,12 @@ func downloadFile(ctx context.Context, url, dst string) error {
 // Prepare creates the base disk + autounattend ISO for a bake and returns the
 // autounattend ISO path and the QEMU install args (without running QEMU).
 func Prepare(ctx context.Context, o *BakeOptions) (autoISO string, args []string, err error) {
-	o.defaults()
-	if o.WindowsISO == "" || o.Golden == "" {
-		return "", nil, fmt.Errorf("bake: WindowsISO and Golden are required")
+	if err := validateBake(o); err != nil {
+		return "", nil, err
 	}
-	if _, err := os.Stat(o.WindowsISO); err != nil {
-		return "", nil, fmt.Errorf("bake: windows iso: %w", err)
+	if err := prepareVNC(o); err != nil {
+		return "", nil, err
 	}
-	hash, err := ToolsHash(*o)
-	if err != nil {
-		return "", nil, fmt.Errorf("bake inputs: %w", err)
-	}
-	o.WorkflowsHash = hash
 	if out, err := exec.CommandContext(ctx, o.ImgBin, "create", "-f", "qcow2", o.Golden, fmt.Sprintf("%dG", o.DiskGB)).CombinedOutput(); err != nil {
 		return "", nil, fmt.Errorf("create golden disk: %w: %s", err, out)
 	}
@@ -951,6 +1128,15 @@ func Bake(ctx context.Context, o BakeOptions, now time.Time) error {
 		return err
 	}
 	defer os.Remove(autoISO)
+	if o.VNC != "" {
+		fmt.Printf("VNC:         %s\n", o.VNC)
+	}
+	if o.VNCWebSocket != "" {
+		fmt.Printf("WebSocket:   %s (noVNC transport)\n", o.VNCWebSocket)
+	}
+	if o.VNCWeb != "" {
+		fmt.Printf("Web viewer:  http://%s\n", o.VNCWeb)
+	}
 
 	cmd := exec.CommandContext(ctx, o.QEMUBin, args...)
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
@@ -966,7 +1152,8 @@ func Bake(ctx context.Context, o BakeOptions, now time.Time) error {
 		fmt.Printf("\n  ┌─────────────────────────────────────────────────────────┐\n")
 		fmt.Printf("  │  Watch the install live:  http://%-24s │\n", o.VNCWeb)
 		fmt.Printf("  └─────────────────────────────────────────────────────────┘\n\n")
-		go func() { _ = vmview.Serve(viewCtx, o.VNCWeb, bakeVNCWSPort, logger) }()
+		_, wsPort, _ := splitAddress(o.VNCWebSocket)
+		go func() { _ = vmview.Serve(viewCtx, o.VNCWeb, wsPort, logger) }()
 	}
 
 	// Dismiss the "Press any key to boot from CD" prompt on first boot. QMP

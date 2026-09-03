@@ -22,7 +22,7 @@ image is intentionally built and present. `multirunner detect --path <checkout>
 
 ## QEMU golden tools
 
-QEMU ignores `image` and non-minimal `image_tier`. Select golden tools with
+QEMU ignores `image` and `image_tier`. Select golden tools with
 `dotnet[:major]`, `node[:major]`, `go`, or `buildtools[:line]`:
 
 ```text
@@ -37,11 +37,17 @@ qemu:
   tools: [dotnet, "node:24", "buildtools:17"]
 ```
 
+A bare selector expands: `node` bakes every Node major in the embedded
+manifest, `dotnet` every .NET channel targeted at QEMU, and `buildtools` the
+manifest's default line. Pin majors and lines explicitly so the golden
+fingerprint stays stable across manifest updates.
+
 `qemu.bake_iso` enables managed rebuilds. `qemu.bake_iso_sha256` verifies the
-media. A non-default `qemu.runner_version` also requires
-`qemu.runner_sha256`. The configured tools participate in the golden
-fingerprint. Show the ISO, checksums, tools, disk impact, accelerator, and
-rebuild effect before approval.
+media. A non-default `qemu.runner_version` requires `qemu.runner_sha256` for a
+bake or managed-rebuild evaluation; `doctor` does not reject an existing
+golden without `bake_iso` for that omission alone. The configured tools
+participate in the golden fingerprint. Show the ISO, checksums, tools, disk
+impact, accelerator, and rebuild effect before approval.
 
 For updates, compare current and proposed binary, image digest, image tier, and
 QEMU tool fingerprint. Pull or rebuild only the approved pools, never prune

@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -50,6 +51,7 @@ const remoteRepoCheckTimeout = 20 * time.Second
 func rootCmd() *cobra.Command {
 	var cfgPath string
 	var installDeps bool
+	var runDryRun bool
 
 	root := &cobra.Command{
 		Use:     "multirunner",
@@ -67,11 +69,15 @@ Run with no command to start the orchestrator (same as "run").`,
 		SilenceUsage: true,
 		Args:         cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if runDryRun {
+				return planRun(cmd.OutOrStdout(), cfgPath, installDeps)
+			}
 			return runService(cfgPath, installDeps)
 		},
 	}
 	root.PersistentFlags().StringVar(&cfgPath, "config", "config.yaml", "path to the YAML config file")
 	root.Flags().BoolVar(&installDeps, "install-deps", false, "auto-install missing container daemons (elevates)")
+	root.Flags().BoolVar(&runDryRun, "dry-run", false, "validate config and print startup effects without starting services or runners")
 
 	run := &cobra.Command{
 		Use:   "run",
@@ -85,10 +91,14 @@ Runs identically in the foreground or under a service manager (see "service").`,
   multirunner run --install-deps        # install a missing Windows daemon, then run`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if runDryRun {
+				return planRun(cmd.OutOrStdout(), cfgPath, installDeps)
+			}
 			return runService(cfgPath, installDeps)
 		},
 	}
 	run.Flags().BoolVar(&installDeps, "install-deps", false, "auto-install missing container daemons (elevates)")
+	run.Flags().BoolVar(&runDryRun, "dry-run", false, "validate config and print startup effects without starting services or runners")
 
 	doctorC := &cobra.Command{
 		Use:   "doctor",
@@ -113,6 +123,7 @@ Exits non-zero if any required check is incomplete or misconfigured.`,
 
 	var connOrg, connRepo, connName, connKeyOut string
 	var connPort int
+	var connDryRun bool
 	connectC := &cobra.Command{
 		Use:   "connect",
 		Short: "Create + install a GitHub App and write its credentials to the config",
@@ -133,9 +144,13 @@ for a repo-scoped App.`,
 			if err != nil {
 				return err
 			}
+			if connDryRun {
+				return connectPlan(cmd.OutOrStdout(), abs, connOrg, connRepo, connName, connPort, connKeyOut)
+			}
 			return connectCmd(abs, connOrg, connRepo, connName, connPort, connKeyOut)
 		},
 	}
+	connectC.Flags().BoolVar(&connDryRun, "dry-run", false, "print the GitHub and local changes without opening a browser or writing files")
 	connectC.Flags().StringVar(&connOrg, "org", "", "GitHub org login (org-scoped App)")
 	connectC.Flags().StringVar(&connRepo, "repo", "", "owner/repo (repo-scoped App)")
 	connectC.Flags().StringVar(&connName, "name", "multirunner", "GitHub App name")
@@ -143,6 +158,7 @@ for a repo-scoped App.`,
 	connectC.Flags().StringVar(&connKeyOut, "key-out", "", "path to write the App private key")
 
 	var winDataRoot string
+	var winDaemonDryRun bool
 	winDaemon := &cobra.Command{
 		Use:   "install-windows-daemon",
 		Short: "Install the standalone Windows-container dockerd (elevates)",
@@ -150,17 +166,25 @@ for a repo-scoped App.`,
 multirunner can run Windows runners without Docker Desktop. Triggers a UAC
 prompt, enables the Windows Containers feature (may require a reboot), and
 registers the daemon on its own named pipe (npipe:////./pipe/docker_engine_windows)
-so it coexists with Podman/Docker Desktop and the WSL Linux daemon. Windows only.`,
+so it coexists with Podman/Docker Desktop and the WSL Linux daemon. Windows only.
+Use --dry-run first to inspect host state and print the plan without elevation.`,
+		Example: `  multirunner install-windows-daemon --dry-run
+  multirunner install-windows-daemon --data-root D:\containers`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if winDaemonDryRun {
+				return winsetup.PlanWindowsDaemon(winsetup.InstallOptions{DataRoot: winDataRoot})
+			}
 			return winsetup.Install(winsetup.InstallOptions{DataRoot: winDataRoot})
 		},
 	}
+	winDaemon.Flags().BoolVar(&winDaemonDryRun, "dry-run", false, "inspect the host and print planned changes without elevation or mutation")
 	winDaemon.Flags().StringVar(&winDataRoot, "data-root", "",
 		"where the daemon stores images and containers "+
 			"(default %ProgramData%\\multirunner\\docker\\data); "+
 			"point at an existing store to keep its images")
 
+	var containerdDryRun bool
 	installContainerd := &cobra.Command{
 		Use:   "install-containerd",
 		Short: "Install containerd + runhcs + nerdctl for Windows containers (elevates)",
@@ -168,12 +192,19 @@ so it coexists with Podman/Docker Desktop and the WSL Linux daemon. Windows only
 a service so multirunner can run Windows-container runners (pool backend:
 containerd). Triggers a UAC prompt, enables the Containers + Hyper-V features
 (may require a reboot), and registers containerd on \\.\pipe\containerd-containerd.
-Process isolation is used on Windows Server, Hyper-V isolation on client. Windows only.`,
+Process isolation is used on Windows Server, Hyper-V isolation on client. Windows only.
+Use --dry-run first to inspect host state and print the plan without elevation.`,
+		Example: `  multirunner install-containerd --dry-run
+  multirunner install-containerd`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if containerdDryRun {
+				return winsetup.PlanContainerd()
+			}
 			return winsetup.InstallContainerd()
 		},
 	}
+	installContainerd.Flags().BoolVar(&containerdDryRun, "dry-run", false, "inspect the host and print planned changes without elevation or mutation")
 
 	root.AddCommand(run, doctorC, connectC, winDaemon, installContainerd, bakeCmd(), detectCmd(&cfgPath), screenshotCmd(), bootKeysCmd(), vmViewCmd(), jitISOCmd(), serviceCmd(&cfgPath))
 	return root
@@ -252,9 +283,9 @@ func screenshotCmd() *cobra.Command {
 
 // bakeCmd builds a golden Windows Server Core image for the QEMU backend.
 func bakeCmd() *cobra.Command {
-	var iso, isoSHA256, golden, accel, runnerVer, runnerSHA256, vncWeb string
+	var iso, isoSHA256, golden, accel, runnerVer, runnerSHA256, vnc, vncWeb string
 	var diskGB, memMB, cpus int
-	var licensed, prepareOnly bool
+	var licensed, prepareOnly, dryRun bool
 	var tools []string
 	c := &cobra.Command{
 		Use:   "bake",
@@ -269,16 +300,22 @@ command without running it (for manual/observed installs).`,
 		Example: "  multirunner bake --iso ./WinServer2022.iso --golden /var/lib/multirunner/golden.qcow2",
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if cmd.Flags().Changed("vnc-web") && vncWeb == "" && !cmd.Flags().Changed("vnc") {
+				vnc = ""
+			}
 			opts := winvm.BakeOptions{
 				WindowsISO: iso, Golden: golden, DiskGB: diskGB, MemMB: memMB,
 				CPUs: cpus, Accel: accel, RunnerVersion: runnerVer, Licensed: licensed,
-				VNCWeb: vncWeb, Tools: tools, WindowsISOSHA256: isoSHA256, RunnerSHA256: runnerSHA256,
+				VNC: vnc, VNCWeb: vncWeb, Tools: tools, WindowsISOSHA256: isoSHA256, RunnerSHA256: runnerSHA256,
 			}
-			hash, err := winvm.ToolsHash(opts)
-			if err != nil {
-				return fmt.Errorf("bake inputs: %w", err)
+			if dryRun {
+				plan, err := winvm.PlanBake(&opts)
+				if err != nil {
+					return err
+				}
+				fmt.Print(plan)
+				return nil
 			}
-			opts.WorkflowsHash = hash
 			if prepareOnly {
 				autoISO, args, err := winvm.Prepare(cmd.Context(), &opts)
 				if err != nil {
@@ -286,11 +323,21 @@ command without running it (for manual/observed installs).`,
 				}
 				fmt.Printf("disk:        %s\nautounattend: %s\nqemu:        %s %s\n",
 					opts.Golden, autoISO, opts.QEMUBin, strings.Join(args, " "))
+				if opts.VNC != "" {
+					fmt.Printf("VNC:         %s\n", opts.VNC)
+				}
+				if opts.VNCWebSocket != "" {
+					fmt.Printf("WebSocket:   %s (noVNC transport)\n", opts.VNCWebSocket)
+				}
+				if opts.VNCWeb != "" {
+					fmt.Printf("Web viewer:  http://%s\n", opts.VNCWeb)
+				}
 				return nil
 			}
 			return winvm.Bake(cmd.Context(), opts, time.Now())
 		},
 	}
+	c.Flags().BoolVar(&dryRun, "dry-run", false, "validate inputs and print planned writes without creating or starting anything")
 	c.Flags().BoolVar(&prepareOnly, "prepare-only", false, "create disk + autounattend ISO and print the QEMU command, don't run")
 	c.Flags().StringVar(&iso, "iso", "", "path to a Windows Server ISO (required)")
 	c.Flags().StringVar(&isoSHA256, "iso-sha256", "", "expected SHA256 of the Windows Server ISO")
@@ -303,12 +350,14 @@ command without running it (for manual/observed installs).`,
 	c.Flags().StringVar(&runnerSHA256, "runner-sha256", "", "runner archive SHA256 (required for a non-default version)")
 	c.Flags().StringSliceVar(&tools, "tools", nil, "toolchains to bake: dotnet[:major],node[:major],go,buildtools[:line]")
 	c.Flags().BoolVar(&licensed, "licensed", false, "a real Windows key/KMS is configured (skip eval housekeeping)")
+	c.Flags().StringVar(&vnc, "vnc", "127.0.0.1:0", "raw VNC host:port (port 0 selects a free port; empty disables when --vnc-web is also empty)")
 	c.Flags().StringVar(&vncWeb, "vnc-web", "127.0.0.1:8090", "serve a browser VNC viewer at host:port to watch the install (empty to disable)")
 	return c
 }
 
 // serviceCmd builds `multirunner service {install,uninstall,start,stop,restart}`.
 func serviceCmd(cfgPath *string) *cobra.Command {
+	var dryRun bool
 	c := &cobra.Command{
 		Use:   "service",
 		Short: "Install/manage multirunner as an OS service",
@@ -320,6 +369,7 @@ install/uninstall/start/stop require administrator/root.`,
   sudo multirunner service start`,
 		Args: cobra.NoArgs,
 	}
+	c.PersistentFlags().BoolVar(&dryRun, "dry-run", false, "inspect service state and print the action without changing it")
 	shortFor := map[string]string{
 		"install":   "Install multirunner as an OS service (admin/root)",
 		"uninstall": "Remove the multirunner service (admin/root)",
@@ -342,6 +392,9 @@ install/uninstall/start/stop require administrator/root.`,
 				if err != nil {
 					return err
 				}
+				if dryRun {
+					return servicePlan(cmd.OutOrStdout(), svc, action, abs)
+				}
 				if err := service.Control(svc, action); err != nil {
 					return err
 				}
@@ -351,6 +404,28 @@ install/uninstall/start/stop require administrator/root.`,
 		})
 	}
 	return c
+}
+
+func servicePlan(w io.Writer, svc service.Service, action, configPath string) error {
+	state := "unknown/not installed"
+	if status, err := svc.Status(); err == nil {
+		switch status {
+		case service.StatusRunning:
+			state = "running"
+		case service.StatusStopped:
+			state = "stopped"
+		}
+	}
+	effect := map[string]string{
+		"install":   "create or replace the service definition using the resolved config path",
+		"uninstall": "remove the service definition",
+		"start":     "start the installed service and runner orchestration",
+		"stop":      "stop the service and its runner orchestration",
+		"restart":   "stop and start the service and its runner orchestration",
+	}[action]
+	_, err := fmt.Fprintf(w, "Dry run: no changes will be made.\nPlatform: %s\nService: multirunner (%s)\nAction: %s — %s\nConfig: %s\nApply with: multirunner service %s --config \"%s\"\n",
+		service.Platform(), state, action, effect, configPath, action, configPath)
+	return err
 }
 
 // newService builds the kardianos service wrapper around the orchestrator.
@@ -383,6 +458,98 @@ func runService(cfgPath string, installDeps bool) error {
 	}
 	prg.interactive = service.Interactive()
 	return svc.Run()
+}
+
+func planRun(w io.Writer, configPath string, installDeps bool) error {
+	abs, err := filepath.Abs(configPath)
+	if err != nil {
+		return err
+	}
+	cfg, err := config.Load(abs)
+	if err != nil {
+		return err
+	}
+	target := cfg.GitHub.Owner
+	if cfg.GitHub.Scope == config.ScopeRepo {
+		target += "/" + cfg.GitHub.Repo
+	} else if cfg.GitHub.Scope == config.ScopeRepos {
+		target = fmt.Sprintf("%d repositories", len(cfg.GitHub.Repos))
+	}
+	fmt.Fprintf(w, "Dry run: no changes will be made.\nConfig: %s\nTarget: %s (%s)\nProvisioning: %s\n",
+		abs, target, cfg.GitHub.Scope, cfg.Provisioning)
+	for _, warning := range cfg.Warnings() {
+		fmt.Fprintf(w, "Warning: %s\n", warning)
+	}
+	if cfg.Cache.Enabled && cfg.Cache.ExternalURL == "" {
+		fmt.Fprintf(w, "Cache: create/use %s and listen on %s\n", cfg.Cache.Path, cfg.Cache.Listen)
+	} else if cfg.Cache.ExternalURL != "" {
+		fmt.Fprintln(w, "Cache: use the configured external endpoint")
+	} else {
+		fmt.Fprintln(w, "Cache: disabled")
+	}
+	if cfg.GitCache.Enabled() {
+		fmt.Fprintf(w, "Git cache: create/update mirrors under %s; sweep entries older than %d days\n", cfg.GitCache.Path, cfg.GitCache.MaxAgeDays)
+	}
+	if cfg.Metrics.Listen != "" {
+		fmt.Fprintf(w, "Metrics/health: listen on %s\n", cfg.Metrics.Listen)
+	}
+	if cfg.Webhook.Listen != "" {
+		fmt.Fprintf(w, "Webhook: listen on %s%s\n", cfg.Webhook.Listen, cfg.Webhook.Path)
+	}
+
+	now := time.Now()
+	for _, pool := range cfg.Pools {
+		if pool.Backend != "qemu" {
+			backendName := pool.Backend
+			if backendName == "" {
+				backendName = "docker"
+			}
+			fmt.Fprintf(w, "Pool %s: backend=%s; capacity=%d; image=%s (pull/ensure when absent); runner registrations will be created\n",
+				pool.Name, backendName, pool.Size, pool.ImageRef())
+			continue
+		}
+		workDir := pool.QEMU.WorkDir
+		if workDir == "" {
+			workDir = filepath.Join(os.TempDir(), "multirunner-vm")
+		}
+		bake := winvm.BakeOptions{
+			WindowsISO: pool.QEMU.BakeISO, WindowsISOSHA256: pool.QEMU.BakeISOSHA256,
+			Golden: pool.QEMU.Golden, MemMB: pool.QEMU.MemMB, CPUs: pool.QEMU.CPUs,
+			Accel: pool.QEMU.Accel, RunnerVersion: pool.QEMU.RunnerVersion,
+			RunnerSHA256: pool.QEMU.RunnerSHA256, Licensed: pool.QEMU.Licensed, Tools: pool.QEMU.Tools,
+		}
+		wantHash := ""
+		if bake.WindowsISO != "" {
+			wantHash, err = winvm.ToolsHash(bake)
+			if err != nil {
+				return fmt.Errorf("qemu pool %q bake inputs: %w", pool.Name, err)
+			}
+		}
+		meta, err := winvm.LoadMeta(pool.QEMU.Golden)
+		if err != nil {
+			return fmt.Errorf("qemu pool %q metadata: %w", pool.Name, err)
+		}
+		action := winvm.ActionNone
+		if meta.EvalDays != 0 {
+			action = winvm.DefaultPolicy().Decide(meta, wantHash, now)
+		}
+		housekeeping := action.String()
+		if action == winvm.ActionRebuild && bake.WindowsISO == "" {
+			housekeeping = "rebuild required but unavailable (qemu.bake_iso is empty)"
+		}
+		fmt.Fprintf(w, "Pool %s: backend=qemu; capacity=%d; golden=%s; remove orphan VM artifacts from %s; housekeeping=%s; runner registrations will be created\n",
+			pool.Name, pool.Size, pool.QEMU.Golden, workDir, housekeeping)
+	}
+	if installDeps {
+		fmt.Fprintln(w, "Dependency installation: an unreachable default Windows Docker pool may invoke install-windows-daemon; preview it separately with install-windows-daemon --dry-run")
+	}
+	if cfg.Provisioning.IsScaleset() {
+		fmt.Fprintln(w, "GitHub: create or update each configured runner scale set and open its long-poll session")
+	} else {
+		fmt.Fprintln(w, "GitHub: create ephemeral JIT runner registrations as capacity starts or demand arrives")
+	}
+	fmt.Fprintln(w, "Apply: rerun this command without --dry-run")
+	return nil
 }
 
 // program adapts the orchestrator to the kardianos service lifecycle.
@@ -690,6 +857,9 @@ func preparePool(ctx context.Context, pc config.Pool, interactive, installDeps b
 	if be == nil {
 		logger.Warn("skipping pool with unknown os", "pool", pc.Name, "os", pc.OS)
 		return nil, nil
+	}
+	if qemu, ok := be.(*winvm.Backend); ok {
+		qemu.CleanupOrphans()
 	}
 
 	if err := be.Ping(ctx); err != nil {

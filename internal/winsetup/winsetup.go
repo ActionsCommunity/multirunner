@@ -9,6 +9,7 @@ import (
 	_ "embed"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -125,6 +126,112 @@ func runElevated(scriptBody string, args ...string) (status string, runErr error
 // quote is special inside such a literal, and it is escaped by doubling.
 func psQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+}
+
+type installState struct {
+	InstallationType string `json:"installationType"`
+	Containers       string `json:"containers"`
+	HyperV           string `json:"hyperV"`
+	Service          string `json:"service"`
+	RebootPending    bool
+}
+
+func inspectInstall(serviceName string) (installState, error) {
+	probe := fmt.Sprintf(`
+$ErrorActionPreference = 'Stop'
+function Feature([string]$name) {
+    try { return (Get-WindowsOptionalFeature -Online -FeatureName $name).State.ToString() }
+    catch { return 'unknown (feature inspection requires elevation)' }
+}
+$svc = Get-Service -Name %s -ErrorAction SilentlyContinue
+[pscustomobject]@{
+    installationType = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -Name InstallationType -ErrorAction SilentlyContinue).InstallationType
+    containers = Feature 'Containers'
+    hyperV = Feature 'Microsoft-Hyper-V'
+    service = if ($svc) { $svc.Status.ToString() } else { 'not installed' }
+} | ConvertTo-Json -Compress`, psQuote(serviceName))
+	out, err := exec.Command("powershell", "-NoProfile", "-Command", probe).Output()
+	if err != nil {
+		return installState{}, err
+	}
+	var state installState
+	if err := json.Unmarshal(out, &state); err != nil {
+		return installState{}, err
+	}
+	return state, nil
+}
+
+// PlanWindowsDaemon and PlanContainerd inspect the host and print the actions
+// their matching installer would take. They never elevate or change host state.
+func PlanWindowsDaemon(opts InstallOptions) error {
+	return printInstallPlan("windows-daemon", opts)
+}
+
+func PlanContainerd() error { return printInstallPlan("containerd", InstallOptions{}) }
+
+func printInstallPlan(kind string, opts InstallOptions) error {
+	if runtime.GOOS != "windows" {
+		return fmt.Errorf("install-%s is only supported on Windows", kind)
+	}
+	serviceName := "multirunner-dockerd"
+	if kind == "containerd" {
+		serviceName = "containerd"
+	}
+	state, inspectErr := inspectInstall(serviceName)
+	state.RebootPending = RebootPending()
+	fmt.Print(formatInstallPlan(kind, opts, state, inspectErr))
+	return nil
+}
+
+func formatInstallPlan(kind string, opts InstallOptions, state installState, inspectErr error) string {
+	var b strings.Builder
+	needsHyperV := kind == "containerd" || !strings.HasPrefix(state.InstallationType, "Server")
+	fmt.Fprintf(&b, "Dry run: no changes will be made.\nInstaller: install-%s\nApply requires: Administrator elevation (UAC)\n", kind)
+	if inspectErr != nil {
+		fmt.Fprintf(&b, "Host inspection: unavailable (%v)\n", inspectErr)
+	} else {
+		fmt.Fprintf(&b, "Current state: Containers=%s; Hyper-V=%s; service=%s; reboot pending=%t\n",
+			state.Containers, state.HyperV, state.Service, state.RebootPending)
+	}
+	b.WriteString("Planned actions:\n")
+	if kind == "containerd" {
+		b.WriteString("  - Enable Containers and Hyper-V when disabled.\n" +
+			"  - If feature enablement requires a reboot, stop and request a reboot; rerun afterward.\n" +
+			"  - Download missing containerd, runhcs, nerdctl, and Windows CNI binaries.\n" +
+			"  - Rewrite containerd config and the machine PATH entry.\n" +
+			"  - Register or reconfigure and start the containerd service.\n")
+	} else {
+		features := "Containers"
+		if !strings.HasPrefix(state.InstallationType, "Server") {
+			features += " and Hyper-V"
+		}
+		dataRoot := opts.DataRoot
+		if dataRoot == "" {
+			dataRoot = `%ProgramData%\multirunner\docker\data`
+		}
+		fmt.Fprintf(&b, "  - Enable %s when disabled.\n", features)
+		b.WriteString("  - If feature enablement requires a reboot, stop and request a reboot; rerun afterward.\n" +
+			"  - Download or upgrade the pinned Moby binaries.\n" +
+			"  - Create the docker-users group and add the current user when needed.\n")
+		fmt.Fprintf(&b, "  - Rewrite daemon configuration with data-root %s.\n", dataRoot)
+		b.WriteString("  - Register or reconfigure and start the multirunner-dockerd service.\n")
+	}
+	switch {
+	case state.RebootPending:
+		b.WriteString("Reboot: already pending; reboot before applying.\n")
+	case inspectErr != nil:
+		b.WriteString("Reboot: unknown; apply may require one after enabling Windows features.\n")
+	case state.Containers == "Enabled" && (!needsHyperV || state.HyperV == "Enabled"):
+		b.WriteString("Reboot: not expected from feature enablement.\n")
+	default:
+		b.WriteString("Reboot: may be required after enabling Windows features.\n")
+	}
+	fmt.Fprintf(&b, "Apply with: multirunner install-%s", kind)
+	if kind == "windows-daemon" && opts.DataRoot != "" {
+		fmt.Fprintf(&b, " --data-root %s", psQuote(opts.DataRoot))
+	}
+	b.WriteByte('\n')
+	return b.String()
 }
 
 // InstallContainerd installs containerd + runhcs + nerdctl + CNI elevated, the

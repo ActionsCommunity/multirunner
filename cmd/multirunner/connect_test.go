@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -58,6 +60,34 @@ func TestWriteConnectSuccessReturnsWriterError(t *testing.T) {
 	err := writeConnectSuccess(errorWriter{err: want}, "config.yaml", "app.pem", &ghapp.Credentials{})
 	if !errors.Is(err, want) {
 		t.Fatalf("writeConnectSuccess error = %v, want %v", err, want)
+	}
+}
+
+func TestConnectPlanDoesNotWriteFiles(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	var out bytes.Buffer
+	if err := connectPlan(&out, configPath, "octo", "", "runner-app", 0, ""); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"no changes", "organization_self_hosted_runners=write", configPath, "remove auth.pat"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("plan missing %q:\n%s", want, out.String())
+		}
+	}
+	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
+		t.Fatalf("dry run created config: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "multirunner-app.private-key.pem")); !os.IsNotExist(err) {
+		t.Fatalf("dry run created private key: %v", err)
+	}
+}
+
+func TestConnectPlanRejectsTwoTargets(t *testing.T) {
+	var out bytes.Buffer
+	err := connectPlan(&out, "config.yaml", "octo", "octo/repo", "runner-app", 0, "")
+	if err == nil || !strings.Contains(err.Error(), "exactly one") {
+		t.Fatalf("connectPlan error = %v, want exactly-one error", err)
 	}
 }
 
