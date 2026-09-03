@@ -1,11 +1,11 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -43,7 +43,7 @@ func ReadConnectHints(path string) (hints ConnectHints, ok bool) {
 // GitHub App credentials, preserving other content and comments. Any existing
 // auth.pat is removed.
 func WriteAppAuth(path string, scope Scope, owner, repo string, appID, installationID int64, keyPath string) error {
-	doc, err := loadOrNewMapping(path)
+	file, doc, err := loadOrNewDocument(path)
 	if err != nil {
 		return err
 	}
@@ -66,7 +66,7 @@ func WriteAppAuth(path string, scope Scope, owner, repo string, appID, installat
 	setInt(auth, "installation_id", installationID)
 	setScalar(auth, "private_key_path", keyPath)
 
-	return renderConfig(path, doc)
+	return renderConfig(path, file)
 }
 
 // WriteDeviceAuth updates (or creates) a config file's github + auth sections to
@@ -74,7 +74,7 @@ func WriteAppAuth(path string, scope Scope, owner, repo string, appID, installat
 // Any existing auth.pat and installation-App keys (app_id, installation_id,
 // private_key_path) are removed, since a user access token supersedes them.
 func WriteDeviceAuth(path string, scope Scope, owner, repo, clientID, tokenPath string) error {
-	doc, err := loadOrNewMapping(path)
+	file, doc, err := loadOrNewDocument(path)
 	if err != nil {
 		return err
 	}
@@ -95,16 +95,23 @@ func WriteDeviceAuth(path string, scope Scope, owner, repo, clientID, tokenPath 
 	setScalar(auth, "client_id", clientID)
 	setScalar(auth, "token_path", tokenPath)
 
-	return renderConfig(path, doc)
+	return renderConfig(path, file)
 }
 
-// renderConfig writes doc back to path.
-func renderConfig(path string, doc *yaml.Node) error {
-	out, err := yaml.Marshal(doc)
-	if err != nil {
+// renderConfig writes a whole document back to path. It takes the document node
+// rather than its mapping because a comment block at the top of the file, above
+// the first key, hangs off the document; marshalling the mapping alone drops it.
+func renderConfig(path string, file *yaml.Node) error {
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	if err := enc.Encode(file); err != nil {
 		return err
 	}
-	return writeFileAtomic(path, out)
+	if err := enc.Close(); err != nil {
+		return err
+	}
+	return writeFileAtomic(path, buf.Bytes())
 }
 
 // EnsureStarterPool appends a working first pool to a config that has none, and
@@ -115,56 +122,83 @@ func renderConfig(path string, doc *yaml.Node) error {
 // dockerHost is the endpoint the caller discovered on this machine. It is passed
 // in rather than probed here so this package keeps no opinion about daemons.
 func EnsureStarterPool(path, dockerHost string) (bool, error) {
-	doc, err := loadOrNewMapping(path)
+	file, doc, err := loadOrNewDocument(path)
 	if err != nil {
 		return false, err
 	}
 	if v, _ := findKey(doc, "pools"); v != nil {
 		return false, nil
 	}
-	out, err := yaml.Marshal(doc)
+
+	// The pool is spliced into the tree rather than appended as text: a config
+	// whose root is written in flow style ({github: {...}}) would otherwise get a
+	// block `pools:` glued underneath, which parses as a second document root and
+	// leaves Load still reporting no pools.
+	key, value, err := starterPoolNodes(dockerHost)
 	if err != nil {
 		return false, err
 	}
-	// An empty mapping marshals to "{}", which is valid YAML but reads as
-	// leftover noise at the top of a config a person is about to edit.
-	if strings.TrimSpace(string(out)) == "{}" {
-		out = nil
-	}
-	out = append(out, PoolsYAML(dockerHost)...)
-	if err := writeFileAtomic(path, out); err != nil {
+	doc.Style = 0
+	doc.Content = append(doc.Content, key, value)
+
+	if err := renderConfig(path, file); err != nil {
 		return false, err
 	}
 	return true, nil
 }
 
-// loadOrNewMapping returns the document root of an existing config, or a fresh
-// mapping when there is no config yet. Only a genuinely missing file yields a new
-// mapping: an unreadable, malformed or non-mapping config is an error, because
-// the caller rewrites the file and treating those cases as "absent" silently
-// destroys a config the user still has.
-func loadOrNewMapping(path string) (*yaml.Node, error) {
+// starterPoolNodes parses the rendered starter pool into the key and value nodes
+// to graft onto a config, keeping the comments that name each option.
+func starterPoolNodes(dockerHost string) (key, value *yaml.Node, err error) {
+	var parsed yaml.Node
+	if err := yaml.Unmarshal([]byte(PoolsYAML(dockerHost)), &parsed); err != nil {
+		return nil, nil, fmt.Errorf("parse the starter pool template: %w", err)
+	}
+	if len(parsed.Content) != 1 || parsed.Content[0].Kind != yaml.MappingNode {
+		return nil, nil, fmt.Errorf("the starter pool template is not a YAML mapping")
+	}
+	v, i := findKey(parsed.Content[0], "pools")
+	if v == nil {
+		return nil, nil, fmt.Errorf("the starter pool template has no pools key")
+	}
+	return parsed.Content[0].Content[i], v, nil
+}
+
+// loadOrNewDocument returns an existing config's document node and its root
+// mapping, or a fresh pair when there is no config yet. Callers edit the mapping
+// and write the document, so a comment block above the first key - which the
+// parser hangs off the document, not the mapping - survives the round trip.
+//
+// Only a genuinely missing file yields a new document: an unreadable, malformed
+// or non-mapping config is an error, because the caller rewrites the file and
+// treating those cases as "absent" silently destroys a config the user still has.
+func loadOrNewDocument(path string) (file, mapping *yaml.Node, err error) {
 	data, err := os.ReadFile(path)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
-		return &yaml.Node{Kind: yaml.MappingNode}, nil
+		return newDocument()
 	case err != nil:
-		return nil, fmt.Errorf("read config %s: %w", path, err)
+		return nil, nil, fmt.Errorf("read config %s: %w", path, err)
 	}
 
 	var root yaml.Node
 	if err := yaml.Unmarshal(data, &root); err != nil {
-		return nil, fmt.Errorf("parse config %s: %w (fix or move it, then re-run)", path, err)
+		return nil, nil, fmt.Errorf("parse config %s: %w (fix or move it, then re-run)", path, err)
 	}
 	// An empty file parses to a document with no content; that is a config the
-	// user has not filled in yet, so starting from a fresh mapping is safe.
+	// user has not filled in yet, so starting from a fresh document is safe.
 	if len(root.Content) == 0 {
-		return &yaml.Node{Kind: yaml.MappingNode}, nil
+		return newDocument()
 	}
 	if len(root.Content) != 1 || root.Content[0].Kind != yaml.MappingNode {
-		return nil, fmt.Errorf("config %s is not a YAML mapping; refusing to overwrite it", path)
+		return nil, nil, fmt.Errorf("config %s is not a YAML mapping; refusing to overwrite it", path)
 	}
-	return root.Content[0], nil
+	return &root, root.Content[0], nil
+}
+
+func newDocument() (file, mapping *yaml.Node, err error) {
+	mapping = &yaml.Node{Kind: yaml.MappingNode}
+	return &yaml.Node{Kind: yaml.DocumentNode, Content: []*yaml.Node{mapping}}, mapping, nil
 }
 
 // writeFileAtomic replaces path in one step, so a failure part-way through

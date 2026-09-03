@@ -40,35 +40,32 @@ func PoolsYAML(dockerHost string) string {
 	return fmt.Sprintf(`
 pools:
   # A first pool, ready to run. `+"`multirunner doctor`"+` checks it against this host.
+  #
+  # Everything below is optional except name, os and docker.host. Provisioning
+  # defaults to scaleset for repo and org scopes and pool for scope=repos;
+  # backend defaults to docker, and qemu needs no docker.host at all. Cache,
+  # git cache, metrics and webhook tuning are covered in config.example.yaml.
   - name: linux-pool
-    os: linux                         # linux | windows
-    size: 2                           # idle runners, or max capacity when autoscaling
+    # linux | windows
+    os: linux
+    # Idle runners, or the cap on concurrent runners when autoscaling.
+    size: 2
+    # What a workflow's runs-on has to match.
     labels: [self-hosted, linux, x64]
-    image_tier: minimal               # linux: minimal, native-build, node, dotnet
-    #                                 # windows: minimal, node, dotnet, buildtools
-    # image: "ghcr.io/my-org/custom-runner:latest"   # or pin your own image
+    # linux: minimal, native-build, node, dotnet, rust, go
+    # windows: minimal, node, dotnet, buildtools
+    # Or set image: instead, to pin one of your own.
+    image_tier: minimal
     docker:
       # Other common endpoints:
       #   tcp://127.0.0.1:2375             WSL2 Docker Engine over TCP
       #   npipe:////./pipe/docker_engine   Docker Desktop / Podman on Windows
       #   unix:///var/run/docker.sock      Linux host daemon
       host: %q
-      enable_dind: false              # mounts the host Docker socket: trusted jobs only
+      # Mounts the host Docker socket into the job: trusted workflows only.
+      enable_dind: false
     tool_cache:
-      mode: shared-volume             # shared-volume | off (persists hostedtoolcache)
-
-# Optional, all defaulted:
-#   provisioning: scaleset | pool | autoscale
-#     Who triggers runners. Unset means scaleset for repo and org scopes, pool
-#     for scope=repos. scaleset lets GitHub report the desired count over an
-#     outbound long-poll; pool keeps size runners idle; autoscale launches on
-#     demand from queued jobs and/or workflow_job webhooks (needs a public URL).
-#   pools[].backend: docker | containerd | qemu
-#     qemu runs a Windows VM and needs no docker.host.
-#   pools[].scale_set / runner_group
-#     scaleset only; scale_set defaults to the pool name.
-#
-# Cache, git cache, metrics and webhook tuning are documented in
-# config.example.yaml in the multirunner repository.
+      # shared-volume persists hostedtoolcache between runners; off disables it.
+      mode: shared-volume
 `, dockerHost)
 }
