@@ -68,10 +68,12 @@ so jobs behave exactly as on GitHub-hosted runners.
 ## Install
 
 Download a binary for your OS/arch from the
-[Releases](../../releases) page, or build from source:
+[Releases](../../releases) page, or clone the repository and build from source:
 
 ```sh
-go install github.com/GerardSmit/multirunner/cmd/multirunner@latest
+git clone https://github.com/ActionsCommunity/multirunner.git
+cd multirunner
+go run ./cmd/build -o multirunner
 ```
 
 Prebuilt binaries are published for **Linux, Windows, and macOS**, each in
@@ -640,18 +642,29 @@ multirunner completion <shell>      shell completion script
 Pure Go (CGO-free), so it cross-compiles to every target:
 
 ```sh
-go build ./cmd/multirunner
+go run ./cmd/build -o multirunner
 # cross-compile, e.g.:
-GOOS=linux   GOARCH=arm64 go build -o multirunner       ./cmd/multirunner
-GOOS=windows GOARCH=amd64 go build -o multirunner.exe    ./cmd/multirunner
-GOOS=darwin  GOARCH=arm64 go build -o multirunner        ./cmd/multirunner
+go run ./cmd/build -goos linux   -goarch arm64 -o multirunner
+go run ./cmd/build -goos windows -goarch amd64 -o multirunner.exe
+go run ./cmd/build -goos darwin  -goarch arm64 -o multirunner
 ```
+
+The build command records the source commit before compilation and embeds it
+with a development version. Use `-version` and `-commit` to provide an explicit
+release identity. A plain `go build ./cmd/multirunner` remains supported, but
+honestly reports `dev (commit unknown)` because it has no immutable build-time
+provenance. Tracked changes and unignored untracked files add `-dirty` to a
+development version. An explicit version fails on a dirty checkout unless
+`-allow-dirty` is deliberately supplied. Git-ignored build outputs do not mark
+the source dirty.
 
 ## Layout
 
 ```text
 cmd/multirunner    orchestrator + CLI
 cmd/cacheserver    standalone cache server
+cmd/build          provenance-aware multirunner build command
+internal/buildcmd  validated cross-platform build implementation
 internal/config    config schema + loader
 internal/github    JIT client (repo/org/enterprise, PAT/App)
 internal/backend   container backends (Docker/Podman, containerd Windows)
