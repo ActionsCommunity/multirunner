@@ -49,18 +49,27 @@ installs, elevates, or registers anything without a separate approval.
    validation) and look up every other key in its "Complete key index". Use
    `multirunner detect --path <checkout> --os <linux-or-windows>` to
    recommend a container tier. Every non-QEMU pool needs a nonempty
-   `docker.host`, including `backend: containerd`; a `scaleset` pool needs a
-   unique `scale_set`. Reference secrets as `${VAR}` and supply them through
+   `docker.host`, including `backend: containerd`; a `scaleset` pool's
+   `scale_set` defaults to the pool name and only has to be set to adopt an
+   existing scale set. Reference secrets as `${VAR}` and supply them through
    the service environment or a `.env` file next to the config; never inline
    values. Show the redacted file and ask before writing it. Back up any
    existing file first.
 6. **Add credentials.** Follow
    [authentication](../references/authentication.md): preview
-   `multirunner connect --repo <owner/repo> --config <path> --dry-run` or the
-   `--org` form, then run it after approval. It creates and installs a GitHub
-   App, writes the PEM, and rewrites the config at mode 0600 (check the
-   service account can still read it). Use a PAT only for a scope `connect`
-   cannot create, a private git cache, or an approved existing deployment.
+   `multirunner connect --repo <owner/repo> --own-app --config <path> --dry-run
+   --non-interactive` or the `--org` form, review the manifest it prints, then
+   run it after approval. Off a terminal, connect requires the model to be
+   stated: `--own-app` creates a dedicated App (and is the only option for a
+   repository target), `--device` prints a device code and must not be used
+   where the output is logged. Write the config (step 5) first so connect can derive
+   the permissions from the chosen provisioning mode. It creates and installs a
+   GitHub App, writes the PEM, and rewrites the config at mode 0600 (check the
+   service account can still read it). Leave the webhook alone here: without
+   `--webhook-url` the App registers an inactive placeholder hook and no
+   events, which step 9 completes. Use a PAT only for a scope `connect` cannot
+   create (including any `enterprise` target, which GitHub Apps cannot serve at
+   all), a private git cache, or an approved existing deployment.
 7. **Preflight.** Run `multirunner doctor --config <path>` and clear every
    failed boundary. Then run `multirunner run --config <path> --dry-run` and
    review the printed plan and warnings. Neither proves webhook ingress, cache
@@ -72,7 +81,8 @@ installs, elevates, or registers anything without a separate approval.
    literal, in `advertise_url`; bind listeners privately.
 9. **Wire autoscale or scale sets.** For `autoscale`, the webhook receiver,
    secret, and public TLS boundary are a separate approved change through
-   multirunner-github; `connect` does not finish webhook setup. For
+   multirunner-github. If connect ran without `--webhook-url`, the App still
+   needs its real hook URL and the `workflow_job` event before it can deliver. For
    `scaleset`, the first start creates or updates the GitHub scale set.
 10. **Install the service.** Run `multirunner service install --config <abs
     path> --dry-run`, then `service install`, then `service start --dry-run`
