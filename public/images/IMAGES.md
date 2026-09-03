@@ -1,17 +1,21 @@
-# Images to supply
+# Production images
 
-These are **placeholders**. Replace each file in `public\images/` with real art for
-actionscommunity/multirunner. Keep the same filename (or update the reference in the site) and aim for
-the listed dimensions. Delete this file once every image is real.
+These assets use the Runner Yard design direction selected for multirunner.
+Source imagery was generated through the Azure `jongdevdiv` subscription,
+`jong-image-westus3` account, and `gpt-image-2` deployment. Text and crops were
+composed locally so technical wording never depends on model-generated glyphs.
 
-| File | Purpose | Recommended size |
-| --- | --- | --- |
-| `logo.svg` | Site logo / wordmark (top bar, hero). | 512×512 |
-| `og.svg` | Open Graph / Twitter share image. Replace with a raster og.png (scrapers ignore SVG) and update the meta tag. | 1200×630 |
-| `favicon.svg` | Browser tab icon. | 64×64 |
-| `hero-terminal.svg` | Screenshot/GIF of the CLI in action (hero). | 1280×720 |
+| File | Purpose | Dimensions | Status |
+| --- | --- | --- | --- |
+| `logo.png` | Site mark and wordmark companion | 512 x 512 | Generated and cropped |
+| `favicon.png` | Browser tab icon | 64 x 64 | Derived from the logo |
+| `og.png` | Open Graph and social preview card | 1200 x 630 | Composed from the hero and logo |
+| `../../src/assets/hero.png` | Responsive landing-page hero source | 1536 x 1024 | Generated |
 
-Tips:
-- Export at 2× for crisp display on high-DPI screens, then keep the file reasonably small.
-- PNG for screenshots/photos, SVG for logos/diagrams. The social card (`og.*`) must be a raster (PNG/JPG) — most scrapers ignore SVG.
-- A placeholder left in place still deploys fine; it just looks like a placeholder.
+Palette:
+
+- Cool white: `#F3F7FA`
+- Deep ink: `#101C2A`
+- Cobalt: `#174FC4`
+- Signal orange: `#C6400C`
+- Steel: `#596978`

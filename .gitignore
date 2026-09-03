@@ -48,7 +48,8 @@ multirunner-app.webhook-secret
 
 # Claude / agent state
 .claude/
-/.impeccable/
+/.impeccable/*
+!/.impeccable/design.json
 
 # more binaries
 /cacheserver-linux

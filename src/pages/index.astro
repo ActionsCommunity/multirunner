@@ -1,4 +1,6 @@
 ---
+import { Image } from "astro:assets";
+import heroImage from "../assets/hero.png";
 import AgentPluginSection from "../components/AgentPluginSection.astro";
 import ScaleSetSection from "../components/ScaleSetSection.astro";
 import Layout from "../layouts/Layout.astro";
@@ -24,39 +26,50 @@ pools:
   title="multirunner | Run GitHub Actions on your own hardware"
   description="Run fresh Linux and Windows GitHub Actions self-hosted runners in parallel on one machine."
 >
-  <section class="hero page-shell">
-    <div class="hero-copy">
-      <p class="eyebrow">GitHub Actions</p>
-      <h1>Run GitHub Actions on your own hardware.</h1>
-      <p class="lead">
-        Run Linux and Windows jobs in parallel on hardware you control. Each job
-        gets a fresh container or VM. When it finishes, multirunner throws it away
-        and starts another.
-      </p>
-      <div class="actions">
-        <a class="button" href={`${repoUrl}#build-from-source`}>Build from source</a>
-        <a class="button secondary" href={`${base}commands/`}>Read the CLI reference</a>
+  <!-- THESIS: One physical host coordinates many clean parallel jobs. This surface refuses the generic developer-tool card grid. -->
+  <!-- OWN-WORLD: Cool white, deep ink, cobalt lanes, scarce signal orange, hard rules, flat geometry, and industrial editorial type. -->
+  <!-- STORY: Understand the runner model, verify the GitHub-native scaling path, then build or install the operator plugin. -->
+  <!-- FIRST VIEWPORT: Copy and actions occupy the left 45 percent; the generated runner chassis owns the right; live commands anchor the bottom. -->
+  <!-- FORM: Runner Yard, selected after three visual comps and a rubber-duck prompt review; Azure GPT Image 2 provides the hero and mark. -->
+
+  <section class="hero">
+    <div class="page-shell hero-shell">
+      <div class="hero-copy">
+        <h1>Run GitHub Actions on your own hardware.</h1>
+        <p class="lead">
+          Run Linux and Windows jobs in parallel on hardware you control. Each job
+          gets a fresh container or VM. When it finishes, multirunner throws it away
+          and starts another.
+        </p>
+        <div class="actions">
+          <a class="button" href={`${repoUrl}#build-from-source`}>Build from source</a>
+          <a class="button secondary" href={`${base}commands/`}>Read the CLI reference</a>
+        </div>
       </div>
-      <div class="platforms" aria-label="Supported platforms">
-        <span>Linux</span>
-        <span>Windows</span>
-        <span>macOS service host</span>
-        <span>x64</span>
-        <span>ARM64</span>
-        <span>Actions scale sets</span>
+      <div class="hero-visual">
+        <Image
+          class="hero-image"
+          src={heroImage}
+          alt="One hardware host running several parallel blank job modules"
+          widths={[640, 960, 1280, 1536]}
+          sizes="(max-width: 860px) 100vw, 1200px"
+          loading="eager"
+          fetchpriority="high"
+        />
       </div>
-    </div>
-    <div class="hero-art">
-      <img
-        src={`${base}images/hero-terminal.svg`}
-        alt="Placeholder for a multirunner terminal demonstration"
-        width="1280"
-        height="720"
-        fetchpriority="high"
-      />
-      <div class="terminal-sample" aria-label="Example multirunner commands">
-        <code class="shell">multirunner doctor --config config.yaml</code>
-        <code class="shell">multirunner run --config config.yaml</code>
+      <div class="hero-support">
+        <div class="terminal-sample" aria-label="Example multirunner commands">
+          <code class="shell">multirunner doctor --config config.yaml</code>
+          <code class="shell">multirunner run --config config.yaml</code>
+        </div>
+        <div class="platforms" aria-label="Supported platforms">
+          <span>Linux</span>
+          <span>Windows</span>
+          <span>macOS service host</span>
+          <span>x64</span>
+          <span>ARM64</span>
+          <span>Actions scale sets</span>
+        </div>
       </div>
     </div>
   </section>
@@ -64,10 +77,7 @@ pools:
   <section class="section" id="features">
     <div class="page-shell">
       <div class="section-heading">
-        <div>
-          <p class="eyebrow">Built for the job queue</p>
-          <h2>Fast between jobs. Clean for every job.</h2>
-        </div>
+        <h2>Fast between jobs. Clean for every job.</h2>
         <p>
           A standard self-hosted runner processes one job at a time. multirunner
           keeps a configurable pool ready, assigns each runner one job, and replaces
@@ -75,33 +85,27 @@ pools:
         </p>
       </div>
       <div class="feature-list">
-        <article class="feature">
-          <span class="feature-number">01</span>
+        <article>
           <h3>Real parallelism</h3>
           <p>Run multiple isolated runner registrations on one host instead of maintaining each runner by hand.</p>
         </article>
-        <article class="feature">
-          <span class="feature-number">02</span>
+        <article>
           <h3>Ephemeral by default</h3>
           <p>Each runner takes one job, deregisters, and gives way to a fresh container or VM.</p>
         </article>
-        <article class="feature">
-          <span class="feature-number">03</span>
+        <article>
           <h3>Local caches</h3>
           <p>Keep Actions cache traffic and git history on the host to avoid downloading the same data for every job.</p>
         </article>
-        <article class="feature">
-          <span class="feature-number">04</span>
+        <article>
           <h3>Linux and Windows</h3>
           <p>Use Docker or Podman for Linux, containerd with runhcs for Windows containers, or QEMU for Windows VMs.</p>
         </article>
-        <article class="feature">
-          <span class="feature-number">05</span>
+        <article>
           <h3>Pool, autoscale, or scale set</h3>
           <p>Keep runners warm, react to queued work, or let GitHub report desired capacity through Actions runner scale sets.</p>
         </article>
-        <article class="feature">
-          <span class="feature-number">06</span>
+        <article>
           <h3>Host-native service</h3>
           <p>Install the orchestrator with Windows SCM, Linux systemd, or macOS launchd, with health and Prometheus endpoints.</p>
         </article>
@@ -111,13 +115,12 @@ pools:
 
   <ScaleSetSection />
 
-  <section class="section">
+  <section class="section build-section">
     <div class="page-shell split">
       <div>
-        <p class="eyebrow">Quick start</p>
-        <h2>From config to a three-runner pool.</h2>
+        <h2>From source to a three-runner pool.</h2>
         <p class="lead">
-          Install from source, create a repository-scoped configuration, then start
+          Build current main, create a repository-scoped configuration, then start
           the pool. The runner image is pulled automatically.
         </p>
         <a class="text-link" href={`${repoUrl}/blob/main/config.example.yaml`}>
@@ -136,7 +139,7 @@ go build ./cmd/multirunner</code></pre>
           <pre><code>{configExample}</code></pre>
         </div>
         <div>
-          <p class="code-label">Run</p>
+          <p class="code-label">Validate, then run</p>
           <pre><code>export GITHUB_PAT=...
 multirunner run --config config.yaml --dry-run
 multirunner run --config config.yaml</code></pre>
@@ -150,10 +153,7 @@ multirunner run --config config.yaml</code></pre>
   <section class="section">
     <div class="page-shell">
       <div class="section-heading">
-        <div>
-          <p class="eyebrow">Execution backends</p>
-          <h2>Pick the isolation your jobs need.</h2>
-        </div>
+        <h2>Pick the isolation your jobs need.</h2>
         <p>
           Pools can target separate backends and labels from one configuration.
           Route each workflow job with the same familiar <code>runs-on</code> labels.
@@ -179,9 +179,8 @@ multirunner run --config config.yaml</code></pre>
     </div>
   </section>
 
-  <section class="section">
+  <section class="section final-section">
     <div class="page-shell final-cta">
-      <p class="eyebrow">Start with one binary</p>
       <h2>Make self-hosted runners disposable.</h2>
       <p class="lead">Read the source or build current main with Go.</p>
       <div class="actions">
@@ -194,66 +193,120 @@ multirunner run --config config.yaml</code></pre>
 
 <style>
   .hero {
+    position: relative;
+    overflow: hidden;
+    border-bottom: 2px solid var(--ink);
+  }
+
+  .hero-shell {
+    position: relative;
     display: grid;
-    grid-template-columns: minmax(0, 1.05fr) minmax(320px, 0.95fr);
     align-items: center;
-    gap: clamp(2rem, 6vw, 6rem);
-    min-height: calc(100vh - 64px);
-    padding-top: 4rem;
-    padding-bottom: 4rem;
+    min-height: min(820px, calc(100vh - 72px));
+  }
+
+  .hero-copy {
+    position: relative;
+    z-index: 2;
+    width: 41%;
+    padding: var(--space-7) 0 15rem;
+  }
+
+  .hero-copy h1 {
+    max-width: 9.5ch;
+    font-size: clamp(3.2rem, 6.6vw, 5.6rem);
   }
 
   .hero-copy .lead {
-    margin: 1.5rem 0 0;
+    max-width: 38ch;
+    margin: 0;
+  }
+
+  .hero-visual {
+    position: absolute;
+    inset: 0 calc((var(--max) - 100vw) / 2);
+    z-index: 1;
+    overflow: hidden;
+  }
+
+  .hero-image {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    object-position: center;
+  }
+
+  .hero-support {
+    position: absolute;
+    bottom: var(--space-6);
+    left: 0;
+    z-index: 3;
+    width: 43%;
+  }
+
+  .terminal-sample {
+    display: grid;
+    gap: 0.35rem;
+    margin-top: var(--space-5);
+    padding: 0.9rem 1rem;
+    color: var(--paper);
+    background: var(--ink);
+    border: 2px solid var(--ink);
+    box-shadow: 5px 5px 0 var(--steel);
+    font: 500 clamp(0.7rem, 1.2vw, 0.82rem)/1.6 var(--font-mono);
   }
 
   .platforms {
     display: flex;
     flex-wrap: wrap;
-    gap: 0.5rem;
-    margin-top: 2.25rem;
+    gap: 0.45rem;
+    margin-top: var(--space-5);
   }
 
   .platforms span {
-    padding: 0.25rem 0.55rem;
-    color: var(--dim);
-    border: 1px solid var(--line);
-    font: 700 0.72rem/1.4 "SFMono-Regular", Consolas, monospace;
-    text-transform: uppercase;
+    padding: 0.28rem 0.52rem;
+    color: var(--ink);
+    background: var(--paper);
+    border: 1px solid var(--steel);
+    font: 600 0.68rem/1.3 var(--font-mono);
   }
 
-  .hero-art {
-    position: relative;
-  }
-
-  .hero-art img {
-    display: block;
-    border: 1px solid var(--line);
-    box-shadow: 22px 22px 0 rgba(64, 216, 255, 0.08);
-  }
-
-  .terminal-sample {
+  .feature-list {
     display: grid;
-    gap: 0.5rem;
-    width: calc(100% - 2rem);
-    margin: -3.5rem auto 0;
-    padding: 1rem;
-    position: relative;
-    color: #d8f6ff;
-    background: #030a11;
-    border: 1px solid var(--line);
-    font-size: clamp(0.68rem, 1.35vw, 0.85rem);
+    grid-template-columns: repeat(2, 1fr);
+    border-top: 2px solid var(--ink);
+  }
+
+  .feature-list article {
+    min-height: 170px;
+    padding: var(--space-5) var(--space-5) var(--space-5) 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .feature-list article:nth-child(odd) {
+    padding-right: var(--space-6);
+    border-right: 1px solid var(--line);
+  }
+
+  .feature-list article:nth-child(even) {
+    padding-left: var(--space-6);
+  }
+
+  .feature-list p,
+  .backend-grid p:last-child {
+    margin: 0;
+    color: var(--steel);
+  }
+
+  .build-section {
+    background: var(--cobalt-soft);
   }
 
   .split {
     display: grid;
-    grid-template-columns: 0.75fr 1.25fr;
+    grid-template-columns: 0.8fr 1.2fr;
     gap: clamp(2.5rem, 7vw, 7rem);
     align-items: start;
-  }
-
-  .split .lead {
-    margin: 1.5rem 0;
   }
 
   .split > *,
@@ -262,74 +315,126 @@ multirunner run --config config.yaml</code></pre>
     min-width: 0;
   }
 
+  .split .lead {
+    margin: var(--space-4) 0;
+  }
+
   .text-link {
-    font-weight: 750;
+    font-weight: 700;
   }
 
   .code-stack {
     display: grid;
-    gap: 1rem;
+    gap: var(--space-4);
   }
 
-  .code-label {
-    margin: 0 0 0.35rem;
-    color: var(--orange);
-    font: 700 0.72rem/1.2 "SFMono-Regular", Consolas, monospace;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
+  .code-label,
+  .backend-kicker {
+    margin: 0 0 0.45rem;
+    color: var(--steel);
+    font: 600 0.72rem/1.2 var(--font-mono);
   }
 
   .backend-grid {
     display: grid;
     grid-template-columns: repeat(3, 1fr);
-    gap: 2rem;
+    border-top: 2px solid var(--ink);
   }
 
   .backend-grid article {
-    padding-top: 1rem;
-    border-top: 3px solid var(--cyan);
+    padding: var(--space-5);
+    border-right: 1px solid var(--line);
   }
 
-  .backend-grid article:nth-child(2) {
-    border-color: var(--lime);
+  .backend-grid article:first-child {
+    padding-left: 0;
   }
 
-  .backend-grid article:nth-child(3) {
-    border-color: var(--orange);
+  .backend-grid article:last-child {
+    padding-right: 0;
+    border-right: 0;
   }
 
-  .backend-grid p:last-child {
-    color: var(--muted);
-  }
-
-  .backend-kicker {
-    color: var(--dim);
-    font: 700 0.72rem/1.2 "SFMono-Regular", Consolas, monospace;
-    text-transform: uppercase;
+  .final-section {
+    background: var(--orange-soft);
   }
 
   .final-cta {
-    max-width: 800px;
+    position: relative;
+    max-width: 900px;
     margin-left: max(1rem, calc((100vw - var(--max)) / 2));
     margin-right: auto;
   }
 
+  .final-cta::after {
+    position: absolute;
+    top: 0;
+    right: 0;
+    width: clamp(64px, 10vw, 120px);
+    aspect-ratio: 1;
+    background: var(--orange);
+    content: "";
+  }
+
   @media (max-width: 860px) {
-    .hero,
-    .split {
-      grid-template-columns: 1fr;
-    }
-
-    .hero {
+    .hero-shell {
+      display: flex;
+      flex-direction: column;
       min-height: auto;
+      padding-top: var(--space-7);
     }
 
-    .hero-art {
-      max-width: 680px;
+    .hero-copy {
+      width: 100%;
+      padding: 0;
     }
 
+    .hero-copy h1,
+    .hero-copy .lead {
+      max-width: none;
+    }
+
+    .hero-visual {
+      position: relative;
+      inset: auto;
+      width: calc(100% + 2rem);
+      height: 310px;
+      margin: var(--space-5) -1rem 0;
+    }
+
+    .hero-image {
+      width: 150%;
+      max-width: none;
+      object-position: 80% center;
+      transform: translateX(-34%);
+    }
+
+    .hero-support {
+      position: static;
+      width: 100%;
+      padding: var(--space-5) 0 var(--space-6);
+    }
+
+    .feature-list,
+    .split,
     .backend-grid {
       grid-template-columns: 1fr;
+    }
+
+    .feature-list article,
+    .feature-list article:nth-child(odd),
+    .feature-list article:nth-child(even),
+    .backend-grid article,
+    .backend-grid article:first-child,
+    .backend-grid article:last-child {
+      min-height: 0;
+      padding: var(--space-4) 0;
+      border-right: 0;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .final-cta {
+      padding-right: 84px;
     }
   }
 </style>

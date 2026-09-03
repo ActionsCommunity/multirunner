@@ -1,4 +1,10 @@
 ---
+import "@fontsource-variable/archivo";
+import "@fontsource-variable/ibm-plex-sans";
+import "@fontsource/ibm-plex-mono/400.css";
+import "@fontsource/ibm-plex-mono/600.css";
+import "../styles/global.css";
+
 interface Props {
   title?: string;
   description?: string;
@@ -12,7 +18,8 @@ const base = import.meta.env.BASE_URL;
 const repoUrl = "https://github.com/actionscommunity/multirunner";
 const siteOrigin = Astro.site ?? Astro.url.origin;
 const canonicalUrl = new URL(Astro.url.pathname, siteOrigin).href;
-const socialImageUrl = new URL(`${base}images/og.svg`, siteOrigin).href;
+const socialImageUrl = new URL(`${base}images/og.png`, siteOrigin).href;
+const isCommands = Astro.url.pathname.includes("/commands");
 ---
 
 <!doctype html>
@@ -21,7 +28,7 @@ const socialImageUrl = new URL(`${base}images/og.svg`, siteOrigin).href;
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="description" content={description} />
-    <meta name="theme-color" content="#07121f" />
+    <meta name="theme-color" content="#F3F7FA" />
     <meta property="og:type" content="website" />
     <meta property="og:title" content={title} />
     <meta property="og:description" content={description} />
@@ -29,337 +36,22 @@ const socialImageUrl = new URL(`${base}images/og.svg`, siteOrigin).href;
     <meta property="og:image" content={socialImageUrl} />
     <meta name="twitter:card" content="summary_large_image" />
     <link rel="canonical" href={canonicalUrl} />
-    <link rel="icon" type="image/svg+xml" href={`${base}images/favicon.svg`} />
+    <link rel="icon" type="image/png" href={`${base}images/favicon.png`} />
     <title>{title}</title>
-    <style is:global>
-      :root {
-        color-scheme: dark;
-        --ink: #f3f7fb;
-        --muted: #9aacc0;
-        --dim: #698099;
-        --surface: #0b1a2a;
-        --surface-strong: #10253a;
-        --line: #1d3952;
-        --cyan: #40d8ff;
-        --cyan-soft: #a9efff;
-        --lime: #bcf76b;
-        --orange: #ffae57;
-        --max: 1120px;
-      }
-
-      * {
-        box-sizing: border-box;
-      }
-
-      html {
-        scroll-behavior: smooth;
-        background: #06101b;
-      }
-
-      body {
-        margin: 0;
-        color: var(--ink);
-        font: 16px/1.65 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        background:
-          radial-gradient(circle at 75% 0%, rgba(35, 135, 177, 0.24), transparent 35rem),
-          radial-gradient(circle at 0% 55%, rgba(64, 216, 255, 0.07), transparent 28rem),
-          #06101b;
-      }
-
-      a {
-        color: var(--cyan-soft);
-      }
-
-      a:hover {
-        color: white;
-      }
-
-      :focus-visible {
-        outline: 3px solid var(--lime);
-        outline-offset: 4px;
-      }
-
-      img {
-        max-width: 100%;
-      }
-
-      code,
-      pre {
-        font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-      }
-
-      code {
-        color: var(--cyan-soft);
-      }
-
-      pre {
-        overflow-x: auto;
-        margin: 0;
-        padding: 1.25rem;
-        color: #d8f6ff;
-        background: #030a11;
-        border: 1px solid var(--line);
-      }
-
-      .shell::before {
-        content: "$ ";
-        color: var(--lime);
-        user-select: none;
-      }
-
-      .site-header {
-        position: sticky;
-        z-index: 20;
-        top: 0;
-        border-bottom: 1px solid rgba(105, 128, 153, 0.24);
-        background: #06101b;
-      }
-
-      .skip-link {
-        position: fixed;
-        z-index: 30;
-        top: -5rem;
-        left: 1rem;
-        padding: 0.65rem 0.9rem;
-        color: #03121c;
-        background: var(--lime);
-        font-weight: 800;
-      }
-
-      .skip-link:focus {
-        top: 1rem;
-      }
-
-      .nav-shell {
-        display: flex;
-        align-items: center;
-        width: min(calc(100% - 2rem), var(--max));
-        min-height: 64px;
-        margin: 0 auto;
-        gap: 2rem;
-      }
-
-      .brand {
-        display: inline-flex;
-        align-items: center;
-        gap: 0.75rem;
-        color: var(--ink);
-        font-weight: 800;
-        letter-spacing: -0.03em;
-        text-decoration: none;
-      }
-
-      .brand img {
-        width: 32px;
-        height: 32px;
-      }
-
-      .nav-links {
-        display: flex;
-        align-items: center;
-        gap: 1.5rem;
-        margin-left: auto;
-      }
-
-      .nav-links a {
-        color: var(--muted);
-        font-size: 0.92rem;
-        font-weight: 650;
-        text-decoration: none;
-      }
-
-      .nav-links .source-link {
-        padding: 0.4rem 0.72rem;
-        color: var(--ink);
-        border: 1px solid var(--line);
-      }
-
-      main {
-        min-height: calc(100vh - 144px);
-      }
-
-      .page-shell {
-        width: min(calc(100% - 2rem), var(--max));
-        margin: 0 auto;
-      }
-
-      .eyebrow {
-        margin: 0 0 0.75rem;
-        color: var(--lime);
-        font: 700 0.76rem/1.2 "SFMono-Regular", Consolas, monospace;
-        letter-spacing: 0.14em;
-        text-transform: uppercase;
-      }
-
-      h1,
-      h2,
-      h3 {
-        line-height: 1.08;
-        letter-spacing: -0.035em;
-        text-wrap: balance;
-      }
-
-      h1 {
-        max-width: 15ch;
-        margin: 0;
-        font-size: clamp(3rem, 8vw, 6.6rem);
-      }
-
-      h2 {
-        margin: 0;
-        font-size: clamp(2rem, 4vw, 3.25rem);
-      }
-
-      h3 {
-        margin: 0 0 0.55rem;
-        font-size: 1.25rem;
-      }
-
-      .lead {
-        max-width: 62ch;
-        color: var(--muted);
-        font-size: clamp(1.06rem, 2vw, 1.3rem);
-      }
-
-      .actions {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 0.8rem;
-        margin-top: 1.75rem;
-      }
-
-      .button {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        min-height: 44px;
-        padding: 0.65rem 1rem;
-        color: #03121c;
-        background: var(--cyan);
-        border: 1px solid var(--cyan);
-        font-weight: 800;
-        text-decoration: none;
-      }
-
-      .button.secondary {
-        color: var(--ink);
-        background: transparent;
-        border-color: var(--line);
-      }
-
-      .button:hover {
-        color: #03121c;
-        background: var(--cyan-soft);
-      }
-
-      .button.secondary:hover {
-        color: white;
-        background: var(--surface-strong);
-      }
-
-      .section {
-        padding: clamp(4rem, 9vw, 7rem) 0;
-        border-top: 1px solid rgba(105, 128, 153, 0.24);
-      }
-
-      .section-heading {
-        display: grid;
-        grid-template-columns: 0.7fr 1fr;
-        gap: 2rem;
-        align-items: end;
-        margin-bottom: 2.5rem;
-      }
-
-      .section-heading p {
-        max-width: 58ch;
-        margin: 0;
-        color: var(--muted);
-      }
-
-      .feature-list {
-        display: grid;
-        grid-template-columns: repeat(3, 1fr);
-        gap: 1px;
-        padding: 1px;
-        background: var(--line);
-      }
-
-      .feature {
-        min-height: 190px;
-        padding: 1.5rem;
-        background: var(--surface);
-      }
-
-      .feature p {
-        margin: 0;
-        color: var(--muted);
-      }
-
-      .feature-number {
-        display: block;
-        margin-bottom: 2.25rem;
-        color: var(--dim);
-        font: 700 0.76rem/1 "SFMono-Regular", Consolas, monospace;
-      }
-
-      .site-footer {
-        border-top: 1px solid rgba(105, 128, 153, 0.24);
-      }
-
-      .footer-shell {
-        display: flex;
-        justify-content: space-between;
-        width: min(calc(100% - 2rem), var(--max));
-        margin: 0 auto;
-        padding: 1.5rem 0;
-        color: var(--dim);
-        font-size: 0.88rem;
-      }
-
-      @media (max-width: 760px) {
-        .nav-shell {
-          gap: 1rem;
-        }
-
-        .nav-links {
-          gap: 0.8rem;
-        }
-
-        .nav-links .nav-wide,
-        .nav-links .source-link {
-          display: none;
-        }
-
-        .section-heading,
-        .feature-list {
-          grid-template-columns: 1fr;
-        }
-
-        .footer-shell {
-          display: block;
-        }
-      }
-
-      @media (prefers-reduced-motion: reduce) {
-        html {
-          scroll-behavior: auto;
-        }
-      }
-    </style>
   </head>
   <body>
     <a class="skip-link" href="#main-content">Skip to main content</a>
     <header class="site-header">
       <nav class="nav-shell" aria-label="Primary navigation">
-        <a class="brand" href={base}>
-          <img src={`${base}images/logo.svg`} alt="" width="32" height="32" />
+        <a class="brand" href={base} aria-current={isCommands ? undefined : "page"}>
+          <img src={`${base}images/favicon.png`} alt="" width="40" height="40" />
           <span>multirunner</span>
         </a>
         <div class="nav-links">
           <a class="nav-wide" href={`${base}#scale-sets`}>Scale sets</a>
-          <a href={`${base}#agent-plugin`}>Agent plugin</a>
-          <a href={`${base}commands/`}>CLI reference</a>
-          <a class="source-link" href={repoUrl}>View on GitHub</a>
+          <a class="nav-mobile-optional" href={`${base}#agent-plugin`}>Agent plugin</a>
+          <a href={`${base}commands/`} aria-current={isCommands ? "page" : undefined}>CLI reference</a>
+          <a class="source-link" href={repoUrl}>GitHub</a>
         </div>
       </nav>
     </header>
@@ -368,7 +60,10 @@ const socialImageUrl = new URL(`${base}images/og.svg`, siteOrigin).href;
     </main>
     <footer class="site-footer">
       <div class="footer-shell">
-        <span>multirunner is available under the MIT License.</span>
+        <div class="footer-brand">
+          <span class="footer-lanes" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span>multirunner is available under the MIT License.</span>
+        </div>
         <a href={repoUrl}>Source and releases</a>
       </div>
     </footer>

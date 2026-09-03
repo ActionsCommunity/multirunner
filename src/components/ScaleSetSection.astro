@@ -18,7 +18,6 @@ pools:
 <section class="section scale-set-section" id="scale-sets">
   <div class="page-shell scale-set-layout">
     <div class="scale-set-copy">
-      <p class="eyebrow">GitHub Actions runner scale sets</p>
       <h2>Let GitHub drive runner capacity.</h2>
       <p class="lead">
         multirunner is built on the
@@ -50,58 +49,93 @@ pools:
 
 <style>
   .scale-set-section {
-    background: linear-gradient(135deg, rgba(64, 216, 255, 0.08), transparent 42%);
+    position: relative;
+    overflow: hidden;
+    color: var(--paper);
+    background: var(--cobalt);
+  }
+
+  .scale-set-section::after {
+    position: absolute;
+    right: clamp(1rem, 5vw, 5rem);
+    bottom: -26px;
+    width: 72px;
+    height: 72px;
+    background: var(--orange);
+    content: "";
   }
 
   .scale-set-layout {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(320px, 0.9fr);
+    grid-template-columns: minmax(0, 1fr) minmax(320px, 0.88fr);
     gap: clamp(2.5rem, 7vw, 7rem);
     align-items: start;
   }
 
-  .scale-set-copy > p:not(.eyebrow) {
-    color: var(--muted);
+  .scale-set-copy h2,
+  .scale-set-copy code {
+    color: var(--paper);
+  }
+
+  .scale-set-copy code {
+    background: var(--ink);
+  }
+
+  .scale-set-copy > p,
+  .scale-set-copy .lead {
+    color: color-mix(in srgb, var(--paper) 86%, var(--cobalt));
   }
 
   .scale-set-copy .lead {
-    margin: 1.5rem 0 1rem;
+    margin: var(--space-4) 0 var(--space-3);
+  }
+
+  .scale-set-copy a {
+    color: var(--paper);
   }
 
   .scale-set-benefits {
     display: grid;
-    gap: 0.75rem;
-    margin: 2rem 0 0;
+    gap: 0;
+    margin: var(--space-5) 0 0;
     padding: 0;
     list-style: none;
+    border-top: 2px solid var(--paper);
   }
 
   .scale-set-benefits li {
     padding: 0.8rem 0;
-    color: var(--muted);
-    border-top: 1px solid var(--line);
+    color: color-mix(in srgb, var(--paper) 86%, var(--cobalt));
+    border-bottom: 1px solid color-mix(in srgb, var(--paper) 36%, var(--cobalt));
   }
 
   .scale-set-benefits strong {
-    color: var(--ink);
+    color: var(--paper);
   }
 
   .scale-set-config {
     min-width: 0;
   }
 
+  .scale-set-config pre {
+    box-shadow: 6px 6px 0 color-mix(in srgb, var(--paper) 50%, var(--cobalt));
+  }
+
   .config-label {
-    margin: 0 0 0.35rem;
-    color: var(--orange);
-    font: 700 0.72rem/1.2 "SFMono-Regular", Consolas, monospace;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
+    margin: 0 0 0.45rem;
+    color: var(--paper);
+    font: 600 0.72rem/1.2 var(--font-mono);
   }
 
   .config-note {
-    margin: 0.8rem 0 0;
-    color: var(--dim);
+    margin: var(--space-3) 0 0;
+    color: color-mix(in srgb, var(--paper) 80%, var(--cobalt));
     font-size: 0.88rem;
+  }
+
+  .config-note code {
+    color: var(--paper);
+    background: color-mix(in srgb, var(--ink) 24%, transparent);
   }
 
   @media (max-width: 860px) {
