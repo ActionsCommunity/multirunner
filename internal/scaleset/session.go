@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/actions/scaleset"
@@ -62,9 +63,9 @@ func Run(
 	// session impossible to attribute back to a pool.
 	owner = fmt.Sprintf("%s-%s", owner, opts.Name)
 
-	session, err := client.MessageSessionClient(ctx, set.ID, owner)
+	session, err := openSession(ctx, client, set.ID, owner, opts.Name, logger)
 	if err != nil {
-		return fmt.Errorf("open message session for %q: %w", opts.Name, err)
+		return err
 	}
 	defer func() {
 		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
@@ -85,6 +86,7 @@ func Run(
 
 	launchOpts := opts.Launch
 	launchOpts.ScaleSetID = set.ID
+	launchOpts.Logger = logger
 	launcher := New(client, be, launchOpts)
 	defer func() {
 		if err := launcher.Shutdown(context.WithoutCancel(ctx)); err != nil {
@@ -201,4 +203,64 @@ func systemInfo(scaleSetID int) scaleset.SystemInfo {
 		Subsystem:  "multirunner",
 		ScaleSetID: scaleSetID,
 	}
+}
+
+// sessionConflictWait bounds how long a restart waits for GitHub to release the
+// previous listener session, and sessionRetryInterval is how often it retries.
+const (
+	sessionConflictWait  = 3 * time.Minute
+	sessionRetryInterval = 10 * time.Second
+)
+
+// openSession opens the listener session, waiting out the conflict a restart
+// leaves behind. A scale set allows one active session, and GitHub keeps the
+// previous one for about a minute after the process holding it goes away - so
+// every restart that did not shut down cleanly hits a 409 that resolves itself.
+// Failing immediately on that turns a normal restart into an outage, and the
+// library's raw error does not say it is temporary.
+func openSession(
+	ctx context.Context,
+	client *scaleset.Client,
+	setID int,
+	owner, name string,
+	logger *slog.Logger,
+) (*scaleset.MessageSessionClient, error) {
+	deadline := time.Now().Add(sessionConflictWait)
+	waiting := false
+	for {
+		session, err := client.MessageSessionClient(ctx, setID, owner)
+		if err == nil {
+			return session, nil
+		}
+		if !isSessionConflict(err) {
+			return nil, fmt.Errorf("open message session for %q: %w", name, err)
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("scale set %q still has an active session after %s; "+
+				"another multirunner process is running against it, or a previous one has not been released yet: %w",
+				name, sessionConflictWait, err)
+		}
+		if !waiting {
+			waiting = true
+			logger.Info("waiting for the previous listener session to be released",
+				slog.String("scaleSet", name),
+				slog.Duration("timeout", sessionConflictWait),
+			)
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(sessionRetryInterval):
+		}
+	}
+}
+
+// isSessionConflict reports whether err is the one-active-session 409. The
+// library surfaces it as a formatted string rather than a typed error, so the
+// status and the exception name are matched together to avoid catching an
+// unrelated conflict.
+func isSessionConflict(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "409 Conflict") &&
+		strings.Contains(msg, "RunnerScaleSetSessionConflictException")
 }
