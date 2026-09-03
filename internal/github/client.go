@@ -97,13 +97,34 @@ func authHTTPClient(ctx context.Context, gh config.GitHub, auth config.Auth) (*h
 		return nil, fmt.Errorf("github app key: %w", err)
 	}
 	itr.BaseURL = strings.TrimRight(apiBase, "/")
-	return &http.Client{Timeout: 30 * time.Second, Transport: itr}, nil
+	return &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: &originTransport{base: itr, origin: origin},
+	}, nil
+}
+
+// originTransport stops a wrapped transport that adds credentials of its own -
+// ghinstallation mints and attaches an installation token per request - from
+// sending them anywhere but the configured API origin.
+type originTransport struct {
+	base   http.RoundTripper
+	origin string
+}
+
+func (t *originTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if sameOrigin(req, t.origin) {
+		return t.base.RoundTrip(req)
+	}
+	r := req.Clone(req.Context())
+	r.Header.Del("Authorization")
+	return http.DefaultTransport.RoundTrip(r)
 }
 
 // apiOrigin returns the single scheme+host that may receive our credentials.
 // Go's http.Client drops the Authorization header when a redirect crosses
 // origins, but a RoundTripper runs per hop and would put it straight back, so
-// each transport checks the destination itself.
+// each transport - including the wrapper around ghinstallation, which mints an
+// installation token per request - checks the destination itself.
 func apiOrigin(ghURL string) (string, error) {
 	if isDotCom(ghURL) {
 		return "https://api.github.com", nil
