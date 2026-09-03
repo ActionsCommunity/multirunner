@@ -242,7 +242,7 @@ func TestPATTransportSetsAuth(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tr := &patTransport{token: "ghp_secret", base: http.DefaultTransport}
+	tr := &patTransport{token: "ghp_secret", base: http.DefaultTransport, origin: originOf(t, srv.URL)}
 	client := &http.Client{Transport: tr}
 	resp, err := client.Get(srv.URL)
 	if err != nil {
@@ -251,6 +251,67 @@ func TestPATTransportSetsAuth(t *testing.T) {
 	resp.Body.Close()
 	if gotAuth != "Bearer ghp_secret" {
 		t.Errorf("Authorization = %q, want Bearer ghp_secret", gotAuth)
+	}
+}
+
+// originOf reduces an httptest URL to the scheme://host form the transports
+// compare against.
+func originOf(t *testing.T, raw string) string {
+	t.Helper()
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return u.Scheme + "://" + u.Host
+}
+
+// TestPATTransportDropsAuthCrossOrigin proves a redirect to another host does not
+// carry the credential. http.Client strips Authorization across origins, but a
+// RoundTripper runs per hop and would re-add it, which is exactly the leak this
+// guards.
+func TestPATTransportDropsAuthCrossOrigin(t *testing.T) {
+	var otherAuth string
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		otherAuth = r.Header.Get("Authorization")
+	}))
+	defer other.Close()
+
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL+"/stolen", http.StatusFound)
+	}))
+	defer api.Close()
+
+	tr := &patTransport{token: "ghp_secret", base: http.DefaultTransport, origin: originOf(t, api.URL)}
+	resp, err := (&http.Client{Transport: tr}).Get(api.URL + "/x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	if otherAuth != "" {
+		t.Errorf("credential leaked to the redirect target: %q", otherAuth)
+	}
+}
+
+// TestApiOrigin pins where each configured host lets credentials go.
+func TestApiOrigin(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"", "https://api.github.com"},
+		{"https://github.com", "https://api.github.com"},
+		{"https://ghes.example.com", "https://ghes.example.com"},
+		{"https://ghes.example.com/", "https://ghes.example.com"},
+	}
+	for _, tc := range cases {
+		got, err := apiOrigin(tc.in)
+		if err != nil {
+			t.Fatalf("apiOrigin(%q): %v", tc.in, err)
+		}
+		if got != tc.want {
+			t.Errorf("apiOrigin(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+	if _, err := apiOrigin("://nonsense"); err == nil {
+		t.Error("expected an error for an unparseable github.url")
 	}
 }
 
