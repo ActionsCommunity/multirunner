@@ -2,6 +2,8 @@
 import Layout from "../layouts/Layout.astro";
 
 const base = import.meta.env.BASE_URL;
+const fullReferenceUrl =
+  "https://github.com/actionscommunity/multirunner/blob/main/skills/docs/cli-reference.md";
 
 const commands = [
   {
@@ -119,6 +121,10 @@ const commands = [
     </p>
     <pre><code>multirunner &lt;command&gt; --help
 multirunner --config config.yaml &lt;command&gt;</code></pre>
+    <p class="operator-reference">
+      Configuration resolution, side effects, exit codes, and operational caveats
+      live in the <a href={fullReferenceUrl}>full operator reference</a>.
+    </p>
     <section class="global-options" id="global-options">
       <h2>Global options</h2>
       <div class="flag-list">
@@ -196,6 +202,11 @@ multirunner --config config.yaml &lt;command&gt;</code></pre>
 
   .reference-header pre {
     max-width: 720px;
+  }
+
+  .operator-reference {
+    max-width: 720px;
+    color: var(--muted);
   }
 
   .global-options {
