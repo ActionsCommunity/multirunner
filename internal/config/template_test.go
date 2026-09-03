@@ -119,3 +119,66 @@ func TestExamplePoolYAMLValidates(t *testing.T) {
 		t.Errorf("the example printed on a missing pool does not validate: %v", err)
 	}
 }
+
+// TestWritersKeepTheFileHeader pins that a comment block at the top of a config
+// survives being rewritten. The parser hangs it off the document node rather
+// than the root mapping, so a writer that marshals the mapping alone silently
+// deletes whatever the operator wrote above their first key.
+func TestWritersKeepTheFileHeader(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	original := "# Runner host for the build farm.\n# Owned by platform-eng.\n\ngithub:\n  scope: org\n  owner: acme\n"
+	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := WriteDeviceAuth(path, ScopeOrg, "acme", "", "cid", "tok.json"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := EnsureStarterPool(path, "unix:///probed.sock"); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range []string{"# Runner host for the build farm.", "# Owned by platform-eng."} {
+		if !strings.Contains(string(data), line) {
+			t.Errorf("the file header line %q was dropped:\n%s", line, data)
+		}
+	}
+}
+
+// TestStarterPoolSurvivesAFlowStyleRoot pins that the pool is grafted onto the
+// tree rather than appended as text. Appending a block `pools:` under a root
+// written in flow style produced a file that parsed without error and still had
+// no pools, so the next command reported the same missing-pool error connect had
+// just tried to prevent - and a second connect appended a second copy.
+func TestStarterPoolSurvivesAFlowStyleRoot(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	original := "{github: {scope: org, owner: acme}, auth: {pat: ghp_x}}\n"
+	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	added, err := EnsureStarterPool(path, "unix:///probed.sock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !added {
+		t.Fatal("no pool was added to a flow-style config that has none")
+	}
+
+	c, err := Load(path)
+	if err != nil {
+		t.Fatalf("config does not load after the pool was added: %v", err)
+	}
+	if len(c.Pools) != 1 {
+		t.Fatalf("pools = %d, want the one that was just added", len(c.Pools))
+	}
+
+	// A second connect must see the pool it wrote, not append another.
+	if added, err := EnsureStarterPool(path, "unix:///probed.sock"); err != nil || added {
+		t.Errorf("second call added=%v err=%v, want it to leave the pool alone", added, err)
+	}
+}
