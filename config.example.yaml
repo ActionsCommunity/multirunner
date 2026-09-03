@@ -29,13 +29,13 @@ provisioning: "pool"             # pool | autoscale | scaleset  (webhook = alias
 #               Needs scope repo, org or enterprise, and a `scale_set` per pool.
 
 # Autoscale tuning (provisioning: autoscale). Polling is outbound-only (NAT-safe)
-# and works for scope=repo; the optional webhook needs GitHub to reach `listen`
+# and works for scope=repo or repos; the optional webhook needs GitHub to reach `listen`
 # (public IP or a tunnel: smee.io / cloudflared / ngrok).
 webhook:
   listen: ""                     # e.g. "0.0.0.0:8080" to enable the webhook receiver
   path: "/webhook"
-  secret: "${GITHUB_WEBHOOK_SECRET}"   # from `connect`, or the App's webhook secret
-  poll_interval_sec: 300         # queued-job poll interval (repo scope); -1 disables
+  secret: "${GITHUB_WEBHOOK_SECRET}"   # App webhook secret; `connect` does not save or activate it
+  poll_interval_sec: 300         # queued-job poll interval (repo/repos); -1 disables
 
 # Prometheus metrics + /health (empty disables)
 metrics:
@@ -49,7 +49,7 @@ git_cache:
 cache:
   enabled: true
   mode: "local-server"           # local-server (own Go v2) | off
-  storage: "filesystem"          # filesystem | minio
+  storage: "filesystem"          # only implemented embedded storage
   path: "D:/multirunner/cache"
   listen: "0.0.0.0:3000"
   # URL of this cache as seen from INSIDE runner containers (host.docker.internal
@@ -57,7 +57,7 @@ cache:
   advertise_url: "http://host.docker.internal:3000"
   # Set external_url to use an existing cache server instead of starting the
   # embedded server. The URL must be reachable from the runner containers.
-  # external_url: "http://cache.internal:3000"
+  # external_url: "http://cache.internal:3000/_mr/<token>"
   # Optional private path token. Embedded cache generates one automatically and
   # injects it into runners; set this only when coordinating with an external
   # standalone cacheserver's --access-token.
@@ -95,7 +95,7 @@ pools:
       # WSL2 Docker Engine over TCP, OR Podman/Docker-Desktop docker-compat pipe:
       #   npipe:////./pipe/docker_engine
       host: "tcp://127.0.0.1:2375"
-      enable_dind: true
+      enable_dind: false          # trusted Linux jobs only: mounts the host Docker socket
     tool_cache:
       mode: "shared-volume"
       volume: "mr-toolcache-linux"
@@ -122,7 +122,7 @@ pools:
     labels: [self-hosted, windows, x64]
     qemu:
       golden: "/var/lib/multirunner/golden-servercore.qcow2"
-      work_dir: "/var/lib/multirunner/vm"
+      work_dir: "/var/lib/multirunner/vm" # dedicated: real run/service start (not doctor) attempts top-level artifact cleanup
       mem_mb: 4096
       cpus: 2
       accel: ""                  # auto: x64 uses kvm/whpx/hvf; ARM uses slower x86 TCG emulation
@@ -131,7 +131,7 @@ pools:
       # bake_iso: "/var/lib/multirunner/WinServer2022.iso"
       # bake_iso_sha256: "<64 lowercase hex characters>"
       # runner_version: "2.337.0"
-      # runner_sha256 is required when runner_version is not the built-in version.
+      # A custom runner_version needs runner_sha256 for bake or managed rebuilds.
       # runner_sha256: "<64 lowercase hex characters>"
       # licensed: true             # skip evaluation-license housekeeping for activated images
       # Toolchains baked into the golden (the VM equivalent of image_tier; qemu
@@ -139,7 +139,8 @@ pools:
       # node:<major> | go | buildtools | buildtools:<line>. A bare selector
       # follows images/versions.json (every LTS Node major, the qemu-windows
       # .NET channels, the default Build Tools line); exact selectors combine.
-      # Match `multirunner bake --tools ...`; changing the set forces a rebuild.
+      # Match `multirunner bake --tools ...`. With bake_iso configured, tool drift can
+      # trigger a later startup rebuild; otherwise bake the changed golden explicitly.
       # Two Build Tools lines are two full Visual Studio installs: bake with a
       # --disk-gb well above the 40 GB default.
       # tools: [dotnet, "node:24", "buildtools:17", "buildtools:18"]
@@ -167,7 +168,7 @@ pools:
     docker:
       host: "npipe:////./pipe/docker_engine_windows"
       isolation: auto            # auto (default): process on Server, hyperv on client
-      windows_dind: "off"        # off | host-pipe | hyperv
+      windows_dind: "off"        # unused; no Windows DinD mode is implemented
     max_consecutive_failures: 5
 
 log:

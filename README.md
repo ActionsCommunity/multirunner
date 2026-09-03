@@ -71,16 +71,17 @@ Download a binary for your OS/arch from the
 [Releases](../../releases) page, or build from source:
 
 ```sh
-go install github.com/GerardSmit/multirunner/cmd/multirunner@latest
+go install github.com/ActionsCommunity/multirunner/cmd/multirunner@latest
 ```
 
 Prebuilt binaries are published for **Linux, Windows, and macOS**, each in
 **x64 and ARM64**.
 
-### Copilot CLI plugin
+### Agent plugins
 
-This repository includes a Copilot CLI plugin for guided host setup and
-day-two operations. Install it directly from GitHub:
+This repository includes shared agent skills and plugin manifests for Copilot
+CLI, Claude Code, and Codex. Install the Copilot CLI plugin directly from
+GitHub:
 
 ```sh
 copilot plugin install ActionsCommunity/multirunner
@@ -96,22 +97,43 @@ copilot plugin install .
 Reinstall after changing the checkout because Copilot CLI caches installed
 plugin contents.
 
-Ask Copilot to use one of these focused skills:
+The Claude Code and Codex manifests are `.claude-plugin/plugin.json` and
+`.codex-plugin/plugin.json`; all three manifests declare the shared `skills/`
+directory. Everything a skill links to lives under it (`skills/references/`
+and `skills/docs/`), so the plugin stays self-contained however it is
+packaged.
+
+Ask Copilot to use one of these five focused skill routers. Each loads only the
+reference material needed for its mode:
 
 | Skill | Purpose |
 |---|---|
-| `multirunner-setup` | Assess a host, install a checksum-verified release, configure it, and prove a canary job |
-| `multirunner-health` | Run a bounded, read-only service and runtime health check |
-| `multirunner-targets` | Add, remove, or validate GitHub targets with approval before writes |
-| `multirunner-troubleshoot` | Diagnose runtime, image, authentication, queue, DNS, and service failures |
-| `multirunner-update` | Upgrade verified binaries and images with rollback and canary checks |
+| `multirunner-setup` | Set up a new host end to end: verified binary, runtime, config, credentials, service, and canary |
+| `multirunner-host` | Tune or upgrade an existing host and its container pools with a planned, approved lifecycle |
+| `multirunner-diagnose` | Run bounded read-only health checks and diagnose service, runtime, cache, routing, and runner failures |
+| `multirunner-github` | Configure or diagnose GitHub targets, credentials, labels, scale sets, and `workflow_job` webhooks |
+| `multirunner-qemu` | Bake, inspect, monitor, and safely debug Windows QEMU runner pools |
 
-The setup and update skills use published binaries and `SHA256SUMS.txt`.
-They don't require a source build or Go toolchain. Every skill assesses
-read-only state first, preserves existing configuration, and asks before
+The setup and host skills use published binaries and `SHA256SUMS.txt`; they do
+not require a source build or Go toolchain. The former narrow
+skills are intentionally replaced by these routers so agents load less repeated
+guidance. Every skill preserves existing configuration and asks before
 elevation, package installation, service changes, GitHub writes, workflow
-dispatch, or removal. Secret values and JIT configuration must never be
-shown in chat or logs.
+dispatch, or removal. Secret values and JIT configuration must never be shown
+in chat or logs.
+
+The same packaged skills also have native manifests for
+[Claude Code](.claude-plugin/plugin.json) and [Codex](.codex-plugin/plugin.json).
+For local Claude Code development, run `claude --plugin-dir .`. Codex packages
+the root `skills/` directory through its `.codex-plugin/plugin.json`; use a
+workspace or local marketplace when installing it for Codex. The root
+[`plugin.json`](plugin.json) remains the Copilot CLI manifest.
+
+### Operator references
+
+- [CLI reference](skills/docs/cli-reference.md)
+- [Host configuration reference](skills/docs/host-configuration.md)
+- [QEMU Windows guide](skills/docs/qemu-windows.md)
 
 ---
 
@@ -139,6 +161,7 @@ shown in chat or logs.
 
    ```sh
    export GITHUB_PAT=...            # or put GITHUB_PAT=... in a .env file
+   multirunner run --config config.yaml --dry-run
    multirunner run --config config.yaml
    ```
 
@@ -150,8 +173,9 @@ runners appear under **Settings → Actions → Runners**. Push a workflow with
 > (the config's directory, then the working dir) — so `GITHUB_PAT=ghp_…` in `.env`
 > is enough; real environment variables take precedence.
 
-> **No PAT?** `multirunner connect --repo owner/name --config config.yaml` creates
-> and installs a GitHub App via a browser flow and writes the credentials for you.
+> **No PAT?** Preview with `multirunner connect --repo owner/name --config
+> config.yaml --dry-run`; repeat without `--dry-run` to create and install a
+> GitHub App and write its credentials.
 
 `config.example.yaml` documents every option (cache, autoscaling, tiers, …) when
 you want to go further.
@@ -309,6 +333,9 @@ multirunner drives **containerd + runhcs** directly through `nerdctl`, so Window
 containers run on the OS Host Compute Service with no Docker Desktop:
 
 ```powershell
+# Read-only host inspection and installation plan.
+multirunner install-containerd --dry-run
+
 # Elevates once: installs containerd + runhcs + nerdctl + CNI, enables the
 # Containers (and, on Windows client, Hyper-V) features.
 multirunner install-containerd
@@ -322,6 +349,8 @@ pools:
     size: 2
     image: "multirunner/runner-windows:dev"
     labels: [self-hosted, windows, x64]
+    docker:
+      host: "required-but-ignored" # required by current validation
     containerd:
       isolation: auto      # auto: process on Server, hyperv on Windows client
 ```
@@ -366,8 +395,9 @@ exact majors; `buildtools` selects the manifest `default_line`; `buildtools:17`
 and `buildtools:18` are exact and may be combined — each line is a full Visual
 Studio install, so combining them needs a larger `--disk-gb` than the 40 GB
 default and roughly doubles the bake's install budget).
-List the same tools
-under `qemu.tools` so an auto-rebuild reuses them; changing the set re-bakes.
+List the same tools under `qemu.tools` so a managed rebuild reuses them.
+With `qemu.bake_iso` configured, a later orchestrator start detects tool-fingerprint
+drift and can rebuild; without it, Multirunner reports that rebuilding is unavailable.
 Invalid selectors are rejected at config load.
 Built-in bakes pin and verify the runner, MinGit, Node, Go, .NET SDKs, and Visual
 Studio Build Tools. The Windows ISO content and every selected payload identity
@@ -394,17 +424,27 @@ pools:
       tools: [dotnet, "node:24", "buildtools:17", "buildtools:18"]
 ```
 
+`multirunner doctor` is read-only and never cleans `qemu.work_dir`. A real
+`multirunner run`, or an installed-service `start`/`restart`, attempts cleanup
+before QEMU/golden preflight: dedicate the directory and keep manual VMs,
+forensic artifacts, and active job VMs out of it.
+
 Highlights:
 
 - **Bake serves a live noVNC viewer** — watch the unattended install in your
-  browser (`--vnc-web ""` to disable). The golden ships with **git** and the
-  runner preinstalled, so jobs are ready to build immediately.
+  browser. QEMU VNC binds to the viewer host and uses printed dynamic ports;
+  `--vnc-web ""` disables it. The golden ships with **git** and the
+  runner preinstalled, so jobs are ready to build immediately. The console is
+  unauthenticated and the current bake CLI uses a fixed guest Administrator
+  credential; keep it on a private operator boundary.
 - **Verified completion** — the bake only ships a golden after it sees the
   `MR:GOLDEN_OK` serial marker; otherwise it fails loudly.
 - **Licensing** — a Windows guest needs its own license. Server eval = 180 days,
   `slmgr /rearm`-able ~5–6× (~3 years), or supply a key/KMS.
-- **Self-healing** — multirunner tracks the golden's eval clock and rearms +
-  re-snapshots (or rebuilds) before it expires. Skipped when a key is configured.
+- **Golden housekeeping** — at orchestrator startup, multirunner can rearm an
+  evaluation golden in place, or attempt a configured rebuild for tool drift or
+  exhausted rearms. A real key/KMS skips time-based evaluation handling, not
+  tool-fingerprint checks.
 
 ---
 
@@ -440,7 +480,8 @@ injects into runners. For a standalone external cache server, start it with
 > **Podman on Windows:** runners reach the host bridge as
 > `host.containers.internal` (the Podman VM, `10.88.0.1`), not the Windows host.
 > Run the cache as a published container and set
-> `cache.external_url: http://host.containers.internal:3000`.
+> `cache.external_url: http://host.containers.internal:3000/_mr/<token>`, using
+> the matching persistent standalone-cache token.
 
 ---
 
@@ -478,7 +519,8 @@ provisioning: pool       # pool | autoscale | scaleset
     and scales up.
   - **Webhook** (low-latency) — set `webhook.listen` to receive `workflow_job`
     events (needs a reachable URL; use a tunnel like smee.io / cloudflared).
-    Signatures verified with `webhook.secret`.
+    A nonempty `webhook.secret` verifies signatures; an empty one accepts
+    unsigned events and is unsafe on a public listener.
 - **`scaleset`** — let GitHub decide. A [runner scale set][scaleset] holds a
   long-poll session open and reports the desired runner count, which is the same
   mechanism actions-runner-controller uses.
@@ -524,8 +566,9 @@ pools:
 
 Each pool needs its own `scale_set`, because a scale set carries one label set
 and therefore one runner OS. Names are reused across restarts, so restarting
-multirunner does not churn registrations or strand queued jobs. Target a scale
-set from a workflow the same way as any other runner:
+multirunner does not churn registrations. Drain or wait for active jobs before a
+stop/restart, because it cancels orchestration and can interrupt runner work.
+Target a scale set from a workflow the same way as any other runner:
 
 ```yaml
 jobs:
@@ -543,12 +586,16 @@ multirunner installs itself as a native OS service (Windows SCM, Linux systemd,
 macOS launchd):
 
 ```sh
+sudo multirunner service install --dry-run --config /etc/multirunner/config.yaml
 sudo multirunner service install --config /etc/multirunner/config.yaml   # Linux/macOS
+sudo multirunner service start --dry-run
 sudo multirunner service start
 ```
 
 ```powershell
+multirunner service install --dry-run --config C:\multirunner\config.yaml
 multirunner service install --config C:\multirunner\config.yaml          # Windows (elevated)
+multirunner service start --dry-run
 multirunner service start
 ```
 
@@ -569,6 +616,10 @@ Set `metrics.listen` (e.g. `127.0.0.1:9090`) to expose:
 ## CLI
 
 Built with cobra — `multirunner <command> --help` for details; `--config` is global.
+The mutating `multirunner` commands that support a plan expose `--dry-run`;
+the companion `cacheserver` does not. `update-image-versions` is a repository
+maintenance tool run by CI, not an operator command.
+Hidden `_` developer helpers are excluded.
 
 ```text
 multirunner [run]                   run the orchestrator (default)

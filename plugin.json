@@ -1,7 +1,7 @@
 {
   "name": "multirunner",
-  "description": "Install, configure, validate, troubleshoot, and safely operate multirunner hosts for ephemeral GitHub Actions runners.",
-  "version": "0.1.0",
+  "description": "Operate Multirunner through focused setup, host, diagnosis, GitHub integration, and Windows QEMU skill routers.",
+  "version": "0.2.0",
   "author": {
     "name": "ActionsCommunity",
     "url": "https://github.com/ActionsCommunity"
@@ -13,13 +13,18 @@
     "self-hosted-runners",
     "ephemeral-runners",
     "windows-containers",
-    "linux-containers"
+    "linux-containers",
+    "autoscaling",
+    "webhooks",
+    "runner-scale-sets",
+    "qemu",
+    "cache"
   ],
   "skills": [
     "skills/multirunner-setup/",
-    "skills/multirunner-health/",
-    "skills/multirunner-targets/",
-    "skills/multirunner-troubleshoot/",
-    "skills/multirunner-update/"
+    "skills/multirunner-host/",
+    "skills/multirunner-diagnose/",
+    "skills/multirunner-github/",
+    "skills/multirunner-qemu/"
   ]
 }
