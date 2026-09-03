@@ -16,6 +16,15 @@ function publicCommandNamesFromGo() {
   return [...new Set([...names, "completion", "help"])].sort();
 }
 
+function publicOptionNamesFromReference() {
+  const reference = read("skills/docs/cli-reference.md");
+  const publicCommands = reference
+    .split("## Public commands", 2)[1]
+    .split("## Hidden QEMU developer helpers", 1)[0];
+
+  return [...new Set(publicCommands.match(/--[a-z][a-z0-9-]*/g))].sort();
+}
+
 test("Astro targets the multirunner project path", () => {
   const config = read("astro.config.mjs");
 
@@ -109,19 +118,19 @@ test("built pages exist and expose every documented public command", () => {
   ].map((match) => match[1]).sort();
 
   assert.deepEqual(documentedCommands, publicCommandNamesFromGo());
-  for (const option of [
-    "--config",
-    "--help",
-    "--version",
-    "--install-deps",
-    "--dry-run",
-    "--iso-sha256",
-    "--runner-sha256",
-    "--data-root",
-    "--no-descriptions",
-  ]) {
+  for (const option of publicOptionNamesFromReference()) {
     assert.ok(commandsPage.includes(option), `Missing documented option ${option}`);
   }
+
+  const versions = JSON.parse(read("images/versions.json"));
+  assert.ok(
+    commandsPage.includes(`Current default: ${versions.minimal.runner.version}`),
+    "Runner version does not match images/versions.json",
+  );
+  assert.match(
+    commandsPage,
+    /https:\/\/github\.com\/actionscommunity\/multirunner\/blob\/main\/skills\/docs\/cli-reference\.md/,
+  );
 });
 
 test("built root-relative links retain the GitHub project prefix", () => {
