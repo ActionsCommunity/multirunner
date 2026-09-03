@@ -3,6 +3,7 @@ package scaleset
 import (
 	"net/http"
 	"net/url"
+	"time"
 
 	"github.com/actions/scaleset"
 	"github.com/hashicorp/go-retryablehttp"
@@ -62,6 +63,17 @@ func baseURLFromTarget(target string) string {
 // in newDeviceClient.
 func newDeviceRetryableClient(refresher *ghapp.TokenRefresher, sentinel string) *retryablehttp.Client {
 	rc := retryablehttp.NewClient()
+
+	// The library takes this instance rather than a copy, and the admin-connection
+	// call installs a CheckRetry on it that treats 401 and 403 as retryable
+	// (client.go:868). That policy then applies to every later request through the
+	// same client, so a credential that has genuinely gone bad is re-sent on the
+	// default schedule before the caller ever sees the 401. Keeping the budget
+	// small leaves real transient failures covered without turning a dead token
+	// into half a minute of backoff per call.
+	rc.RetryMax = 3
+	rc.RetryWaitMax = 5 * time.Second
+
 	rc.RequestLogHook = func(_ retryablehttp.Logger, req *http.Request, _ int) {
 		if req.Header.Get("Authorization") != sentinel {
 			return

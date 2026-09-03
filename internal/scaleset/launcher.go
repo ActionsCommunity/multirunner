@@ -141,6 +141,11 @@ func (l *Launcher) HandleDesiredRunnerCount(ctx context.Context, count int) (int
 		return len(l.running), nil
 	}
 	l.desired = count
+	l.opts.Logger.Info("github asked for runners",
+		slog.Int("desired", count),
+		slog.Int("running", len(l.running)),
+		slog.Int("max", l.opts.MaxRunners),
+	)
 	for n := l.allowedLocked(count); n > 0; n-- {
 		if err := l.launchLocked(ctx); err != nil {
 			// Report what actually started. A partial launch is still progress,
@@ -251,7 +256,14 @@ func (l *Launcher) awaitExit(name string, h backend.RunnerHandle) {
 	if l.opts.OnStop != nil {
 		l.opts.OnStop(code, err)
 	}
-	l.refill()
+	// Only a runner that completed its job earns an immediate replacement. A
+	// runner that died - rejected image, deprecated runner build, unusable JIT
+	// config - would be replaced by another that dies the same way, as fast as
+	// containers can start, each one registering a runner with GitHub first.
+	// Those cases wait for the listener's next message, which paces the retry.
+	if err == nil && code == 0 {
+		l.refill()
+	}
 }
 
 // refill starts runners for work GitHub has already asked for but that this host
