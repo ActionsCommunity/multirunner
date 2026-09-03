@@ -74,12 +74,13 @@ type fakeHandle struct {
 	closeOnce sync.Once
 	killCount int
 	blockKill bool
+	exitCode  int
 }
 
 func (h *fakeHandle) Wait(ctx context.Context) (int, error) {
 	select {
 	case <-h.done:
-		return 0, nil
+		return h.exitCode, nil
 	case <-ctx.Done():
 		return 0, ctx.Err()
 	}
@@ -137,6 +138,16 @@ func (b *fakeBackend) requests() []backend.LaunchRequest {
 func (b *fakeBackend) finish(i int) {
 	b.mu.Lock()
 	h := b.handles[i]
+	b.mu.Unlock()
+	h.complete()
+}
+
+// fail ends a runner with a non-zero exit code, the shape of a runner that never
+// took a job: a rejected image, a runner build GitHub refuses, a bad JIT config.
+func (b *fakeBackend) fail(i, code int) {
+	b.mu.Lock()
+	h := b.handles[i]
+	h.exitCode = code
 	b.mu.Unlock()
 	h.complete()
 }
@@ -494,4 +505,36 @@ func (h *slowHandle) Kill(context.Context) error { return nil }
 func (h *slowHandle) ID() string                 { return "slow" }
 func (h *slowHandle) Logs(context.Context) (io.ReadCloser, error) {
 	return io.NopCloser(strings.NewReader("")), nil
+}
+
+// TestFailedRunnerIsNotReplacedImmediately pins the bound on refilling that the
+// throughput fix needs. A runner that completed a job earns an instant
+// replacement; one that died without taking a job must not, or a rejected image
+// becomes a launch loop paced only by container start time, each iteration
+// registering a fresh runner with GitHub. Those wait for the listener's next
+// message instead.
+func TestFailedRunnerIsNotReplacedImmediately(t *testing.T) {
+	be := &fakeBackend{}
+	l := New(&fakeJIT{}, be, Options{ScaleSetID: 1, MaxRunners: 2})
+
+	if _, err := l.HandleDesiredRunnerCount(context.Background(), 2); err != nil {
+		t.Fatalf("launch: %v", err)
+	}
+	be.fail(0, 1)
+
+	waitFor(t, func() bool { return l.Running() == 1 })
+	// Give a refill the same window a successful exit's replacement gets.
+	time.Sleep(100 * time.Millisecond)
+	if n := len(be.requests()); n != 2 {
+		t.Errorf("launched %d runners, want the original 2: a runner that died must not be replaced until the listener asks again", n)
+	}
+
+	// The listener asking again is still honoured, so the pool recovers once
+	// GitHub confirms the work is still there.
+	if _, err := l.HandleDesiredRunnerCount(context.Background(), 2); err != nil {
+		t.Fatalf("relaunch: %v", err)
+	}
+	if n := len(be.requests()); n != 3 {
+		t.Errorf("launched %d runners, want a replacement on the next message", n)
+	}
 }
