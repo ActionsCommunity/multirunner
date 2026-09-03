@@ -226,7 +226,7 @@ func UserInstallations(ctx context.Context, apiBase, accessToken string) ([]Inst
 		req.Header.Set("Authorization", "Bearer "+accessToken)
 		req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := oauthClient.Do(req)
 		if err != nil {
 			return nil, fmt.Errorf("list user installations: %w", err)
 		}
@@ -317,9 +317,9 @@ func postForm(ctx context.Context, endpoint string, form url.Values, out any) er
 	return nil
 }
 
-// oauthClient talks to the device/oauth endpoints. It has an explicit timeout
-// because http.DefaultClient has none: a hung proxy would otherwise stall a
-// connect or a token refresh forever.
+// oauthClient talks to the device/oauth and installation endpoints. It has an
+// explicit timeout because http.DefaultClient has none: a hung proxy would
+// otherwise stall a connect, an installation poll, or a token refresh forever.
 var oauthClient = &http.Client{Timeout: 30 * time.Second}
 
 // maxOAuthResponse caps how much of a response is decoded, so a misdirected

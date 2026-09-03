@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -190,16 +191,21 @@ target. --webhook-url, --detect, --name, --key-out and --port apply only to
 					"(only safe where the output is not logged: anyone who reads the code can authorize instead of you)")
 			}
 
+			// One reader for the whole flow. Wrapping os.Stdin separately per
+			// prompt drops whatever the first wrapper buffered past its newline,
+			// which loses every line but the first of a pasted answer.
+			stdin := bufio.NewReader(os.Stdin)
+
 			ownApp := connOwnApp
 			var st *steps
 			if !connOwnApp && interactive {
 				st = newSteps(out, 3)
-				ownApp = wantOwnApp(os.Stdin, st, interactive)
+				ownApp = wantOwnApp(stdin, st, interactive)
 			}
 			if ownApp {
-				return connectCmd(abs, f, os.Stdin, out, interactive, st)
+				return connectCmd(abs, f, stdin, out, interactive, st)
 			}
-			return connectDeviceCmd(abs, f, changedManifestFlags(cmd), os.Stdin, out, interactive, st)
+			return connectDeviceCmd(abs, f, changedManifestFlags(cmd), stdin, out, interactive, st)
 		},
 	}
 	connectC.Flags().BoolVar(&connDryRun, "dry-run", false, "print the GitHub and local changes without contacting GitHub or writing files")
