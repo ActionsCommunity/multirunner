@@ -5,9 +5,25 @@ package backend
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"net/url"
+	"strconv"
+	"time"
+)
+
+const backendCleanupTimeout = 10 * time.Second
+
+const (
+	labelManaged    = "multirunner"
+	labelName       = "multirunner.name"
+	labelIndex      = "multirunner.index"
+	labelInstance   = "multirunner.instance"
+	labelTarget     = "multirunner.target"
+	labelPool       = "multirunner.pool"
+	labelScaleSetID = "multirunner.scaleset-id"
+	labelRunnerID   = "multirunner.runner-id"
 )
 
 // Mount describes a bind or named-volume mount into a runner container.
@@ -36,6 +52,93 @@ type LaunchRequest struct {
 	Mounts []Mount
 	// Index is the slot number within the pool (0-based), for naming/logging.
 	Index int
+	// Ownership identifies a scale-set runner strongly enough for a restarted
+	// multirunner instance to reclaim only its own backend resources.
+	Ownership RunnerOwnership
+}
+
+// RunnerOwnership is persisted as backend metadata for restart reconciliation.
+// An empty Instance means the launch is not eligible for reconciliation.
+type RunnerOwnership struct {
+	Instance   string
+	Target     string
+	Pool       string
+	ScaleSetID int
+	RunnerID   int64
+}
+
+// IsZero reports whether a request belongs to a provisioning mode that does not
+// use restart reconciliation.
+func (o RunnerOwnership) IsZero() bool {
+	return o == (RunnerOwnership{})
+}
+
+// Validate rejects partial ownership, which would preserve a resource without
+// leaving enough metadata to reclaim it safely.
+func (o RunnerOwnership) Validate() error {
+	if o.IsZero() {
+		return nil
+	}
+	if o.Instance == "" || o.Target == "" || o.Pool == "" ||
+		o.ScaleSetID == 0 {
+		return fmt.Errorf("complete runner ownership is required")
+	}
+	return nil
+}
+
+// OwnedRunner identifies one backend resource proven to match an ownership
+// boundary.
+type OwnedRunner struct {
+	ResourceID string
+	Name       string
+	RunnerID   int64
+}
+
+// OwnedRunnerStore is an optional backend capability used to find and remove
+// scale-set resources left behind by a previous process.
+type OwnedRunnerStore interface {
+	ListOwnedRunners(ctx context.Context, ownership RunnerOwnership) ([]OwnedRunner, error)
+	RemoveOwnedRunner(ctx context.Context, resourceID string) error
+}
+
+// OwnedRunnerStoreFor returns the optional reconciliation capability without
+// exposing backend implementations to lifecycle coordinators.
+func OwnedRunnerStoreFor(be Backend) OwnedRunnerStore {
+	store, _ := be.(OwnedRunnerStore)
+	return store
+}
+
+func ownershipLabels(ownership RunnerOwnership) map[string]string {
+	if ownership.IsZero() {
+		return nil
+	}
+	return map[string]string{
+		labelManaged:    "true",
+		labelInstance:   ownership.Instance,
+		labelTarget:     ownership.Target,
+		labelPool:       ownership.Pool,
+		labelScaleSetID: strconv.Itoa(ownership.ScaleSetID),
+		labelRunnerID:   strconv.FormatInt(ownership.RunnerID, 10),
+	}
+}
+
+func reconciliationLabels(ownership RunnerOwnership) map[string]string {
+	labels := ownershipLabels(ownership)
+	delete(labels, labelScaleSetID)
+	delete(labels, labelRunnerID)
+	return labels
+}
+
+func ownedRunner(resourceID string, labels map[string]string) (OwnedRunner, bool) {
+	runnerID, err := strconv.ParseInt(labels[labelRunnerID], 10, 64)
+	if err != nil || runnerID == 0 {
+		return OwnedRunner{}, false
+	}
+	return OwnedRunner{
+		ResourceID: resourceID,
+		Name:       labels[labelName],
+		RunnerID:   runnerID,
+	}, true
 }
 
 // CacheHost returns the hostname in the cache URL (ACTIONS_RESULTS_URL) that must

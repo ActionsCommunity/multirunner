@@ -2,11 +2,14 @@ package backend
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/filters"
 	imagetypes "github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/client"
@@ -20,6 +23,8 @@ type dockerBackend struct {
 	isolation container.Isolation // empty for Linux; "process"/"hyperv" for Windows
 	autoPull  bool
 }
+
+var _ OwnedRunnerStore = (*dockerBackend)(nil)
 
 func newDockerBackend(name, host string, isolation container.Isolation) (*dockerBackend, error) {
 	cli, err := client.NewClientWithOpts(
@@ -50,7 +55,7 @@ func (b *dockerBackend) OSType(ctx context.Context) (string, error) {
 }
 
 func (b *dockerBackend) EnsureImage(ctx context.Context, imageRef string) error {
-	if _, _, err := b.cli.ImageInspectWithRaw(ctx, imageRef); err == nil {
+	if _, err := b.cli.ImageInspect(ctx, imageRef); err == nil {
 		return nil
 	}
 	if !b.autoPull {
@@ -69,6 +74,12 @@ func (b *dockerBackend) EnsureImage(ctx context.Context, imageRef string) error 
 }
 
 func (b *dockerBackend) Launch(ctx context.Context, req LaunchRequest) (RunnerHandle, error) {
+	if err := req.Ownership.Validate(); err != nil {
+		return nil, fmt.Errorf("docker: %w", err)
+	}
+	if !req.Ownership.IsZero() && req.Ownership.RunnerID == 0 {
+		return nil, fmt.Errorf("docker: runner ID is required for owned launches")
+	}
 	env := make([]string, 0, len(req.Env)+1)
 	env = append(env, "JIT_CONFIG="+req.EncodedJITConfig)
 	keys := make([]string, 0, len(req.Env))
@@ -84,14 +95,19 @@ func (b *dockerBackend) Launch(ctx context.Context, req LaunchRequest) (RunnerHa
 		Image: req.Image,
 		Env:   env,
 		Labels: map[string]string{
-			"multirunner":       "true",
-			"multirunner.name":  req.Name,
-			"multirunner.index": fmt.Sprintf("%d", req.Index),
+			labelManaged: "true",
+			labelName:    req.Name,
+			labelIndex:   fmt.Sprintf("%d", req.Index),
 		},
+	}
+	for key, value := range ownershipLabels(req.Ownership) {
+		cfg.Labels[key] = value
 	}
 
 	host := &container.HostConfig{
-		AutoRemove: true,
+		// Scale-set cleanup removes the stopped container only after GitHub
+		// deregistration succeeds. Pool launchers still remove it through Kill.
+		AutoRemove: req.Ownership.IsZero(),
 		Mounts:     toDockerMounts(req.Mounts),
 	}
 	if b.isolation != "" {
@@ -103,14 +119,19 @@ func (b *dockerBackend) Launch(ctx context.Context, req LaunchRequest) (RunnerHa
 		host.ExtraHosts = append(host.ExtraHosts, ch+":host-gateway")
 	}
 
+	handle := &dockerHandle{
+		cli:      b.cli,
+		id:       req.Name,
+		preserve: !req.Ownership.IsZero(),
+	}
 	created, err := b.cli.ContainerCreate(ctx, cfg, host, nil, nil, req.Name)
 	if err != nil {
 		// A lost create response can still leave a container behind. Docker APIs
 		// accept the deterministic name anywhere an ID is accepted, so return a
 		// cleanup handle even when the daemon did not return the created ID.
-		return &dockerHandle{cli: b.cli, id: req.Name}, fmt.Errorf("create container %s: %w", req.Name, err)
+		return handle, fmt.Errorf("create container %s: %w", req.Name, err)
 	}
-	handle := &dockerHandle{cli: b.cli, id: created.ID}
+	handle.id = created.ID
 	if err := b.cli.ContainerStart(ctx, created.ID, container.StartOptions{}); err != nil {
 		// The daemon may have started the container before the response was lost.
 		// Return its handle so the lifecycle owner can terminate it with a
@@ -121,6 +142,48 @@ func (b *dockerBackend) Launch(ctx context.Context, req LaunchRequest) (RunnerHa
 }
 
 func (b *dockerBackend) Close() error { return b.cli.Close() }
+
+func (b *dockerBackend) ListOwnedRunners(ctx context.Context, ownership RunnerOwnership) ([]OwnedRunner, error) {
+	if err := ownership.Validate(); err != nil || ownership.IsZero() {
+		return nil, fmt.Errorf("docker: complete runner ownership is required")
+	}
+	labels := reconciliationLabels(ownership)
+	args := filters.NewArgs()
+	for key, value := range labels {
+		args.Add("label", key+"="+value)
+	}
+	containers, err := b.cli.ContainerList(ctx, container.ListOptions{All: true, Filters: args})
+	if err != nil {
+		return nil, fmt.Errorf("list owned containers: %w", err)
+	}
+	owned := make([]OwnedRunner, 0, len(containers))
+	for _, candidate := range containers {
+		if !labelsMatch(candidate.Labels, labels) {
+			continue
+		}
+		if runner, ok := ownedRunner(candidate.ID, candidate.Labels); ok {
+			owned = append(owned, runner)
+		}
+	}
+	return owned, nil
+}
+
+func (b *dockerBackend) RemoveOwnedRunner(ctx context.Context, resourceID string) error {
+	err := b.cli.ContainerRemove(ctx, resourceID, container.RemoveOptions{Force: true})
+	if cerrdefs.IsNotFound(err) {
+		return nil
+	}
+	return err
+}
+
+func labelsMatch(actual, expected map[string]string) bool {
+	for key, value := range expected {
+		if actual[key] != value {
+			return false
+		}
+	}
+	return true
+}
 
 func toDockerMounts(ms []Mount) []mount.Mount {
 	if len(ms) == 0 {
@@ -144,8 +207,9 @@ func toDockerMounts(ms []Mount) []mount.Mount {
 
 // dockerHandle is a running container.
 type dockerHandle struct {
-	cli *client.Client
-	id  string
+	cli      *client.Client
+	id       string
+	preserve bool
 }
 
 func (h *dockerHandle) ID() string { return h.id }
@@ -174,11 +238,16 @@ func (h *dockerHandle) Logs(ctx context.Context) (io.ReadCloser, error) {
 }
 
 func (h *dockerHandle) Kill(ctx context.Context) error {
-	// Best-effort: stop, then force-remove (AutoRemove may already handle removal).
-	_ = h.cli.ContainerStop(ctx, h.id, container.StopOptions{})
-	err := h.cli.ContainerRemove(ctx, h.id, container.RemoveOptions{Force: true})
-	if client.IsErrNotFound(err) {
-		return nil
+	stopErr := h.cli.ContainerStop(ctx, h.id, container.StopOptions{})
+	if cerrdefs.IsNotFound(stopErr) {
+		stopErr = nil
 	}
-	return err
+	if h.preserve {
+		return stopErr
+	}
+	removeErr := h.cli.ContainerRemove(ctx, h.id, container.RemoveOptions{Force: true})
+	if cerrdefs.IsNotFound(removeErr) {
+		removeErr = nil
+	}
+	return errors.Join(stopErr, removeErr)
 }

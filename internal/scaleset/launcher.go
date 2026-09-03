@@ -18,6 +18,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -54,11 +55,19 @@ type Options struct {
 	// MaxRunners caps concurrent runners regardless of what GitHub asks for.
 	// Zero means the host will honour any requested count.
 	MaxRunners int
+	// Ownership is attached to backend resources for restart reconciliation.
+	Ownership backend.RunnerOwnership
 	// OnStart and OnStop report runner lifecycle events.
 	OnStart func()
 	OnStop  func(exitCode int, err error)
+	// Logger reports recoverable launch and cleanup failures.
+	Logger *slog.Logger
 	// cleanupTimeout bounds each kill and deregistration operation.
 	cleanupTimeout time.Duration
+	// launchTimeout bounds JIT generation and backend launch together.
+	launchTimeout time.Duration
+	// reconcileInterval controls periodic reconciliation.
+	reconcileInterval time.Duration
 }
 
 // Launcher implements the scale set listener's handler interface by translating
@@ -66,34 +75,59 @@ type Options struct {
 //
 // A Launcher is safe for concurrent use.
 type Launcher struct {
+	ctx  context.Context
 	jit  jitGenerator
 	be   backend.Backend
 	opts Options
 
-	mu      sync.Mutex
-	running map[string]runnerState
-	seq     int
+	mu                   sync.Mutex
+	removeMu             sync.Mutex
+	running              map[string]*runnerState
+	pendingRegistrations map[int64]string
+	seq                  int
 }
 
 type runnerState struct {
-	handle   backend.RunnerHandle
-	runnerID int64
+	handle              backend.RunnerHandle
+	runnerID            int64
+	busy                bool
+	occupiesCapacity    bool
+	cleanupStarted      bool
+	needsDeregistration bool
+	registrationRemoved bool
+	cleanupMu           sync.Mutex
+	terminated          bool
+	cleaned             bool
+	stopReported        bool
+	exitCode            int
+	waitErr             error
 }
 
 // New returns a Launcher that provisions onto be.
-func New(jit jitGenerator, be backend.Backend, opts Options) *Launcher {
+func New(ctx context.Context, jit jitGenerator, be backend.Backend, opts Options) *Launcher {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if opts.Logger == nil {
+		opts.Logger = slog.New(slog.DiscardHandler)
+	}
+	if opts.Ownership.ScaleSetID == 0 {
+		opts.Ownership.ScaleSetID = opts.ScaleSetID
+	}
 	return &Launcher{
-		jit:     jit,
-		be:      be,
-		opts:    opts,
-		running: make(map[string]runnerState),
+		ctx:                  ctx,
+		jit:                  jit,
+		be:                   be,
+		opts:                 opts,
+		running:              make(map[string]*runnerState),
+		pendingRegistrations: make(map[int64]string),
 	}
 }
 
 // allowedLocked reports how many runners may be started to reach want, given
 // how many are already running and the configured cap. Callers hold l.mu.
 func (l *Launcher) allowedLocked(want int) int {
-	have := len(l.running)
+	have := l.runningLocked()
 	if want <= have {
 		return 0
 	}
@@ -114,24 +148,49 @@ func (l *Launcher) allowedLocked(want int) int {
 // reports how many this host is actually serving. Returning a smaller number
 // tells GitHub the host is at capacity rather than silently dropping work.
 //
-// Runners are ephemeral: each exits after one job and removes itself, so
-// nothing is torn down here. A runner that is still up may be mid-job.
+// Runners are ephemeral: each exits after one job, then convergent cleanup
+// removes its registration and backend record. A runner still up may be mid-job.
 func (l *Launcher) HandleDesiredRunnerCount(ctx context.Context, count int) (int, error) {
+	if err := l.retryPendingRegistrations(ctx); err != nil {
+		if isPermanentSessionError(err) {
+			return l.Running(), err
+		}
+		l.opts.Logger.Error("unused registration cleanup retry failed; listener remains active",
+			slog.Any("error", err))
+	}
+	if err := l.retryPendingCleanup(ctx); err != nil {
+		l.mu.Lock()
+		running := l.runningLocked()
+		l.mu.Unlock()
+		if isPermanentSessionError(err) {
+			return running, err
+		}
+		l.opts.Logger.Error("runner cleanup retry failed; listener remains active",
+			slog.Int("running", running),
+			slog.Any("error", err))
+	}
+
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
 	for n := l.allowedLocked(count); n > 0; n-- {
-		if err := l.launchLocked(ctx); err != nil {
-			// Report what actually started. A partial launch is still progress,
-			// and the listener asks again on the next assignment.
-			return len(l.running), err
+		if err := l.launchLocked(); err != nil {
+			if isPermanentSessionError(err) {
+				return l.runningLocked(), err
+			}
+			// actions/scaleset acknowledges the message before this callback.
+			// Keep the listener alive so its next statistics update can retry.
+			l.opts.Logger.Error("runner launch failed; listener remains active",
+				slog.Int("running", l.runningLocked()),
+				slog.Any("error", err))
+			return l.runningLocked(), nil
 		}
 	}
-	return len(l.running), nil
+	return l.runningLocked(), nil
 }
 
 // launchLocked generates a JIT config and starts one runner. Callers hold l.mu.
-func (l *Launcher) launchLocked(ctx context.Context) (err error) {
+func (l *Launcher) launchLocked() (err error) {
 	if l.opts.OnStart != nil {
 		l.opts.OnStart()
 	}
@@ -142,10 +201,16 @@ func (l *Launcher) launchLocked(ctx context.Context) (err error) {
 	}()
 
 	l.seq++
-	name := fmt.Sprintf("mr-scaleset-%d-%s", l.opts.ScaleSetID, shortID())
+	id, err := shortID()
+	if err != nil {
+		return fmt.Errorf("scaleset: generate runner name: %w", err)
+	}
+	name := fmt.Sprintf("mr-scaleset-%d-%s", l.opts.ScaleSetID, id)
 
+	launchCtx, cancel := context.WithTimeout(l.ctx, l.launchDuration())
+	defer cancel()
 	jit, err := l.jit.GenerateJitRunnerConfig(
-		ctx,
+		launchCtx,
 		&scaleset.RunnerScaleSetJitRunnerSetting{
 			Name:       name,
 			WorkFolder: l.opts.WorkFolder,
@@ -158,11 +223,17 @@ func (l *Launcher) launchLocked(ctx context.Context) (err error) {
 	if jit == nil {
 		return fmt.Errorf("scaleset: generate JIT config for %s returned nil", name)
 	}
+	if jit.Runner == nil || jit.Runner.ID == 0 {
+		return fmt.Errorf("scaleset: generate JIT config for %s returned no runner identity", name)
+	}
+	runnerID := int64(jit.Runner.ID)
+	ownership := l.opts.Ownership
+	ownership.RunnerID = runnerID
 
 	// This is the whole integration point. The scale set listener hands back
 	// the same base64 blob generate-jitconfig returns, which is exactly what
 	// LaunchRequest already carries, so no backend needs to change.
-	handle, err := l.be.Launch(ctx, backend.LaunchRequest{
+	handle, err := l.be.Launch(launchCtx, backend.LaunchRequest{
 		Name:             name,
 		Image:            l.opts.Image,
 		EncodedJITConfig: jit.EncodedJITConfig,
@@ -171,45 +242,73 @@ func (l *Launcher) launchLocked(ctx context.Context) (err error) {
 		Env:              l.opts.Env,
 		Mounts:           l.opts.Mounts,
 		Index:            l.seq,
+		Ownership:        ownership,
 	})
 	if err != nil {
 		launchErr := fmt.Errorf("scaleset: launch %s: %w", name, err)
-		if jit.Runner != nil && jit.Runner.ID != 0 {
-			removeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-			defer cancel()
-			if removeErr := l.jit.RemoveRunner(removeCtx, int64(jit.Runner.ID)); removeErr != nil {
-				return errors.Join(launchErr, fmt.Errorf("scaleset: remove unused runner %s: %w", name, removeErr))
+		if handle != nil {
+			// A non-nil handle means the backend cannot prove the resource is
+			// absent. Count it until detached cleanup confirms termination, then
+			// converge registration and backend deletion in the normal order.
+			state := &runnerState{
+				handle:           handle,
+				runnerID:         runnerID,
+				occupiesCapacity: true,
+				stopReported:     true,
 			}
+			l.running[name] = state
+			go func() {
+				if cleanupErr := l.finishRunner(name, state, -1, nil, true); cleanupErr != nil {
+					l.opts.Logger.Error("partial runner launch cleanup failed",
+						slog.String("runner", name),
+						slog.Any("error", cleanupErr))
+				}
+			}()
+			return launchErr
+		}
+		if removeErr := l.removeRunner(context.WithoutCancel(l.ctx), int64(jit.Runner.ID)); removeErr != nil {
+			l.pendingRegistrations[int64(jit.Runner.ID)] = name
+			return errors.Join(launchErr, fmt.Errorf("scaleset: remove unused runner %s: %w", name, removeErr))
 		}
 		return launchErr
 	}
 
-	var runnerID int64
-	if jit.Runner != nil {
-		runnerID = int64(jit.Runner.ID)
-	}
-	l.running[name] = runnerState{handle: handle, runnerID: runnerID}
-	go l.awaitExit(name, handle)
+	state := &runnerState{handle: handle, runnerID: runnerID, occupiesCapacity: true}
+	l.running[name] = state
+	go l.awaitExit(name, state)
 	return nil
+}
+
+func (l *Launcher) launchDuration() time.Duration {
+	if l.opts.launchTimeout > 0 {
+		return l.opts.launchTimeout
+	}
+	return 2 * time.Minute
 }
 
 // awaitExit frees the slot once the runner finishes. Each runner is ephemeral,
 // so exactly one exit is expected per launch.
-func (l *Launcher) awaitExit(name string, h backend.RunnerHandle) {
-	code, err := h.Wait(context.Background())
-
-	l.mu.Lock()
-	delete(l.running, name)
-	l.mu.Unlock()
-	if l.opts.OnStop != nil {
-		l.opts.OnStop(code, err)
-	}
+func (l *Launcher) awaitExit(name string, state *runnerState) {
+	code, err := state.handle.Wait(context.Background())
+	l.finishRunner(name, state, code, err, err != nil)
 }
 
 // HandleJobStarted records that an assignment became a running job. The runner
 // was already started in response to the desired count, so there is nothing to
 // provision here.
-func (l *Launcher) HandleJobStarted(_ context.Context, _ *scaleset.JobStarted) error {
+func (l *Launcher) HandleJobStarted(_ context.Context, job *scaleset.JobStarted) error {
+	if job == nil {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for name, state := range l.running {
+		if (job.RunnerID != 0 && state.runnerID == int64(job.RunnerID)) ||
+			(job.RunnerName != "" && name == job.RunnerName) {
+			state.busy = true
+			break
+		}
+	}
 	return nil
 }
 
@@ -223,7 +322,17 @@ func (l *Launcher) HandleJobCompleted(_ context.Context, _ *scaleset.JobComplete
 func (l *Launcher) Running() int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return len(l.running)
+	return l.runningLocked()
+}
+
+func (l *Launcher) runningLocked() int {
+	running := 0
+	for _, state := range l.running {
+		if state.occupiesCapacity {
+			running++
+		}
+	}
+	return running
 }
 
 // Shutdown terminates runners still owned by this listener and removes their
@@ -231,39 +340,20 @@ func (l *Launcher) Running() int {
 // deregistration receives its own bounded context.
 func (l *Launcher) Shutdown(ctx context.Context) error {
 	l.mu.Lock()
-	runners := make(map[string]runnerState, len(l.running))
+	runners := make(map[string]*runnerState, len(l.running))
 	for name, state := range l.running {
 		runners[name] = state
 	}
 	l.mu.Unlock()
 
-	timeout := l.opts.cleanupTimeout
-	if timeout <= 0 {
-		timeout = 10 * time.Second
-	}
-
-	errCh := make(chan error, len(runners)*2)
-	var removeMu sync.Mutex
+	errCh := make(chan error, len(runners))
 	var wg sync.WaitGroup
 	for name, state := range runners {
 		wg.Add(1)
-		go func(name string, state runnerState) {
+		go func(name string, state *runnerState) {
 			defer wg.Done()
-
-			killCtx, cancelKill := context.WithTimeout(context.WithoutCancel(ctx), timeout)
-			if err := state.handle.Kill(killCtx); err != nil {
-				errCh <- fmt.Errorf("kill %s: %w", name, err)
-			}
-			cancelKill()
-
-			if state.runnerID != 0 {
-				removeMu.Lock()
-				removeCtx, cancelRemove := context.WithTimeout(context.WithoutCancel(ctx), timeout)
-				if err := l.jit.RemoveRunner(removeCtx, state.runnerID); err != nil {
-					errCh <- fmt.Errorf("remove runner %s: %w", name, err)
-				}
-				cancelRemove()
-				removeMu.Unlock()
+			if err := l.finishRunner(name, state, -1, nil, true); err != nil {
+				errCh <- err
 			}
 		}(name, state)
 	}
@@ -275,11 +365,63 @@ func (l *Launcher) Shutdown(ctx context.Context) error {
 	for err := range errCh {
 		errs = append(errs, err)
 	}
+	if err := l.retryPendingRegistrations(ctx); err != nil {
+		errs = append(errs, err)
+	}
 	return errors.Join(errs...)
 }
 
-func shortID() string {
+// Reconcile removes registrations for backend resources carrying the complete
+// ownership boundary, then removes the resources. This order leaves a
+// discoverable retry record when GitHub cleanup fails.
+func (l *Launcher) Reconcile(ctx context.Context) (int, error) {
+	reconcileCtx, cancel := context.WithTimeout(ctx, l.cleanupDuration())
+	defer cancel()
+	return l.reconcile(reconcileCtx)
+}
+
+func (l *Launcher) reconcile(ctx context.Context) (int, error) {
+	store := backend.OwnedRunnerStoreFor(l.be)
+	if store == nil {
+		return 0, fmt.Errorf("backend %q does not support scale-set ownership reconciliation", l.be.Name())
+	}
+
+	owned, err := store.ListOwnedRunners(ctx, l.opts.Ownership)
+	if err != nil {
+		return 0, fmt.Errorf("list owned runners: %w", err)
+	}
+
+	l.mu.Lock()
+	activeResources := make(map[string]struct{}, len(l.running))
+	for _, state := range l.running {
+		activeResources[state.handle.ID()] = struct{}{}
+	}
+	l.mu.Unlock()
+
+	reconciled := 0
+	var errs []error
+	for _, runner := range owned {
+		if _, active := activeResources[runner.ResourceID]; active {
+			continue
+		}
+		if err := l.removeRunner(ctx, runner.RunnerID); err != nil {
+			errs = append(errs, fmt.Errorf("remove registration for %s: %w", runner.Name, err))
+			continue
+		}
+		removeErr := store.RemoveOwnedRunner(ctx, runner.ResourceID)
+		if removeErr != nil {
+			errs = append(errs, fmt.Errorf("remove backend runner %s: %w", runner.Name, removeErr))
+			continue
+		}
+		reconciled++
+	}
+	return reconciled, errors.Join(errs...)
+}
+
+func shortID() (string, error) {
 	var b [8]byte
-	_, _ = rand.Read(b[:])
-	return hex.EncodeToString(b[:])
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b[:]), nil
 }

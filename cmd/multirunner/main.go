@@ -16,7 +16,6 @@ import (
 
 	"github.com/kardianos/service"
 	"github.com/spf13/cobra"
-	"golang.org/x/sync/errgroup"
 
 	"github.com/GerardSmit/multirunner/internal/autoscale"
 	"github.com/GerardSmit/multirunner/internal/backend"
@@ -26,7 +25,6 @@ import (
 	"github.com/GerardSmit/multirunner/internal/github"
 	"github.com/GerardSmit/multirunner/internal/metrics"
 	"github.com/GerardSmit/multirunner/internal/pool"
-	scalesetmode "github.com/GerardSmit/multirunner/internal/scaleset"
 	"github.com/GerardSmit/multirunner/internal/vmview"
 	"github.com/GerardSmit/multirunner/internal/webhook"
 	"github.com/GerardSmit/multirunner/internal/winsetup"
@@ -503,6 +501,10 @@ func runOrchestrator(ctx context.Context, configPath string, interactive, instal
 
 	// Metrics + lifecycle hooks (served only when a listen addr is set).
 	m := metrics.New()
+	var reportScaleSetState scaleSetStateReporter
+	if cfg.Provisioning.IsScaleset() {
+		reportScaleSetState = newScaleSetHealthReporter(m, cfg.Pools)
+	}
 	if cfg.Metrics.Listen != "" {
 		go func() {
 			if err := m.Serve(ctx, cfg.Metrics.Listen, logger); err != nil {
@@ -545,7 +547,7 @@ func runOrchestrator(ctx context.Context, configPath string, interactive, instal
 	logger.Info("orchestrator running", "mode", cfg.Provisioning)
 	switch {
 	case cfg.Provisioning.IsScaleset():
-		err = runScaleset(ctx, cfg, scaleSetPools, hooks, logger)
+		err = runScaleset(ctx, cfg, scaleSetPools, hooks, reportScaleSetState, logger)
 	case cfg.Provisioning.IsAutoscale():
 		err = runAutoscale(ctx, cfg, ghProvider, launchers, logger)
 	default:
@@ -560,70 +562,6 @@ func runOrchestrator(ctx context.Context, configPath string, interactive, instal
 	}
 	logger.Info("shutdown complete")
 	return nil
-}
-
-// scaleSetPool is everything the scaleset mode needs to launch runners for one
-// pool. It deliberately skips pool.Launcher, because in this mode the JIT
-// config comes from the scale set session rather than from generate-jitconfig.
-type scaleSetPool struct {
-	cfg    config.Pool
-	be     backend.Backend
-	image  string
-	env    map[string]string
-	mounts []backend.Mount
-}
-
-// runScaleset holds one long-poll session per pool and provisions runners as
-// GitHub reports demand. Each pool has its own scale set, because a scale set
-// carries one label set and therefore one runner OS.
-func runScaleset(ctx context.Context, cfg *config.Config, pools []scaleSetPool, hooks pool.Hooks, logger *slog.Logger) error {
-	target, err := scalesetmode.TargetURL(cfg.GitHub.URL, string(cfg.GitHub.Scope), cfg.GitHub.Owner, cfg.GitHub.Repo)
-	if err != nil {
-		return err
-	}
-
-	clientOpts := scalesetmode.ClientOptions{
-		TargetURL:      target,
-		PAT:            cfg.Auth.PAT,
-		AppID:          cfg.Auth.AppID,
-		InstallationID: cfg.Auth.InstallationID,
-		PrivateKeyPath: cfg.Auth.PrivateKeyPath,
-	}
-
-	g, gctx := errgroup.WithContext(ctx)
-	for _, p := range pools {
-		p := p
-		g.Go(func() error {
-			client, err := scalesetmode.NewClient(clientOpts)
-			if err != nil {
-				return err
-			}
-			return scalesetmode.Run(gctx, client, p.be, scalesetmode.SessionOptions{
-				Name:        p.cfg.ScaleSet,
-				RunnerGroup: p.cfg.RunnerGroup,
-				Labels:      p.cfg.Labels,
-				Launch: scalesetmode.Options{
-					Image:      p.image,
-					WorkFolder: p.cfg.WorkFolder,
-					Labels:     p.cfg.Labels,
-					Env:        p.env,
-					Mounts:     p.mounts,
-					MaxRunners: p.cfg.Size,
-					OnStart: func() {
-						if hooks.OnStart != nil {
-							hooks.OnStart(p.cfg.Name)
-						}
-					},
-					OnStop: func(code int, err error) {
-						if hooks.OnStop != nil {
-							hooks.OnStop(p.cfg.Name, code, err)
-						}
-					},
-				},
-			}, logger.With("pool", p.cfg.Name))
-		})
-	}
-	return g.Wait()
 }
 
 func runQEMUHousekeeping(ctx context.Context, cfg *config.Config, logger *slog.Logger) error {
@@ -864,7 +802,7 @@ func checkActionsEnabled(ctx context.Context, cfg *config.Config) error {
 			len(disabled), len(results), strings.Join(disabled, ", "))
 	}
 	if len(disabled) > 0 || len(incomplete) > 0 {
-		return fmt.Errorf("Actions checks failed: %d disabled, %d incomplete", len(disabled), len(incomplete))
+		return fmt.Errorf("actions checks failed: %d disabled, %d incomplete", len(disabled), len(incomplete))
 	}
 	return nil
 }

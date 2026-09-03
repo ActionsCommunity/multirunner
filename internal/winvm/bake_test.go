@@ -471,7 +471,7 @@ func TestToolsHashValidatesConfiguredIdentities(t *testing.T) {
 		t.Fatalf("matching ISO checksum: %v", err)
 	}
 	if _, err := ToolsHash(BakeOptions{WindowsISO: iso, WindowsISOSHA256: strings.Repeat("0", 64)}); err == nil ||
-		!strings.Contains(err.Error(), "Windows ISO SHA256 mismatch") {
+		!strings.Contains(err.Error(), "windows ISO SHA256 mismatch") {
 		t.Fatalf("mismatched ISO checksum error = %v", err)
 	}
 	if _, err := ToolsHash(BakeOptions{WindowsISO: iso, RunnerVersion: "1.2.3"}); err == nil ||

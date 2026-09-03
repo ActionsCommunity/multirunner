@@ -2,12 +2,95 @@ package winvm
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
 	"path/filepath"
 	"time"
 )
+
+type qmpResponse struct {
+	Return json.RawMessage `json:"return"`
+	Error  *struct {
+		Class string `json:"class"`
+		Desc  string `json:"desc"`
+	} `json:"error"`
+}
+
+type qmpName struct {
+	Name string `json:"name"`
+}
+
+// QMPQuitNamed stops only the QEMU process that reports the expected VM name.
+// The QMP endpoint disappears with the process, avoiding unsafe PID-only kills
+// during restart reconciliation.
+func QMPQuitNamed(ctx context.Context, addr, expectedName string) error {
+	dialer := net.Dialer{Timeout: 15 * time.Second}
+	conn, err := dialer.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return fmt.Errorf("dial qmp: %w", err)
+	}
+	defer conn.Close()
+	stopClose := context.AfterFunc(ctx, func() {
+		_ = conn.Close()
+	})
+	defer stopClose()
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(deadline)
+	} else {
+		_ = conn.SetDeadline(time.Now().Add(15 * time.Second))
+	}
+
+	reader := bufio.NewReader(conn)
+	if _, err := reader.ReadString('\n'); err != nil {
+		return fmt.Errorf("qmp greeting: %w", err)
+	}
+	if _, err := qmpExecute(conn, reader, "qmp_capabilities"); err != nil {
+		return fmt.Errorf("qmp capabilities: %w", err)
+	}
+	raw, err := qmpExecute(conn, reader, "query-name")
+	if err != nil {
+		return fmt.Errorf("query qemu name: %w", err)
+	}
+	var identity qmpName
+	if err := json.Unmarshal(raw, &identity); err != nil {
+		return fmt.Errorf("decode qemu name: %w", err)
+	}
+	if identity.Name != expectedName {
+		return fmt.Errorf("qemu identity mismatch: got %q, want %q", identity.Name, expectedName)
+	}
+	if _, err := qmpExecute(conn, reader, "quit"); err != nil {
+		return fmt.Errorf("quit qemu: %w", err)
+	}
+	return nil
+}
+
+func qmpExecute(conn net.Conn, reader *bufio.Reader, command string) (json.RawMessage, error) {
+	request, err := json.Marshal(map[string]string{"execute": command})
+	if err != nil {
+		return nil, err
+	}
+	if _, err := conn.Write(append(request, '\n')); err != nil {
+		return nil, err
+	}
+	for {
+		line, err := reader.ReadBytes('\n')
+		if err != nil {
+			return nil, err
+		}
+		var response qmpResponse
+		if err := json.Unmarshal(line, &response); err != nil {
+			return nil, err
+		}
+		if response.Error != nil {
+			return nil, fmt.Errorf("%s: %s", response.Error.Class, response.Error.Desc)
+		}
+		if response.Return != nil {
+			return response.Return, nil
+		}
+	}
+}
 
 // QMPScreenshot connects to a QEMU QMP endpoint and writes a PNG screenshot of
 // the guest display to outPath. Used to observe headless VM installs.
