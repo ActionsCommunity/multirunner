@@ -1,129 +1,238 @@
-# Full Linux E2E: boot multirunner on a GitHub-hosted runner, have it provision
-# an ephemeral self-hosted runner against the target repo, dispatch a workload,
-# and assert the job runs to success.
+# Privileged runner conformance extends the original e2e-linux entry point.
+# It has no pull request trigger and runs only trusted repository revisions.
 #
-# Requires secret MR_E2E_PAT — a token with Administration:write (register
-# runners) + Actions:write (dispatch) on the TARGET repo. Manual trigger only.
-# Target defaults to this repo (e2e-target.yml); override with repo variables
-# E2E_REPO (e.g. GerardSandbox/mr-win-e2e) and E2E_WORKFLOW (e.g. ci-linux.yml).
+# Privileged setup:
+# MR_E2E_PAT secret: fine-grained token with Actions:write,
+# Administration:write, and Contents:read on only the target repositories.
+# MR_CONFORMANCE_TARGETS variable:
+# [{"repository":"ActionsCommunity/multirunner","ref":"main"},{"repository":"owner/second-target","ref":"main"}]
+# MR_CONFORMANCE_TRUSTED_REF variable: trusted branch ref, defaults to
+# refs/heads/main. Manual dispatches from any other ref fail before token use.
+# MR_WINDOWS_HOST_RUNS_ON variable: JSON labels for a trusted Windows container
+# host, for example ["self-hosted","windows","multirunner-host"].
+# Each target must install this repository's e2e-target.yml on its selected
+# protected branch.
+# A complete scheduled matrix and its uploaded reports are the release gate.
 name: e2e-linux
 
 on:
+  schedule:
+    - cron: "17 6 * * 1"
   workflow_dispatch:
 
-jobs:
-  e2e:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    env:
-      # Target repo + workload to drive. Default to THIS repo's e2e-target; set
-      # repo variables E2E_REPO / E2E_WORKFLOW to point at another repo (e.g. a
-      # sandbox the secret PAT is scoped to) and its self-hosted-linux workflow.
-      REPO: ${{ vars.E2E_REPO || github.repository }}
-      WORKFLOW: ${{ vars.E2E_WORKFLOW || 'e2e-target.yml' }}
-      GITHUB_PAT: ${{ secrets.MR_E2E_PAT }}
-      GH_TOKEN: ${{ secrets.MR_E2E_PAT }}
-      IMAGE: gerardsmit/multirunner-runner-linux:latest
-    steps:
-      - uses: actions/checkout@v4
+permissions:
+  contents: read
 
-      - uses: actions/setup-go@v5
+concurrency:
+  group: runner-conformance-privileged
+  cancel-in-progress: false
+
+jobs:
+  privileged-linux:
+    if: >-
+      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
+      github.repository == 'ActionsCommunity/multirunner' &&
+      github.ref == (vars.MR_CONFORMANCE_TRUSTED_REF || 'refs/heads/main') &&
+      vars.MR_CONFORMANCE_TARGETS != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        cache_mode: [disabled, enabled]
+    env:
+      MR_TARGETS: ${{ vars.MR_CONFORMANCE_TARGETS }}
+      MR_PLATFORM: linux
+      MR_BACKEND: docker
+      MR_DOCKER_HOST: unix:///var/run/docker.sock
+      MR_IMAGE: gerardsmit/multirunner-runner-linux:node
+      MR_RUNNER_LABEL: mr-conformance-linux-${{ matrix.cache_mode }}-${{ github.run_id }}
+      MR_RUNNER_PREFIX: mr-conformance-linux-${{ matrix.cache_mode }}-${{ github.run_id }}
+      MR_REPORT: runner-conformance-linux-${{ matrix.cache_mode }}.json
+      MR_CACHE_MODE: ${{ matrix.cache_mode }}
+      MR_QUEUE_LIMIT: 3m
+      MR_TRUSTED_REF: ${{ vars.MR_CONFORMANCE_TRUSTED_REF || 'refs/heads/main' }}
+      DOCKER_HOST: unix:///var/run/docker.sock
+    steps: &privileged_steps
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
           cache: true
 
-      - name: Guard — secret present
+      - name: Build conformance binaries
+        shell: pwsh
         run: |
-          if [ -z "${GITHUB_PAT}" ]; then
-            echo "::error::MR_E2E_PAT secret is not set; add it to run this E2E."
-            exit 1
-          fi
+          $ErrorActionPreference = 'Stop'
+          $extension = if ($IsWindows) { '.exe' } else { '' }
+          go build -o "multirunner$extension" ./cmd/multirunner
+          go build -o "conformance-orchestrator$extension" ./testdata/conformance/orchestrator
 
-      - name: Build multirunner
-        run: go build -o multirunner ./cmd/multirunner
-
-      - name: Pull runner image
-        run: docker pull "$IMAGE"
-
-      - name: Write config
+      - name: Validate trusted configuration
+        shell: pwsh
+        env:
+          MR_CONFORMANCE_PAT: ${{ secrets.MR_E2E_PAT }}
         run: |
-          owner="${REPO%/*}"; repo="${REPO#*/}"
-          cat > e2e.yaml <<EOF
-          github:
-            scope: repo
-            owner: ${owner}
-            repo: ${repo}
-          auth:
-            pat: "\${GITHUB_PAT}"
-          provisioning: pool
-          cache:
-            enabled: false
-          git_cache:
-            mode: "off"
-          pools:
-            - name: linux
-              os: linux
-              size: 1
-              image: "${IMAGE}"
-              labels: [self-hosted, linux, x64]
-              docker:
-                host: "unix:///var/run/docker.sock"
-          log:
-            level: debug
-            format: text
-          EOF
-          cat e2e.yaml
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:MR_CONFORMANCE_PAT)) {
+              throw "MR_E2E_PAT is missing. Configure the least-privilege target token."
+          }
+          Write-Output "::add-mask::$env:MR_CONFORMANCE_PAT"
+          $extension = if ($IsWindows) { '.exe' } else { '' }
+          & "./conformance-orchestrator$extension" validate
 
-      - name: Run E2E
+      - name: Write multirunner configuration
+        shell: pwsh
         run: |
-          set -euo pipefail
-          api() { curl -fsSL -H "Authorization: Bearer ${GITHUB_PAT}" -H "X-GitHub-Api-Version: 2022-11-28" "$@"; }
+          $ErrorActionPreference = 'Stop'
+          $targets = @($env:MR_TARGETS | ConvertFrom-Json)
+          $cacheEnabled = ($env:MR_CACHE_MODE -eq 'enabled').ToString().ToLowerInvariant()
+          $cachePath = (
+              Join-Path $env:RUNNER_TEMP "multirunner-cache-$env:MR_CACHE_MODE-$env:GITHUB_RUN_ID"
+          ).Replace('\', '/')
+          $config = @('github:', '  scope: repos', '  repos:')
+          $config += $targets | ForEach-Object { "    - `"$($_.repository)`"" }
+          $config += @(
+              'auth:',
+              '  pat: ${MR_CONFORMANCE_PAT}',
+              'provisioning: autoscale',
+              'webhook:',
+              '  poll_interval_sec: 5',
+              'cache:',
+              "  enabled: $cacheEnabled",
+              '  mode: local-server',
+              "  path: `"$cachePath`"",
+              '  advertise_url: "http://host.docker.internal:3000"',
+              'git_cache:',
+              '  mode: "off"',
+              'pools:',
+              '  - name: conformance',
+              "    os: $env:MR_PLATFORM",
+              "    backend: $env:MR_BACKEND",
+              "    size: $($targets.Count)",
+              "    image: `"$env:MR_IMAGE`"",
+              "    labels: [self-hosted, $env:MR_PLATFORM, x64, $env:MR_RUNNER_LABEL]",
+              "    name_prefix: `"$env:MR_RUNNER_PREFIX`"",
+              '    docker:',
+              "      host: `"$env:MR_DOCKER_HOST`"",
+              'log:',
+              '  level: debug',
+              '  format: text'
+          )
+          $config | Set-Content -Encoding utf8NoBOM multirunner-conformance.yaml
 
-          # Baseline: newest existing e2e-target run id (so we can detect the new one).
-          before=$(api "https://api.github.com/repos/${REPO}/actions/workflows/${WORKFLOW}/runs?per_page=1" | jq -r '.workflow_runs[0].id // 0')
-          echo "baseline e2e-target run id: $before"
+      - name: Start multirunner
+        shell: pwsh
+        env:
+          MR_CONFORMANCE_PAT: ${{ secrets.MR_E2E_PAT }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $extension = if ($IsWindows) { '.exe' } else { '' }
+          $process = Start-Process `
+            -FilePath (Resolve-Path "./multirunner$extension") `
+            -ArgumentList @('run', '--config', 'multirunner-conformance.yaml') `
+            -RedirectStandardOutput multirunner.stdout.log `
+            -RedirectStandardError multirunner.stderr.log `
+            -PassThru
+          $process.Id | Set-Content multirunner.pid
+          Start-Sleep -Seconds 3
+          if ($process.HasExited) {
+              throw "multirunner exited during startup"
+          }
 
-          # Start the orchestrator.
-          ./multirunner run --config e2e.yaml > mr.log 2>&1 &
-          MRPID=$!
-          cleanup() { kill $MRPID 2>/dev/null || true; echo "=== multirunner log ==="; cat mr.log; }
-          trap cleanup EXIT
+      - name: Dispatch and verify target workloads
+        shell: pwsh
+        env:
+          MR_CONFORMANCE_PAT: ${{ secrets.MR_E2E_PAT }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $extension = if ($IsWindows) { '.exe' } else { '' }
+          & "./conformance-orchestrator$extension" run
 
-          # Wait for an ephemeral runner to come online.
-          echo "waiting for a self-hosted runner to register..."
-          for i in $(seq 1 40); do
-            online=$(api "https://api.github.com/repos/${REPO}/actions/runners" \
-              | jq -r '[.runners[] | select(.status=="online")] | length')
-            [ "${online:-0}" -ge 1 ] && { echo "runner online"; break; }
-            sleep 5
-          done
-          if [ "${online:-0}" -lt 1 ]; then echo "::error::no runner came online"; exit 1; fi
+      - name: Stop multirunner and sanitize logs
+        if: always()
+        shell: pwsh
+        env:
+          MR_CONFORMANCE_PAT: ${{ secrets.MR_E2E_PAT }}
+        run: |
+          $ErrorActionPreference = 'Continue'
+          if (Test-Path multirunner.pid) {
+              $processID = [int](Get-Content multirunner.pid)
+              Stop-Process -Id $processID -ErrorAction SilentlyContinue
+              Wait-Process -Id $processID -Timeout 30 -ErrorAction SilentlyContinue
+          }
+          foreach ($path in @('multirunner.stdout.log', 'multirunner.stderr.log')) {
+              if (Test-Path $path) {
+                  $content = Get-Content $path -Raw
+                  if (-not [string]::IsNullOrEmpty($env:MR_CONFORMANCE_PAT)) {
+                      $content = $content.Replace($env:MR_CONFORMANCE_PAT, '[REDACTED]')
+                  }
+                  $content | Set-Content -Encoding utf8NoBOM $path
+                  Get-Content $path
+              }
+          }
 
-          # Dispatch the workload.
-          api -X POST "https://api.github.com/repos/${REPO}/actions/workflows/${WORKFLOW}/dispatches" \
-            -d '{"ref":"main"}'
-          echo "dispatched ${WORKFLOW} on ${REPO}"
+      - name: Verify owned resource cleanup
+        if: always()
+        shell: pwsh
+        env:
+          MR_CONFORMANCE_PAT: ${{ secrets.MR_E2E_PAT }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $extension = if ($IsWindows) { '.exe' } else { '' }
+          & "./conformance-orchestrator$extension" cleanup
 
-          # Find the new run.
-          runid=0
-          for i in $(seq 1 24); do
-            runid=$(api "https://api.github.com/repos/${REPO}/actions/workflows/${WORKFLOW}/runs?per_page=1" | jq -r '.workflow_runs[0].id // 0')
-            [ "$runid" != "$before" ] && [ "$runid" != "0" ] && break
-            sleep 5
-          done
-          if [ "$runid" = "$before" ] || [ "$runid" = "0" ]; then echo "::error::dispatched run not found"; exit 1; fi
-          echo "e2e-target run id: $runid"
+          if ($env:MR_BACKEND -eq 'containerd') {
+              $names = @(& nerdctl --namespace multirunner ps --all --format '{{.Names}}')
+          } else {
+              $names = @(& docker ps --all --filter label=multirunner=true --format '{{.Names}}')
+          }
+          if ($LASTEXITCODE -ne 0) {
+              throw "container inventory command failed"
+          }
+          $owned = @($names | Where-Object { $_.StartsWith($env:MR_RUNNER_PREFIX, [StringComparison]::Ordinal) })
+          if ($owned.Count -ne 0) {
+              throw "owned containers remain: $($owned -join ',')"
+          }
+          "phase=cleanup containers=0 prefix=$env:MR_RUNNER_PREFIX"
 
-          # Wait for it to finish.
-          for i in $(seq 1 60); do
-            read -r status conclusion < <(api "https://api.github.com/repos/${REPO}/actions/runs/${runid}" | jq -r '.status + " " + (.conclusion // "null")')
-            echo "run status=$status conclusion=$conclusion"
-            [ "$status" = "completed" ] && break
-            sleep 5
-          done
+      - name: Upload conformance evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: host-${{ env.MR_PLATFORM }}-${{ matrix.cache_mode }}-${{ github.run_id }}
+          path: |
+            ${{ env.MR_REPORT }}
+            multirunner.stdout.log
+            multirunner.stderr.log
+          if-no-files-found: warn
 
-          if [ "$conclusion" != "success" ]; then
-            echo "::error::e2e-target concluded: $conclusion"
-            exit 1
-          fi
-          echo "E2E PASSED: runner provisioned + job succeeded"
+  privileged-windows:
+    if: >-
+      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
+      github.repository == 'ActionsCommunity/multirunner' &&
+      github.ref == (vars.MR_CONFORMANCE_TRUSTED_REF || 'refs/heads/main') &&
+      vars.MR_CONFORMANCE_TARGETS != '' &&
+      vars.MR_WINDOWS_HOST_RUNS_ON != ''
+    runs-on: ${{ fromJSON(vars.MR_WINDOWS_HOST_RUNS_ON) }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        cache_mode: [disabled, enabled]
+    env:
+      MR_TARGETS: ${{ vars.MR_CONFORMANCE_TARGETS }}
+      MR_PLATFORM: windows
+      MR_BACKEND: containerd
+      MR_DOCKER_HOST: ${{ vars.MR_WINDOWS_DOCKER_HOST || 'npipe:////./pipe/containerd-containerd' }}
+      MR_IMAGE: gerardsmit/multirunner-runner-windows:dotnet
+      MR_RUNNER_LABEL: mr-conformance-windows-${{ matrix.cache_mode }}-${{ github.run_id }}
+      MR_RUNNER_PREFIX: mr-conformance-windows-${{ matrix.cache_mode }}-${{ github.run_id }}
+      MR_REPORT: runner-conformance-windows-${{ matrix.cache_mode }}.json
+      MR_CACHE_MODE: ${{ matrix.cache_mode }}
+      MR_QUEUE_LIMIT: 5m
+      MR_TRUSTED_REF: ${{ vars.MR_CONFORMANCE_TRUSTED_REF || 'refs/heads/main' }}
+      DOCKER_HOST: ${{ vars.MR_WINDOWS_DOCKER_HOST || 'npipe:////./pipe/containerd-containerd' }}
+    steps: *privileged_steps
