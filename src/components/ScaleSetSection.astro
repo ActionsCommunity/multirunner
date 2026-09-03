@@ -1,0 +1,112 @@
+---
+const scaleSetConfig = `provisioning: scaleset
+
+github:
+  scope: repo
+  owner: my-org
+  repo: my-repo
+
+pools:
+  - name: linux-pool
+    os: linux
+    size: 4
+    scale_set: multirunner-linux
+    runner_group: Default
+    labels: [self-hosted, linux, x64]`;
+---
+
+<section class="section scale-set-section" id="scale-sets">
+  <div class="page-shell scale-set-layout">
+    <div class="scale-set-copy">
+      <p class="eyebrow">GitHub Actions runner scale sets</p>
+      <h2>Let GitHub drive runner capacity.</h2>
+      <p class="lead">
+        multirunner is built on the
+        <a href="https://github.com/actions/scaleset"><code>actions/scaleset</code></a>
+        technology. It holds a long-poll session open while GitHub supplies the
+        desired runner count and encoded JIT configuration.
+      </p>
+      <p>
+        This is the same scale-set mechanism used by actions-runner-controller,
+        delivered as one host process without requiring Kubernetes. Docker,
+        Podman, containerd, and QEMU continue through the same execution backends.
+      </p>
+      <ul class="scale-set-benefits">
+        <li><strong>Fast assignments:</strong> receive work in seconds without tuning a poll interval.</li>
+        <li><strong>NAT-safe:</strong> keep an outbound long-poll session with no inbound endpoint.</li>
+        <li><strong>Real capacity:</strong> tell GitHub when the host is saturated instead of dropping requests.</li>
+      </ul>
+    </div>
+    <div class="scale-set-config">
+      <p class="config-label">config.yaml</p>
+      <pre><code>{scaleSetConfig}</code></pre>
+      <p class="config-note">
+        One scale set maps to one target and one label set. Pool <code>size</code>
+        is the maximum capacity advertised to GitHub.
+      </p>
+    </div>
+  </div>
+</section>
+
+<style>
+  .scale-set-section {
+    background: linear-gradient(135deg, rgba(64, 216, 255, 0.08), transparent 42%);
+  }
+
+  .scale-set-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(320px, 0.9fr);
+    gap: clamp(2.5rem, 7vw, 7rem);
+    align-items: start;
+  }
+
+  .scale-set-copy > p:not(.eyebrow) {
+    color: var(--muted);
+  }
+
+  .scale-set-copy .lead {
+    margin: 1.5rem 0 1rem;
+  }
+
+  .scale-set-benefits {
+    display: grid;
+    gap: 0.75rem;
+    margin: 2rem 0 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .scale-set-benefits li {
+    padding: 0.8rem 0;
+    color: var(--muted);
+    border-top: 1px solid var(--line);
+  }
+
+  .scale-set-benefits strong {
+    color: var(--ink);
+  }
+
+  .scale-set-config {
+    min-width: 0;
+  }
+
+  .config-label {
+    margin: 0 0 0.35rem;
+    color: var(--orange);
+    font: 700 0.72rem/1.2 "SFMono-Regular", Consolas, monospace;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .config-note {
+    margin: 0.8rem 0 0;
+    color: var(--dim);
+    font-size: 0.88rem;
+  }
+
+  @media (max-width: 860px) {
+    .scale-set-layout {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>
