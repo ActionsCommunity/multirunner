@@ -224,3 +224,35 @@ func TestAwaitInstallationHonorsContextCancellation(t *testing.T) {
 		t.Fatalf("want context.Canceled, got %v", err)
 	}
 }
+
+// TestOwnAppConnectWritesOwnerOnlyCredentials pins that the App private key and
+// the webhook secret get the same protection as the token sidecar. os.WriteFile's
+// mode argument is ignored on Windows, so writing the most valuable credential in
+// the manifest flow with a plain 0600 left it readable by every local account.
+func TestOwnAppConnectWritesOwnerOnlyCredentials(t *testing.T) {
+	fakeConnect := func(context.Context, ghapp.Options) (*ghapp.Credentials, error) {
+		return &ghapp.Credentials{
+			Slug: "mr", AppID: 1, InstallationID: 2,
+			PEM:           "-----BEGIN RSA PRIVATE KEY-----\nnot-a-real-key\n-----END RSA PRIVATE KEY-----\n",
+			WebhookSecret: "s3cret",
+			HTMLURL:       "https://github.com/apps/mr",
+		}, nil
+	}
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	var out bytes.Buffer
+	if err := runOwnAppConnect(cfgPath, connectFlags{org: "acme"}, failingReader{t}, &out, false, nil, fakeConnect); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, name := range []string{"multirunner-app.private-key.pem", "multirunner-app.webhook-secret"} {
+		path := filepath.Join(dir, name)
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("%s was not written: %v", name, err)
+		}
+		if err := ghapp.CheckOwnerOnly(path); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
