@@ -54,11 +54,19 @@ so scripts fail fast. A `--org` naming a personal account is refused: only an
 organization installation carries `organization_self_hosted_runners`. A `--repo`
 target has no such requirement: its App is installed wherever the repo lives. On success connect writes `auth.client_id` and
 `auth.token_path`, removing `auth.pat` and any installation-App keys. The user
-access and refresh tokens live in a JSON sidecar next to the config at mode 0600
-(`multirunner-user-token.json`); they rotate on refresh and are never inlined
-into the YAML. multirunner refreshes the access token automatically before it
-expires; a failed or expired refresh reports that you must re-run
-`multirunner connect`, and never prints a token. Device auth drives runner scale
+access and refresh tokens live in a JSON sidecar next to the config
+(`multirunner-user-token.json`), restricted to the account that ran connect: mode
+0600 on Unix, and an explicit owner-only DACL on Windows, where the mode is
+ignored. They rotate on refresh and are never inlined into the YAML. Loading a
+sidecar other accounts can read logs a warning rather than failing, since the
+token is already exposed by then. multirunner refreshes the access token
+automatically before it expires; refreshes are serialised across pools and
+processes by an OS lock on `<token_path>.lock`, because GitHub invalidates the
+old pair on every rotation and two refreshes at once would leave one side with a
+dead credential. The lock file stays on disk between refreshes; it is held on an
+open handle, so the kernel releases it if the process dies. A failed or expired
+refresh reports that you must re-run `multirunner connect`, and never prints a
+token. Device auth drives runner scale
 sets: it follows the normal `provisioning: scaleset` default (for non-`repos`
 scopes) as well as `pool`, because a refreshing transport keeps the user access
 token fresh for the life of the long-poll session. Enterprise scope and `scope:
@@ -102,7 +110,7 @@ the App settings and add the `workflow_job` event, which requires
 The command writes `app_id`, `installation_id`, and a private key path while
 removing `auth.pat`. It never prints generated credentials. GitHub returns the
 App's webhook secret exactly once, so connect writes it beside the private key
-at mode 0600 and reports the path; it is not inlined into the YAML. Reference it
+restricted to the connecting account and reports the path; it is not inlined into the YAML. Reference it
 as `webhook.secret: "${VAR}"` and supply the value through the service
 environment. Don't read or relay the private key, the webhook secret, or
 secret-bearing API responses.
