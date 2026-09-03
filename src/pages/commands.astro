@@ -113,7 +113,6 @@ const commands = [
   description="Command and flag reference for the multirunner self-hosted GitHub Actions runner orchestrator."
 >
   <header class="reference-header page-shell">
-    <p class="eyebrow">CLI reference</p>
     <h1>Commands for every runner lifecycle.</h1>
     <p class="lead">
       Start pools, verify backends, connect GitHub authentication, inspect project
@@ -165,7 +164,6 @@ multirunner --config config.yaml &lt;command&gt;</code></pre>
     <div class="command-list">
       {commands.map((command) => (
         <section id={command.name} class="command">
-          <p class="eyebrow">multirunner</p>
           <h2>{command.name}</h2>
           <p>{command.summary}</p>
           <pre><code>{command.usage}</code></pre>
@@ -189,6 +187,7 @@ multirunner --config config.yaml &lt;command&gt;</code></pre>
   .reference-header {
     padding-top: clamp(4rem, 9vw, 7rem);
     padding-bottom: clamp(3rem, 7vw, 5rem);
+    border-bottom: 2px solid var(--ink);
   }
 
   .reference-header h1 {
@@ -206,12 +205,15 @@ multirunner --config config.yaml &lt;command&gt;</code></pre>
 
   .operator-reference {
     max-width: 720px;
-    color: var(--muted);
+    color: var(--steel);
   }
 
   .global-options {
     max-width: 720px;
-    margin-top: 2.5rem;
+    margin-top: var(--space-5);
+    padding: var(--space-4);
+    background: var(--cobalt-soft);
+    border: 2px solid var(--ink);
     scroll-margin-top: 90px;
   }
 
@@ -224,6 +226,7 @@ multirunner --config config.yaml &lt;command&gt;</code></pre>
     display: grid;
     grid-template-columns: 200px minmax(0, 1fr);
     gap: clamp(2rem, 7vw, 7rem);
+    padding-top: var(--space-6);
     padding-bottom: 7rem;
   }
 
@@ -235,10 +238,8 @@ multirunner --config config.yaml &lt;command&gt;</code></pre>
 
   aside > p {
     margin: 0 0 0.75rem;
-    color: var(--dim);
-    font: 700 0.72rem/1.2 "SFMono-Regular", Consolas, monospace;
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
+    color: var(--steel);
+    font: 600 0.72rem/1.2 var(--font-mono);
   }
 
   aside nav {
@@ -246,10 +247,15 @@ multirunner --config config.yaml &lt;command&gt;</code></pre>
   }
 
   aside nav a {
-    padding: 0.28rem 0;
-    color: var(--muted);
+    padding: 0.35rem 0;
+    color: var(--ink);
     overflow-wrap: anywhere;
     text-decoration: none;
+  }
+
+  aside nav a:hover {
+    color: var(--cobalt);
+    text-decoration: underline;
   }
 
   .back-link {
@@ -269,17 +275,17 @@ multirunner --config config.yaml &lt;command&gt;</code></pre>
 
   .command + .command {
     padding-top: 4rem;
-    border-top: 1px solid var(--line);
+    border-top: 2px solid var(--ink);
   }
 
   .command h2 {
-    font-family: "SFMono-Regular", Consolas, monospace;
+    font-family: var(--font-mono);
     font-size: clamp(2rem, 5vw, 3.5rem);
   }
 
-  .command > p:not(.eyebrow) {
+  .command > p {
     max-width: 64ch;
-    color: var(--muted);
+    color: var(--steel);
   }
 
   .command pre {
@@ -288,7 +294,7 @@ multirunner --config config.yaml &lt;command&gt;</code></pre>
 
   .flag-list {
     display: grid;
-    border-top: 1px solid var(--line);
+    border-top: 2px solid var(--ink);
   }
 
   .flag {
@@ -300,7 +306,7 @@ multirunner --config config.yaml &lt;command&gt;</code></pre>
   }
 
   .flag span {
-    color: var(--muted);
+    color: var(--steel);
   }
 
   @media (max-width: 720px) {

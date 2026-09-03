@@ -41,7 +41,8 @@ config.qemu-run.yaml
 
 # Claude / agent state
 .claude/
-/.impeccable/
+/.impeccable/*
+!/.impeccable/design.json
 
 # more binaries
 /cacheserver-linux

@@ -108,6 +108,27 @@ test("landing page documents runner scale sets and all agent skill routers", () 
   }
 });
 
+test("Runner Yard design artifacts use the approved five-color system", () => {
+  const contract = JSON.parse(
+    read("docs/specs/github-pages-site/design/design-contract.json"),
+  );
+  const sidecar = JSON.parse(read(".impeccable/design.json"));
+  const styles = read("src/styles/global.css").toUpperCase();
+  const expectedColors = ["#F3F7FA", "#101C2A", "#174FC4", "#C6400C", "#596978"];
+
+  assert.deepEqual(Object.values(contract.direction.palette), expectedColors);
+  for (const color of expectedColors) {
+    assert.ok(styles.includes(color), `Global styles missing ${color}`);
+    assert.ok(
+      Object.values(sidecar.extensions.colorMeta).some(
+        (entry) => entry.canonical === color,
+      ),
+      `Design sidecar missing ${color}`,
+    );
+  }
+  assert.match(read("DESIGN.md"), /Creative North Star: "The Runner Yard"/);
+});
+
 test("built pages exist and expose every documented public command", () => {
   assert.ok(existsSync("dist/index.html"));
   assert.ok(existsSync("dist/commands/index.html"));
@@ -151,14 +172,15 @@ test("built root-relative links retain the GitHub project prefix", () => {
 
 test("built pages provide keyboard skip navigation and visible focus styling", () => {
   const pages = [read("dist/index.html"), read("dist/commands/index.html")];
-  const layout = read("src/layouts/Layout.astro");
+  const globalStyles = read("src/styles/global.css");
 
   for (const page of pages) {
     assert.match(page, /class="skip-link" href="#main-content"/);
     assert.match(page, /<main id="main-content">/);
   }
-  assert.match(layout, /:focus-visible\s*\{/);
-  assert.match(layout, /outline:\s*3px solid var\(--lime\)/);
+  assert.match(globalStyles, /:focus-visible\s*\{/);
+  assert.match(globalStyles, /outline:\s*3px solid var\(--orange\)/);
+  assert.match(globalStyles, /max-width:\s*520px[\s\S]+nav-mobile-optional/);
   assert.match(read("src/pages/index.astro"), /\.split > \*,[\s\S]+min-width:\s*0/);
   assert.match(
     read("src/components/AgentPluginSection.astro"),
@@ -167,20 +189,31 @@ test("built pages provide keyboard skip navigation and visible focus styling", (
 });
 
 test("every referenced project image and its replacement manifest exists", () => {
-  for (const file of [
-    "public/images/logo.svg",
-    "public/images/og.svg",
-    "public/images/favicon.svg",
-    "public/images/hero-terminal.svg",
-    "public/images/IMAGES.md",
-  ]) {
+  const expectedImages = new Map([
+    ["public/images/logo.png", [512, 512]],
+    ["public/images/og.png", [1200, 630]],
+    ["public/images/favicon.png", [64, 64]],
+    ["src/assets/hero.png", [1536, 1024]],
+  ]);
+
+  for (const [file, expectedDimensions] of expectedImages) {
     assert.ok(existsSync(file), `Missing ${file}`);
+    const image = readFileSync(file);
+    assert.equal(image.subarray(1, 4).toString(), "PNG", `${file} is not PNG`);
+    assert.deepEqual(
+      [image.readUInt32BE(16), image.readUInt32BE(20)],
+      expectedDimensions,
+      `${file} dimensions changed`,
+    );
   }
+  assert.ok(existsSync("public/images/IMAGES.md"));
 
   const layout = read("src/layouts/Layout.astro");
   const home = read("src/pages/index.astro");
-  assert.match(layout, /images\/logo\.svg/);
-  assert.match(layout, /images\/og\.svg/);
-  assert.match(layout, /images\/favicon\.svg/);
-  assert.match(home, /images\/hero-terminal\.svg/);
+  assert.match(layout, /images\/og\.png/);
+  assert.match(layout, /images\/favicon\.png/);
+  assert.match(home, /assets\/hero\.png/);
+  for (const placeholder of ["logo.svg", "og.svg", "favicon.svg", "hero-terminal.svg"]) {
+    assert.equal(existsSync(`public/images/${placeholder}`), false);
+  }
 });

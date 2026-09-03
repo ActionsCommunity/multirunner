@@ -26,7 +26,6 @@ const skills = [
 <section class="section agent-section" id="agent-plugin">
   <div class="page-shell agent-layout">
     <div class="agent-intro">
-      <p class="eyebrow">Agent plugin</p>
       <h2>Operate multirunner with the agent you already use.</h2>
       <p class="lead">
         One self-contained plugin packages shared skills for GitHub Copilot CLI,
@@ -70,7 +69,8 @@ copilot plugin list</code></pre>
 
 <style>
   .agent-section {
-    background: var(--surface);
+    color: var(--paper);
+    background: var(--ink);
   }
 
   .agent-layout {
@@ -80,77 +80,99 @@ copilot plugin list</code></pre>
     align-items: start;
   }
 
-  .agent-intro .lead {
-    margin: 1.5rem 0;
-  }
-
   .agent-intro,
   .skill-directory {
     min-width: 0;
+  }
+
+  .agent-intro h2,
+  .skill-directory h3,
+  .skill-directory code {
+    color: var(--paper);
+  }
+
+  .skill-directory code {
+    padding: 0;
+    background: transparent;
+  }
+
+  .agent-intro .lead {
+    margin: var(--space-4) 0;
+    color: color-mix(in srgb, var(--paper) 80%, var(--steel));
   }
 
   .agent-clients {
     display: flex;
     flex-wrap: wrap;
     gap: 0.5rem;
-    margin-bottom: 2rem;
+    margin-bottom: var(--space-5);
   }
 
   .agent-clients span {
     padding: 0.3rem 0.6rem;
-    color: var(--cyan-soft);
-    border: 1px solid var(--line);
-    font: 700 0.72rem/1.4 "SFMono-Regular", Consolas, monospace;
+    color: var(--paper);
+    border: 1px solid var(--steel);
+    font: 600 0.72rem/1.4 var(--font-mono);
   }
 
   .install-label,
   .directory-label {
     margin: 0 0 0.45rem;
-    color: var(--orange);
-    font: 700 0.72rem/1.2 "SFMono-Regular", Consolas, monospace;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
+    color: color-mix(in srgb, var(--orange) 42%, var(--paper));
+    font: 600 0.72rem/1.2 var(--font-mono);
+  }
+
+  .agent-intro pre {
+    color: var(--ink);
+    background: var(--paper);
+    border-color: var(--paper);
+    box-shadow: 6px 6px 0 var(--orange);
   }
 
   .safety-note {
-    margin: 1rem 0 0;
-    color: var(--dim);
+    margin: var(--space-4) 0 0;
+    color: color-mix(in srgb, var(--paper) 65%, var(--steel));
     font-size: 0.88rem;
   }
 
   .skill-directory ol {
-    margin: 0 0 1.5rem;
+    margin: 0 0 var(--space-4);
     padding: 0;
     list-style: none;
-    border-top: 1px solid var(--line);
+    border-top: 2px solid var(--paper);
   }
 
   .skill-directory li {
     display: grid;
     grid-template-columns: 2rem minmax(0, 1fr);
-    gap: 1rem;
-    padding: 1rem 0;
-    border-bottom: 1px solid var(--line);
+    gap: var(--space-3);
+    padding: var(--space-3) 0;
+    border-bottom: 1px solid var(--steel);
   }
 
   .skill-index {
     padding-top: 0.25rem;
-    color: var(--dim);
-    font: 700 0.72rem/1.2 "SFMono-Regular", Consolas, monospace;
+    color: color-mix(in srgb, var(--orange) 42%, var(--paper));
+    font: 600 0.72rem/1.2 var(--font-mono);
   }
 
   .skill-directory h3 {
-    margin: 0 0 0.35rem;
+    margin-bottom: 0.35rem;
     font-size: 1rem;
   }
 
   .skill-directory p {
     margin: 0;
-    color: var(--muted);
+    color: color-mix(in srgb, var(--paper) 76%, var(--steel));
   }
 
   .skill-directory > a {
-    font-weight: 750;
+    color: var(--paper);
+    font-weight: 700;
+  }
+
+  .skill-directory > a:hover {
+    color: color-mix(in srgb, var(--orange) 42%, var(--paper));
   }
 
   @media (max-width: 860px) {
