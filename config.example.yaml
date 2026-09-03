@@ -19,14 +19,17 @@ auth:
   # installation_id: 78901234
   # private_key_path: "C:/path/app.pem"
 
-provisioning: "pool"             # pool | autoscale | scaleset  (webhook = alias for autoscale)
-#   pool      : keep N runners idle (zero inbound; works behind NAT) — default
+provisioning: "scaleset"         # pool | autoscale | scaleset  (webhook = alias for autoscale)
+#   Leaving this unset selects scaleset, except for scope=repos, which no single
+#   scale set can cover and which falls back to pool. An explicit value always wins.
+#   pool      : keep N runners idle (zero inbound; works behind NAT)
 #   autoscale : launch runners on demand (poll queued jobs + optional webhook)
 #   scaleset  : let GitHub drive capacity through a runner scale set. A long-poll
 #               session reports the desired runner count, so assignments arrive in
 #               seconds with no poll interval to tune and no inbound endpoint.
-#               This is the same mechanism actions-runner-controller uses.
-#               Needs scope repo, org or enterprise, and a `scale_set` per pool.
+#               This is the same mechanism actions-runner-controller uses. — default
+#               Needs scope repo, org or enterprise. `scale_set` defaults to the
+#               pool name, so it only has to be set to reuse an existing scale set.
 
 # Autoscale tuning (provisioning: autoscale). Polling is outbound-only (NAT-safe)
 # and works for scope=repo or repos; the optional webhook needs GitHub to reach `listen`
@@ -85,10 +88,11 @@ pools:
     labels: [self-hosted, linux, x64]
     work_folder: _work
     name_prefix: multirunner
-    # Required when provisioning: scaleset. Each pool needs its own scale set,
-    # because a scale set carries one label set and therefore one runner OS.
-    # The name is reused across restarts, so restarting does not churn
-    # registrations or strand jobs already queued against it.
+    # Used when provisioning: scaleset. Each pool needs its own scale set,
+    # because a scale set carries one label set and therefore one runner OS, so
+    # this defaults to the pool name. The name is reused across restarts, so
+    # restarting does not churn registrations or strand jobs already queued
+    # against it. Set it explicitly to adopt a scale set named something else.
     # scale_set: "multirunner-linux"
     # runner_group: "Default"
     docker:

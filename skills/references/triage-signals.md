@@ -30,8 +30,10 @@ diagnosing. All come from the current source; redact values before sharing.
   pools report `UNREACHABLE` spuriously; re-run with the hung pool isolated.
 - For `repo`/`repos` scope, Actions disabled is a hard failure; no `self-hosted`
   workflow found is a note only, failing only when the scan was incomplete.
-- For `org`/`enterprise` scope, `doctor` performs no GitHub call at all: bad
-  credentials pass.
+- For `org`/`enterprise` scope, `doctor` lists one runner to prove the
+  credential reaches the runner-admin API, reporting a rejected credential or
+  missing scope apart from an unknown owner or enterprise slug. An empty runner
+  list passes; routing and ingress stay unproven.
 - The git-configuration audit runs only when `git_cache` is enabled and is
   advisory; it never fails preflight.
 - For a QEMU pool it only locates `qemu-system-x86_64`/`qemu-img` and stats the
