@@ -17,6 +17,7 @@ import (
 	"github.com/google/go-github/v66/github"
 
 	"github.com/GerardSmit/multirunner/internal/config"
+	"github.com/GerardSmit/multirunner/internal/ghapp"
 )
 
 // Client talks to GitHub for a single configured scope.
@@ -67,11 +68,24 @@ func New(ctx context.Context, gh config.GitHub, auth config.Auth) (*Client, erro
 }
 
 func authHTTPClient(ctx context.Context, gh config.GitHub, auth config.Auth) (*http.Client, error) {
+	origin, err := apiOrigin(gh.URL)
+	if err != nil {
+		return nil, err
+	}
+
 	if auth.PAT != "" {
 		return &http.Client{
 			Timeout:   30 * time.Second,
-			Transport: &patTransport{token: auth.PAT, base: http.DefaultTransport},
+			Transport: &patTransport{token: auth.PAT, base: http.DefaultTransport, origin: origin},
 		}, nil
+	}
+
+	if auth.IsDeviceApp() {
+		tr, err := newDeviceTransport(gh, auth, origin)
+		if err != nil {
+			return nil, err
+		}
+		return &http.Client{Timeout: 30 * time.Second, Transport: tr}, nil
 	}
 
 	apiBase := "https://api.github.com/"
@@ -83,18 +97,97 @@ func authHTTPClient(ctx context.Context, gh config.GitHub, auth config.Auth) (*h
 		return nil, fmt.Errorf("github app key: %w", err)
 	}
 	itr.BaseURL = strings.TrimRight(apiBase, "/")
-	return &http.Client{Timeout: 30 * time.Second, Transport: itr}, nil
+	return &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: &originTransport{base: itr, origin: origin},
+	}, nil
 }
 
-// patTransport injects a bearer token on every request.
+// originTransport stops a wrapped transport that adds credentials of its own -
+// ghinstallation mints and attaches an installation token per request - from
+// sending them anywhere but the configured API origin.
+type originTransport struct {
+	base   http.RoundTripper
+	origin string
+}
+
+func (t *originTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if sameOrigin(req, t.origin) {
+		return t.base.RoundTrip(req)
+	}
+	r := req.Clone(req.Context())
+	r.Header.Del("Authorization")
+	return http.DefaultTransport.RoundTrip(r)
+}
+
+// apiOrigin returns the single scheme+host that may receive our credentials.
+// Go's http.Client drops the Authorization header when a redirect crosses
+// origins, but a RoundTripper runs per hop and would put it straight back, so
+// each transport - including the wrapper around ghinstallation, which mints an
+// installation token per request - checks the destination itself.
+func apiOrigin(ghURL string) (string, error) {
+	if isDotCom(ghURL) {
+		return "https://api.github.com", nil
+	}
+	u, err := url.Parse(strings.TrimRight(ghURL, "/"))
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "", fmt.Errorf("github.url %q is not a valid URL", ghURL)
+	}
+	return strings.ToLower(u.Scheme + "://" + u.Host), nil
+}
+
+// sameOrigin reports whether req is going to the origin our credentials belong
+// to. Anything else — a redirect to a raw-content host, an attacker-controlled
+// Location — must be sent unauthenticated.
+func sameOrigin(req *http.Request, origin string) bool {
+	return strings.EqualFold(req.URL.Scheme+"://"+req.URL.Host, origin)
+}
+
+// patTransport injects a bearer token on requests to the configured API origin.
 type patTransport struct {
-	token string
-	base  http.RoundTripper
+	token  string
+	base   http.RoundTripper
+	origin string
 }
 
 func (t *patTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	r := req.Clone(req.Context())
+	if !sameOrigin(req, t.origin) {
+		r.Header.Del("Authorization")
+		return t.base.RoundTrip(r)
+	}
 	r.Header.Set("Authorization", "Bearer "+t.token)
+	return t.base.RoundTrip(r)
+}
+
+// deviceTransport authenticates requests with a GitHub App device-flow user
+// access token, refreshing it (via the shared ghapp.TokenRefresher) when expired
+// and persisting the rotated token to its sidecar.
+type deviceTransport struct {
+	base      http.RoundTripper
+	refresher *ghapp.TokenRefresher
+	origin    string
+}
+
+func newDeviceTransport(gh config.GitHub, auth config.Auth, origin string) (*deviceTransport, error) {
+	refresher, err := ghapp.NewTokenRefresher(auth.ClientID, gh.URL, auth.TokenPath)
+	if err != nil {
+		return nil, err
+	}
+	return &deviceTransport{base: http.DefaultTransport, refresher: refresher, origin: origin}, nil
+}
+
+func (t *deviceTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	r := req.Clone(req.Context())
+	if !sameOrigin(req, t.origin) {
+		r.Header.Del("Authorization")
+		return t.base.RoundTrip(r)
+	}
+	access, err := t.refresher.AccessToken(req.Context())
+	if err != nil {
+		return nil, err
+	}
+	r.Header.Set("Authorization", "Bearer "+access)
 	return t.base.RoundTrip(r)
 }
 
@@ -265,6 +358,37 @@ func (c *Client) queuedJobsForRun(ctx context.Context, runID int64) ([][]string,
 	return labels, nil
 }
 
+// CheckRunnerAccess lists one runner to prove the configured credential can
+// reach the runner-admin API for this scope. Registration is the first thing
+// that fails when the token is wrong, and it fails on the runner host rather
+// than on the operator's terminal, so proving reachability up front turns a
+// silent misconfiguration into an immediate error. 401/403 and 404 have
+// different fixes (credential/scope versus owner or enterprise slug), so they
+// are reported apart.
+func (c *Client) CheckRunnerAccess(ctx context.Context) error {
+	path, err := c.runnersBasePath()
+	if err != nil {
+		return err
+	}
+	req, err := c.gh.NewRequest(http.MethodGet, path+"?per_page=1", nil)
+	if err != nil {
+		return fmt.Errorf("build list-runners request: %w", err)
+	}
+	resp, err := c.gh.Do(ctx, req, nil)
+	if err == nil {
+		return nil
+	}
+	if resp != nil {
+		switch resp.StatusCode {
+		case http.StatusUnauthorized, http.StatusForbidden:
+			return fmt.Errorf("credentials cannot manage %s runners for %q: %w", c.scope, c.owner, err)
+		case http.StatusNotFound:
+			return fmt.Errorf("no %s %q visible to these credentials: %w", c.scope, c.owner, err)
+		}
+	}
+	return fmt.Errorf("list-runners (%s): %w", c.scope, err)
+}
+
 // Scope reports the configured scope.
 func (c *Client) Scope() config.Scope { return c.scope }
 
@@ -326,19 +450,30 @@ func (c *Client) RepoFile(ctx context.Context, p string) ([]byte, error) {
 	return []byte(s), nil
 }
 
-// runnersPath builds the actions/runners sub-path for the configured scope.
-func (c *Client) runnersPath(action string) (string, error) {
+// runnersBasePath builds the actions/runners collection path for the configured
+// scope. runnersPath appends an action to it; callers that need the collection
+// itself must use this, since a trailing slash is a different endpoint.
+func (c *Client) runnersBasePath() (string, error) {
 	switch c.scope {
 	case config.ScopeRepo:
-		return fmt.Sprintf("repos/%s/%s/actions/runners/%s",
-			url.PathEscape(c.owner), url.PathEscape(c.repo), action), nil
+		return fmt.Sprintf("repos/%s/%s/actions/runners",
+			url.PathEscape(c.owner), url.PathEscape(c.repo)), nil
 	case config.ScopeOrg:
-		return fmt.Sprintf("orgs/%s/actions/runners/%s", url.PathEscape(c.owner), action), nil
+		return fmt.Sprintf("orgs/%s/actions/runners", url.PathEscape(c.owner)), nil
 	case config.ScopeEnterprise:
-		return fmt.Sprintf("enterprises/%s/actions/runners/%s", url.PathEscape(c.owner), action), nil
+		return fmt.Sprintf("enterprises/%s/actions/runners", url.PathEscape(c.owner)), nil
 	default:
 		return "", fmt.Errorf("unsupported scope %q", c.scope)
 	}
+}
+
+// runnersPath builds the actions/runners sub-path for the configured scope.
+func (c *Client) runnersPath(action string) (string, error) {
+	base, err := c.runnersBasePath()
+	if err != nil {
+		return "", err
+	}
+	return base + "/" + action, nil
 }
 
 func isDotCom(rawURL string) bool {

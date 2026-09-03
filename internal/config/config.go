@@ -143,16 +143,28 @@ func (gh GitHub) RepoTargets() []RepoRef {
 	}
 }
 
-// Auth holds either a PAT or GitHub App credentials. PAT takes precedence when set.
+// Auth holds a PAT, GitHub App installation credentials, or a GitHub App
+// device-flow user token. PAT takes precedence when set.
 type Auth struct {
 	PAT            string `yaml:"pat"`
 	AppID          int64  `yaml:"app_id"`
 	InstallationID int64  `yaml:"installation_id"`
 	PrivateKeyPath string `yaml:"private_key_path"`
+	// ClientID is the GitHub App client id for the device-flow user token; empty
+	// means the shared App's default (ghapp.DefaultClientID). Not a secret.
+	ClientID string `yaml:"client_id"`
+	// TokenPath points at the JSON sidecar holding the device-flow user access
+	// and refresh tokens. Tokens rotate on refresh, so they live here, never in
+	// the YAML.
+	TokenPath string `yaml:"token_path"`
 }
 
-// IsApp reports whether GitHub App auth is configured.
+// IsApp reports whether GitHub App installation auth is configured.
 func (a Auth) IsApp() bool { return a.PAT == "" && a.AppID != 0 }
+
+// IsDeviceApp reports whether GitHub App device-flow (user token) auth is
+// configured: no PAT, no installation App id, and a token store path.
+func (a Auth) IsDeviceApp() bool { return a.PAT == "" && a.AppID == 0 && a.TokenPath != "" }
 
 // Cache configures the self-hosted cache server.
 type Cache struct {
@@ -379,6 +391,7 @@ func Load(path string) (*Config, error) {
 func (c *Config) resolveSecrets() {
 	c.Auth.PAT = expandEnvRef(c.Auth.PAT)
 	c.Auth.PrivateKeyPath = expandEnvRef(c.Auth.PrivateKeyPath)
+	c.Auth.TokenPath = expandEnvRef(c.Auth.TokenPath)
 	c.Webhook.Secret = expandEnvRef(c.Webhook.Secret)
 	c.Cache.AccessToken = expandEnvRef(c.Cache.AccessToken)
 }
@@ -407,8 +420,26 @@ func (c *Config) applyDefaults() {
 	if c.GitHub.URL == "" {
 		c.GitHub.URL = "https://github.com"
 	}
+	// Scale sets let GitHub decide capacity over an outbound long-poll, so they
+	// need no public webhook, no actions:read, and no repository filter to guard
+	// - the whole ingress boundary that webhook autoscaling requires disappears.
+	// They cannot serve scope=repos, which fans out across repositories a single
+	// scale set cannot cover, so that scope keeps the fixed-pool default.
 	if c.Provisioning == "" {
-		c.Provisioning = ProvisioningPool
+		if c.GitHub.Scope == ScopeRepos {
+			c.Provisioning = ProvisioningPool
+		} else {
+			c.Provisioning = ProvisioningScaleset
+		}
+	}
+	// A scale set name only has to be unique per pool, and pool names already are,
+	// so an unset scale_set derives from the pool rather than failing the config.
+	if c.Provisioning.IsScaleset() {
+		for i := range c.Pools {
+			if c.Pools[i].ScaleSet == "" {
+				c.Pools[i].ScaleSet = c.Pools[i].Name
+			}
+		}
 	}
 	if c.Provisioning.IsAutoscale() {
 		if c.Webhook.Path == "" {
@@ -544,10 +575,31 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("github.scope must be one of repo|repos|org|enterprise, got %q", c.GitHub.Scope)
 	}
 
-	if c.Auth.PAT == "" {
+	if c.Auth.PAT == "" && !c.Auth.IsDeviceApp() {
 		if c.Auth.AppID == 0 || c.Auth.InstallationID == 0 || c.Auth.PrivateKeyPath == "" {
-			return fmt.Errorf("auth requires either pat or (app_id + installation_id + private_key_path)")
+			return fmt.Errorf("auth requires one of: pat, (app_id + installation_id + private_key_path), or token_path (device-flow user token)")
 		}
+	}
+
+	// GitHub grants no enterprise self-hosted-runner permission to Apps, so an
+	// installation token is rejected by every /enterprises/*/actions/runners
+	// endpoint. Without this the config validates and then 403s on each call at
+	// run time, which reads as a credential mistake rather than an impossibility.
+	// A scale set belongs to exactly one target, so it cannot fan out across the
+	// repository list. Without this the config loads and the failure surfaces only
+	// when the first pool opens its session.
+	if c.Provisioning.IsScaleset() && c.GitHub.Scope == ScopeRepos {
+		return fmt.Errorf("provisioning: scaleset cannot serve scope=repos; use scope=repo, org or enterprise, or provisioning: pool")
+	}
+
+	// GitHub's enterprise runner endpoints reject GitHub App user access tokens,
+	// installation access tokens, and fine-grained PATs alike, so both App auth
+	// shapes are impossible here. Without this the config validates and then 403s
+	// on each call at run time, which reads as a credential mistake.
+	if c.GitHub.Scope == ScopeEnterprise && (c.Auth.IsApp() || c.Auth.IsDeviceApp()) {
+		return fmt.Errorf("scope=enterprise cannot use GitHub App authentication; " +
+			"GitHub does not accept App installation or device-flow user tokens for enterprise runner endpoints. " +
+			"Use auth.pat with a classic PAT carrying the manage_runners:enterprise scope")
 	}
 
 	if c.Provisioning != ProvisioningPool && !c.Provisioning.IsAutoscale() && !c.Provisioning.IsScaleset() {
@@ -555,7 +607,10 @@ func (c *Config) Validate() error {
 	}
 
 	if len(c.Pools) == 0 {
-		return fmt.Errorf("at least one pool is required")
+		// connect writes only the github + auth sections, so this is the state a
+		// fresh connect leaves behind. Showing a working pool beats naming the
+		// missing key.
+		return fmt.Errorf("at least one pool is required; `connect` writes credentials only. Add one, for example:\n\n%s", ExamplePoolYAML)
 	}
 	seen := map[string]bool{}
 	for i := range c.Pools {

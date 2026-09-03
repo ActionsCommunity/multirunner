@@ -610,3 +610,127 @@ func TestTCGReasonNamesTheActualCause(t *testing.T) {
 		}
 	}
 }
+
+// runnerAccessConfig points an org- or enterprise-scoped config at a stub server.
+func runnerAccessConfig(scope config.Scope, srv *httptest.Server) *config.Config {
+	return &config.Config{
+		GitHub:       config.GitHub{Scope: scope, URL: srv.URL, Owner: "acme"},
+		Auth:         config.Auth{PAT: "x"},
+		Provisioning: config.ProvisioningPool,
+		Pools:        []config.Pool{{Name: "linux", OS: "linux", Size: 1}},
+	}
+}
+
+// TestCheckRunnerAccessProvesOrgAndEnterpriseCredentials covers the gap this
+// check exists for: before it, org and enterprise scope made no GitHub call at
+// all, so a bad token or a mistyped slug passed doctor and failed later on a
+// runner host at registration time.
+func TestCheckRunnerAccessProvesOrgAndEnterpriseCredentials(t *testing.T) {
+	cases := []struct {
+		name     string
+		scope    config.Scope
+		status   int
+		wantErr  bool
+		wantPath string
+		wantOut  string
+	}{
+		{
+			name: "org reachable", scope: config.ScopeOrg, status: http.StatusOK,
+			wantPath: "/api/v3/orgs/acme/actions/runners", wantOut: "runner API reachable",
+		},
+		{
+			name: "enterprise reachable", scope: config.ScopeEnterprise, status: http.StatusOK,
+			wantPath: "/api/v3/enterprises/acme/actions/runners", wantOut: "runner API reachable",
+		},
+		{
+			name: "org forbidden", scope: config.ScopeOrg, status: http.StatusForbidden,
+			wantErr: true, wantOut: "cannot manage",
+		},
+		{
+			name: "enterprise slug wrong", scope: config.ScopeEnterprise, status: http.StatusNotFound,
+			wantErr: true, wantOut: "visible to these credentials",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotPath, gotQuery string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotPath, gotQuery = r.URL.Path, r.URL.RawQuery
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				if tc.status == http.StatusOK {
+					fmt.Fprint(w, `{"total_count":0,"runners":[]}`)
+				} else {
+					fmt.Fprint(w, `{"message":"nope"}`)
+				}
+			}))
+			defer srv.Close()
+
+			var err error
+			out := captureStdout(t, func() {
+				err = checkRunnerAccess(context.Background(), runnerAccessConfig(tc.scope, srv))
+			})
+			if tc.wantErr && err == nil {
+				t.Fatal("want doctor failure, got nil")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("want success, got %v", err)
+			}
+			if tc.wantPath != "" && gotPath != tc.wantPath {
+				t.Errorf("path = %q, want %q", gotPath, tc.wantPath)
+			}
+			// A trailing slash would hit a different endpoint than the collection.
+			if strings.HasSuffix(gotPath, "/") {
+				t.Errorf("collection path must not end in a slash: %q", gotPath)
+			}
+			if tc.status == http.StatusOK && gotQuery != "per_page=1" {
+				t.Errorf("query = %q, want per_page=1", gotQuery)
+			}
+			if !strings.Contains(out, tc.wantOut) {
+				t.Errorf("output missing %q: %q", tc.wantOut, out)
+			}
+		})
+	}
+}
+
+// TestCheckRunnerAccessSkipsRepoScopes keeps the check off the scopes the
+// Actions and workflow phases already exercise.
+func TestCheckRunnerAccessSkipsRepoScopes(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected GitHub call to %s", r.URL.Path)
+	}))
+	defer srv.Close()
+
+	for _, scope := range []config.Scope{config.ScopeRepo, config.ScopeRepos} {
+		cfg := runnerAccessConfig(scope, srv)
+		cfg.GitHub.Repo = "app"
+		if err := checkRunnerAccess(context.Background(), cfg); err != nil {
+			t.Errorf("scope %s: want skip, got %v", scope, err)
+		}
+	}
+}
+
+// TestIsTerminalRejectsNullDevice pins the property that made the previous
+// os.ModeCharDevice check wrong: the null device is a character device on both
+// Windows and Unix, so a CI or service job with stdin redirected there would
+// have been treated as interactive and silently taken prompt defaults.
+func TestIsTerminalRejectsNullDevice(t *testing.T) {
+	f, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatalf("open %s: %v", os.DevNull, err)
+	}
+	defer f.Close()
+	if isTerminal(f) {
+		t.Errorf("%s must not count as a terminal", os.DevNull)
+	}
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	defer r.Close()
+	defer w.Close()
+	if isTerminal(r) {
+		t.Error("a pipe must not count as a terminal")
+	}
+}

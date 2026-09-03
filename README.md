@@ -509,10 +509,20 @@ git_cache:
 ## Autoscaling
 
 ```yaml
-provisioning: pool       # pool | autoscale | scaleset
+provisioning: scaleset   # pool | autoscale | scaleset
 ```
 
-- **`pool`** (default) — keep N runners warm per pool. Zero inbound; works behind
+Leaving `provisioning` unset selects `scaleset`, except for `scope: repos`,
+which a single scale set cannot cover and which therefore falls back to `pool`.
+An explicit value is always honored, so existing configs keep the mode they
+name.
+
+This default changed: it used to be `pool` for every scope. A config that never
+set `provisioning` will create a scale set in the target on the next start and
+needs a credential that can manage one. Add `provisioning: pool` to keep the old
+behaviour.
+
+- **`pool`** — keep N runners warm per pool. Zero inbound; works behind
   NAT with no extra setup.
 - **`autoscale`** — launch runners on demand up to each pool's `size`:
   - **Polling** (outbound, NAT-safe) — multirunner polls GitHub for queued work
@@ -521,7 +531,7 @@ provisioning: pool       # pool | autoscale | scaleset
     events (needs a reachable URL; use a tunnel like smee.io / cloudflared).
     A nonempty `webhook.secret` verifies signatures; an empty one accepts
     unsigned events and is unsafe on a public listener.
-- **`scaleset`** — let GitHub decide. A [runner scale set][scaleset] holds a
+- **`scaleset`** (default) — let GitHub decide. A [runner scale set][scaleset] holds a
   long-poll session open and reports the desired runner count, which is the same
   mechanism actions-runner-controller uses.
 
@@ -600,6 +610,13 @@ multirunner service start
 ```
 
 `service uninstall` removes it.
+
+Run `connect` as the account the service will run as. Credentials are written
+owner-only, so a service running as a different account cannot read them: on
+Windows the service runs as LocalSystem unless you set another account, and a
+sidecar restricted to your login is not readable from there. If the service
+account differs, re-run `connect` as that account (or copy the credentials and
+grant it access) rather than loosening the file.
 
 ---
 

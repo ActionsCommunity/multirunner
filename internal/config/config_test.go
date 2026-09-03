@@ -40,8 +40,11 @@ pools:
 	if c.GitHub.URL != "https://github.com" {
 		t.Errorf("default url = %q", c.GitHub.URL)
 	}
-	if c.Provisioning != ProvisioningPool {
+	if c.Provisioning != ProvisioningScaleset {
 		t.Errorf("default provisioning = %q", c.Provisioning)
+	}
+	if c.Pools[0].ScaleSet != "linux-pool" {
+		t.Errorf("scale_set = %q, want it derived from the pool name", c.Pools[0].ScaleSet)
 	}
 	p0 := c.Pools[0]
 	if p0.Size != 1 || p0.WorkFolder != "_work" || p0.NamePrefix != "multirunner" || p0.RunnerGroupID != 1 {
@@ -209,11 +212,6 @@ pools:
 
 func TestScalesetProvisioningRequiresUniqueNames(t *testing.T) {
 	cases := map[string]string{
-		"missing scale set": `
-github: {scope: org, owner: o}
-auth: {pat: x}
-provisioning: scaleset
-pools: [{name: p, os: linux, docker: {host: h}}]`,
 		"duplicate scale set": `
 github: {scope: org, owner: o}
 auth: {pat: x}
@@ -445,7 +443,7 @@ func indexOf(s, sub string) int {
 
 func TestAppAuthValid(t *testing.T) {
 	p := writeConfig(t, `
-github: {scope: enterprise, owner: ent}
+github: {scope: org, owner: ent}
 auth: {app_id: 1, installation_id: 2, private_key_path: /tmp/k.pem}
 pools: [{name: p, os: linux, docker: {host: h}}]`)
 	c, err := Load(p)
@@ -454,6 +452,109 @@ pools: [{name: p, os: linux, docker: {host: h}}]`)
 	}
 	if !c.Auth.IsApp() {
 		t.Error("IsApp = false, want true")
+	}
+}
+
+func TestDeviceAuthValid(t *testing.T) {
+	p := writeConfig(t, `
+github: {scope: org, owner: myorg}
+auth: {client_id: Iv23liZGKUct4sAKjq2m, token_path: /keys/token.json}
+pools: [{name: p, os: linux, docker: {host: h}}]`)
+	c, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !c.Auth.IsDeviceApp() {
+		t.Error("IsDeviceApp = false, want true")
+	}
+	if c.Auth.IsApp() {
+		t.Error("IsApp must stay false for device auth")
+	}
+	// A device-flow user token drives a scale-set session (the refreshing
+	// transport keeps it fresh), so device auth follows the normal non-repos
+	// scaleset default rather than being forced to pool.
+	if c.Provisioning != ProvisioningScaleset {
+		t.Errorf("device auth provisioning default = %q, want scaleset", c.Provisioning)
+	}
+}
+
+func TestDeviceAuthAllowsScaleset(t *testing.T) {
+	p := writeConfig(t, `
+github: {scope: org, owner: o}
+auth: {client_id: cid, token_path: /k/token.json}
+provisioning: scaleset
+pools: [{name: p, os: linux, scale_set: s, docker: {host: h}}]`)
+	c, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load error = %v, want scaleset+device to be valid", err)
+	}
+	if !c.Provisioning.IsScaleset() {
+		t.Errorf("provisioning = %q, want scaleset", c.Provisioning)
+	}
+	if !c.Auth.IsDeviceApp() {
+		t.Error("IsDeviceApp = false, want true")
+	}
+}
+
+func TestDeviceAuthRejectsEnterprise(t *testing.T) {
+	p := writeConfig(t, `
+github: {scope: enterprise, owner: e}
+auth: {client_id: cid, token_path: /k/token.json}
+provisioning: pool
+pools: [{name: p, os: linux, docker: {host: h}}]`)
+	_, err := Load(p)
+	if err == nil || !strings.Contains(err.Error(), "manage_runners:enterprise") {
+		t.Fatalf("Load error = %v, want enterprise+device rejection naming the PAT scope", err)
+	}
+}
+
+func TestDeviceAuthTokenPathEnvExpansion(t *testing.T) {
+	t.Setenv("MR_TOKEN_PATH", "/run/secrets/token.json")
+	p := writeConfig(t, `
+github: {scope: org, owner: o}
+auth: {client_id: cid, token_path: "${MR_TOKEN_PATH}"}
+pools: [{name: p, os: linux, docker: {host: h}}]`)
+	c, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.Auth.TokenPath != "/run/secrets/token.json" {
+		t.Errorf("token_path = %q, want expanded", c.Auth.TokenPath)
+	}
+}
+
+func TestWriteDeviceAuth(t *testing.T) {
+	p := writeConfig(t, `
+github:
+  url: https://github.com
+  scope: org
+  owner: oldorg
+auth:
+  pat: ghp_old
+  app_id: 9
+  installation_id: 8
+  private_key_path: /old/key.pem
+pools:
+  - {name: linux-pool, os: linux, docker: {host: tcp://127.0.0.1:2375}}
+`)
+	if err := WriteDeviceAuth(p, ScopeOrg, "neworg", "", "Iv23_cid", "/keys/token.json"); err != nil {
+		t.Fatalf("WriteDeviceAuth: %v", err)
+	}
+	c, err := Load(p)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if c.Auth.PAT != "" || c.Auth.AppID != 0 || c.Auth.InstallationID != 0 || c.Auth.PrivateKeyPath != "" {
+		t.Errorf("installation/pat keys not removed: %+v", c.Auth)
+	}
+	if !c.Auth.IsDeviceApp() || c.Auth.ClientID != "Iv23_cid" || c.Auth.TokenPath != "/keys/token.json" {
+		t.Errorf("device auth not written: %+v", c.Auth)
+	}
+	if c.GitHub.Owner != "neworg" || c.GitHub.Scope != ScopeOrg {
+		t.Errorf("github not updated: %+v", c.GitHub)
+	}
+	if len(c.Pools) != 1 || c.Pools[0].Name != "linux-pool" {
+		t.Errorf("pools not preserved: %+v", c.Pools)
 	}
 }
 
@@ -689,5 +790,38 @@ pools:
 	}
 	if got := c.Pools[0].Docker.Isolation; got != "process" {
 		t.Errorf("windows pool isolation = %q, want process", got)
+	}
+}
+
+// TestEnterpriseScopeRejectsAppAuth pins a combination GitHub cannot serve:
+// there is no enterprise self-hosted-runner permission for GitHub Apps, so an
+// installation token 403s on every /enterprises/*/actions/runners call. Before
+// this check the config validated and failed only at run time, on the runner
+// host, looking like a bad credential rather than an impossible one.
+func TestEnterpriseScopeRejectsAppAuth(t *testing.T) {
+	const appAuth = `
+auth: {app_id: 1, installation_id: 2, private_key_path: k.pem}
+pools: [{name: p, os: linux, docker: {host: h}}]`
+
+	if _, err := Load(writeConfig(t, "github: {scope: enterprise, owner: e}"+appAuth)); err == nil {
+		t.Error("enterprise scope with App auth must be rejected")
+	} else if !strings.Contains(err.Error(), "manage_runners:enterprise") {
+		t.Errorf("error must name the required PAT scope, got: %v", err)
+	}
+
+	valid := map[string]string{
+		"enterprise with PAT": `
+github: {scope: enterprise, owner: e}
+auth: {pat: x}
+pools: [{name: p, os: linux, docker: {host: h}}]`,
+		"org with App auth":  "github: {scope: org, owner: o}" + appAuth,
+		"repo with App auth": "github: {scope: repo, owner: o, repo: r}" + appAuth,
+	}
+	for name, body := range valid {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Load(writeConfig(t, body)); err != nil {
+				t.Errorf("must stay valid: %v", err)
+			}
+		})
 	}
 }

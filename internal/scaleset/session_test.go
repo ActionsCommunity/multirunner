@@ -111,3 +111,23 @@ func TestDesiredScaleSetDefaultsLabelToName(t *testing.T) {
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
+
+// TestIsSessionConflict pins which failures count as "the previous session has
+// not been released yet". Treating an unrelated 409 as that would make a real
+// error look like a restart waiting to resolve itself.
+func TestIsSessionConflict(t *testing.T) {
+	conflict := errors.New(`request POST https://broker.actions.githubusercontent.com/rest/_apis/runtime/runnerscalesets/2/sessions?api-version=6.0-preview failed(status="409 Conflict", github_request_id="F60C"): unexpected status code 409 Conflict: GitHub.Actions.Runtime.WebApi.RunnerScaleSetSessionConflictException, GitHub.Actions.Runtime.WebApi: The actions runner scaleset linux-pool already has an active session.`)
+	if !isSessionConflict(conflict) {
+		t.Error("the one-active-session 409 was not recognised")
+	}
+
+	for _, other := range []error{
+		errors.New(`failed(status="409 Conflict"): some other conflict`),
+		errors.New("RunnerScaleSetSessionConflictException mentioned in a 500"),
+		errors.New(`failed(status="403 Forbidden")`),
+	} {
+		if isSessionConflict(other) {
+			t.Errorf("unrelated error treated as a session conflict: %v", other)
+		}
+	}
+}
