@@ -2,8 +2,8 @@ package ghapp
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,11 +15,14 @@ import (
 // expires, so a request already in flight does not race the expiry.
 const TokenSkew = 5 * time.Minute
 
-// lockPoll is how often a process retries the on-disk refresh lock, and
-// lockTimeout is how long it waits before assuming the holder died.
+// lockPoll is how often a process retries the on-disk refresh lock, lockWait
+// caps how long it waits for the holder, and refreshTimeout bounds the rotation
+// request itself. lockWait exceeds refreshTimeout so a waiter never gives up on
+// a holder that is still legitimately talking to GitHub.
 const (
-	lockPoll    = 50 * time.Millisecond
-	lockTimeout = 30 * time.Second
+	lockPoll       = 50 * time.Millisecond
+	refreshTimeout = 2 * time.Minute
+	lockWait       = 3 * time.Minute
 )
 
 // TokenRefresher hands out a valid device-flow user access token, refreshing and
@@ -156,7 +159,15 @@ func (r *TokenRefresher) AccessToken(ctx context.Context) (string, error) {
 		return r.tok.AccessToken, nil
 	}
 
-	refreshed, err := RefreshUserToken(ctx, r.clientID, r.baseURL, r.tok.RefreshToken)
+	// GitHub invalidates the old pair the moment it processes the rotation, so a
+	// cancelled refresh is not a no-op: the new pair exists and only GitHub has
+	// it. The caller's context governs waiting for the lock, but once the request
+	// is on its way it runs to completion under a deadline of its own, whether
+	// the caller's request was abandoned or the process is shutting down.
+	refreshCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), refreshTimeout)
+	defer cancel()
+
+	refreshed, err := RefreshUserToken(refreshCtx, r.clientID, r.baseURL, r.tok.RefreshToken)
 	if err != nil {
 		return "", err
 	}
@@ -166,9 +177,9 @@ func (r *TokenRefresher) AccessToken(ctx context.Context) (string, error) {
 	r.tok, r.unsaved = refreshed, false
 	if err := SaveUserToken(r.tokenPath, refreshed); err != nil {
 		r.unsaved = true
-		fmt.Fprintf(os.Stderr, "warning: refreshed the GitHub user token but could not save it to %s: %v\n"+
-			"         it will be retried; if it keeps failing, re-run `multirunner connect` after fixing the path\n",
-			r.tokenPath, err)
+		slog.Warn("refreshed the GitHub user token but could not save it; it will be retried, "+
+			"and if it keeps failing re-run `multirunner connect` after fixing the path",
+			slog.String("path", r.tokenPath), slog.Any("error", err))
 	}
 	return r.tok.AccessToken, nil
 }
@@ -183,32 +194,41 @@ func (r *TokenRefresher) retrySave() {
 	}
 }
 
-// lockTokenFile takes an exclusive on-disk lock for path, so only one process
-// rotates a given sidecar at a time. The lock is an O_EXCL sentinel rather than
-// a byte-range lock because it must behave the same on Windows and Unix. A stale
-// lock (holder crashed) is broken after lockTimeout.
+// lockTokenFile takes an exclusive lock on a sentinel next to path, so only one
+// process rotates a given sidecar at a time.
+//
+// The lock is an OS file lock (LockFileEx on Windows, flock elsewhere) held on
+// an open handle, not the presence of the file. The kernel drops it when the
+// holder exits however it exits, so there is no staleness to detect and no
+// window in which one waiter deletes another's lock. The sentinel itself is
+// never removed: unlinking it would reintroduce exactly that race.
 func lockTokenFile(ctx context.Context, path string) (func(), error) {
 	lockPath := path + ".lock"
-	deadline := time.Now().Add(lockTimeout)
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open token refresh lock %s: %w", lockPath, err)
+	}
+	deadline := time.Now().Add(lockWait)
 	for {
-		f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-		if err == nil {
+		locked, err := tryLockFile(f)
+		if err != nil {
 			f.Close()
-			return func() { os.Remove(lockPath) }, nil
-		}
-		if !errors.Is(err, os.ErrExist) {
 			return nil, fmt.Errorf("lock token store %s: %w", path, err)
 		}
-		if info, statErr := os.Stat(lockPath); statErr == nil && time.Since(info.ModTime()) > lockTimeout {
-			os.Remove(lockPath)
-			continue
+		if locked {
+			return func() {
+				_ = unlockFile(f)
+				f.Close()
+			}, nil
 		}
 		if time.Now().After(deadline) {
+			f.Close()
 			return nil, fmt.Errorf("timed out waiting for the token refresh lock %s; "+
-				"remove it if no other multirunner process is running", lockPath)
+				"another multirunner process has been refreshing for over %s", lockPath, lockWait)
 		}
 		select {
 		case <-ctx.Done():
+			f.Close()
 			return nil, ctx.Err()
 		case <-time.After(lockPoll):
 		}
