@@ -6,6 +6,13 @@ config.qemu-run.yaml
 # Secrets
 *.pem
 
+# Credentials written by `multirunner connect` next to the config: the device-flow
+# user/refresh token sidecar and the App webhook secret.
+multirunner-user-token.json
+*user-token.json
+multirunner-app.webhook-secret
+*.webhook-secret
+
 # Cache / mirror data dirs
 /cache/
 /gitmirror/
