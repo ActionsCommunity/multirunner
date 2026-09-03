@@ -93,6 +93,9 @@ test("site source contains real multirunner content without template copy", () =
 test("landing page documents runner scale sets and all agent skill routers", () => {
   const home = read("dist/index.html");
 
+  assert.match(home, /href="\/multirunner\/#features">How it works/);
+  assert.match(home, /href="\/multirunner\/#get-started">Get started/);
+  assert.doesNotMatch(home, />Scale sets<\/a>/);
   assert.match(home, /github\.com\/actions\/scaleset/);
   assert.match(home, /provisioning: scaleset/);
   assert.match(home, /same scale-set mechanism used by actions-runner-controller/);
