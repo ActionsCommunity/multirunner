@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -689,5 +690,127 @@ pools:
 	}
 	if got := c.Pools[0].Docker.Isolation; got != "process" {
 		t.Errorf("windows pool isolation = %q, want process", got)
+	}
+}
+
+func TestLoadContainerConfigNormalizesValues(t *testing.T) {
+	p := writeConfig(t, `
+github: {scope: org, owner: myorg}
+auth: {pat: ghp_x}
+pools:
+  - name: linux-pool
+    os: linux
+    container:
+      cpus: 2
+      memory_mb: 4096
+      memory_swap_mb: 8192
+      dns: [1.1.1.1, "2001:0db8::1"]
+    docker: {host: h}
+`)
+	c, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got := c.Pools[0].Container
+	if got.NanoCPUs() != 2_000_000_000 {
+		t.Errorf("NanoCPUs = %d, want 2000000000", got.NanoCPUs())
+	}
+	if got.MemoryBytes() != 4_294_967_296 {
+		t.Errorf("MemoryBytes = %d, want 4294967296", got.MemoryBytes())
+	}
+	if got.MemorySwapBytes() != 8_589_934_592 {
+		t.Errorf("MemorySwapBytes = %d, want 8589934592", got.MemorySwapBytes())
+	}
+	if want := "2001:db8::1"; len(got.DNS) != 2 || got.DNS[1] != want {
+		t.Errorf("DNS = %v, want canonical IPv6 %q", got.DNS, want)
+	}
+}
+
+func TestLoadContainerConfigOmitted(t *testing.T) {
+	p := writeConfig(t, `
+github: {scope: org, owner: myorg}
+auth: {pat: ghp_x}
+pools: [{name: linux-pool, os: linux, docker: {host: h}}]
+`)
+	c, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got := c.Pools[0].Container
+	if got.configured() || got.NanoCPUs() != 0 || got.MemoryBytes() != 0 || got.MemorySwapBytes() != 0 || got.DNS != nil {
+		t.Errorf("omitted container settings changed defaults: %+v", got)
+	}
+}
+
+func TestLoadContainerConfigRejectsInvalidValues(t *testing.T) {
+	base := `
+github: {scope: org, owner: myorg}
+auth: {pat: ghp_x}
+pools:
+  - name: linux-pool
+    os: linux
+    container:
+%s
+    docker: {host: h}
+`
+	cases := map[string]string{
+		"negative cpus":        "      cpus: -1",
+		"overflowed cpus":      fmt.Sprintf("      cpus: %d", maxCPUCount+1),
+		"malformed cpus":       "      cpus: nope",
+		"fractional cpus":      "      cpus: 1.5",
+		"negative memory":      "      memory_mb: -1",
+		"overflowed memory":    fmt.Sprintf("      memory_mb: %d", maxMemoryMiB+1),
+		"malformed memory":     "      memory_mb: 1GiB",
+		"negative memory swap": "      memory_swap_mb: -1",
+		"swap without memory":  "      memory_swap_mb: 1024",
+		"swap below memory":    "      memory_mb: 2048\n      memory_swap_mb: 1024",
+		"hostname DNS":         "      dns: [resolver.example.com]",
+		"blank DNS":            `      dns: [""]`,
+	}
+	for name, containerBlock := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := Load(writeConfig(t, fmt.Sprintf(base, containerBlock)))
+			if err == nil {
+				t.Fatal("Load accepted invalid container settings")
+			}
+		})
+	}
+}
+
+func TestLoadContainerConfigRejectsUnsupportedBackends(t *testing.T) {
+	cases := map[string]string{
+		"QEMU": `
+github: {scope: org, owner: myorg}
+auth: {pat: ghp_x}
+pools:
+  - name: windows-vm
+    os: windows
+    backend: qemu
+    container: {cpus: 2}
+    qemu: {golden: golden.qcow2}`,
+		"Windows swap": `
+github: {scope: org, owner: myorg}
+auth: {pat: ghp_x}
+pools:
+  - name: windows
+    os: windows
+    container: {memory_mb: 2048, memory_swap_mb: 4096}
+    docker: {host: h}`,
+		"containerd DNS": `
+github: {scope: org, owner: myorg}
+auth: {pat: ghp_x}
+pools:
+  - name: windows
+    os: windows
+    backend: containerd
+    container: {dns: [1.1.1.1]}
+    docker: {host: h}`,
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Load(writeConfig(t, body)); err == nil {
+				t.Fatal("Load accepted unsupported container settings")
+			}
+		})
 	}
 }

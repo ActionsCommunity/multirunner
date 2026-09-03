@@ -85,6 +85,13 @@ pools:
     labels: [self-hosted, linux, x64]
     work_folder: _work
     name_prefix: multirunner
+    container:
+      cpus: 2
+      # Memory values use mebibytes (MiB).
+      memory_mb: 4096
+      # Total memory plus swap in MiB. Equal to memory_mb to disable swap.
+      memory_swap_mb: 4096
+      dns: [1.1.1.1, 8.8.8.8]
     # Required when provisioning: scaleset. Each pool needs its own scale set,
     # because a scale set carries one label set and therefore one runner OS.
     # The name is reused across restarts, so restarting does not churn
@@ -156,6 +163,8 @@ pools:
     #   nerdctl: "nerdctl.exe"
     #   namespace: "multirunner"
     #   isolation: auto            # process | hyperv | auto
+    #   Per-container DNS is not supported by nerdctl on Windows. Remove
+    #   container.dns when selecting this backend.
     # Windows image_tier options (pulled automatically):
     #   minimal (default) | node | dotnet | buildtools | buildtools:17 | buildtools:18
     # dotnet layers on node, so it already bundles Node. buildtools layers on
@@ -165,6 +174,12 @@ pools:
     image_tier: minimal
     labels: [self-hosted, windows, x64]
     work_folder: _work
+    # Windows containers support CPU, memory, and DNS. Swap is Linux-only.
+    container:
+      cpus: 2
+      # Memory values use mebibytes (MiB).
+      memory_mb: 4096
+      dns: [1.1.1.1, 8.8.8.8]
     docker:
       host: "npipe:////./pipe/docker_engine_windows"
       isolation: auto            # auto (default): process on Server, hyperv on client

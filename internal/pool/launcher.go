@@ -28,21 +28,29 @@ type Hooks struct {
 // Launcher launches one ephemeral runner for a pool. It is the shared unit used
 // by both the always-on pool model and the webhook autoscaler.
 type Launcher struct {
-	cfg    config.Pool
-	image  string
-	be     backend.Backend
-	gh     github.ClientProvider
-	env    map[string]string
-	mounts []backend.Mount
-	logger *slog.Logger
-	hooks  Hooks
+	cfg       config.Pool
+	image     string
+	be        backend.Backend
+	gh        github.ClientProvider
+	env       map[string]string
+	mounts    []backend.Mount
+	container backend.ContainerSettings
+	logger    *slog.Logger
+	hooks     Hooks
 }
 
 // NewLauncher builds a Launcher.
 func NewLauncher(cfg config.Pool, image string, be backend.Backend, gh github.ClientProvider, env map[string]string, mounts []backend.Mount, logger *slog.Logger, hooks Hooks) *Launcher {
 	return &Launcher{
 		cfg: cfg, image: image, be: be, gh: gh,
-		env: env, mounts: mounts, logger: logger.With("pool", cfg.Name), hooks: hooks,
+		env: env, mounts: mounts,
+		container: backend.ContainerSettings{
+			CPUCount:        int64(cfg.Container.CPUs),
+			MemoryBytes:     cfg.Container.MemoryBytes(),
+			MemorySwapBytes: cfg.Container.MemorySwapBytes(),
+			DNS:             append([]string(nil), cfg.Container.DNS...),
+		},
+		logger: logger.With("pool", cfg.Name), hooks: hooks,
 	}
 }
 
@@ -99,6 +107,7 @@ func (l *Launcher) RunOneOn(ctx context.Context, client *github.Client) (int, er
 		WorkFolder:    l.cfg.WorkFolder,
 		Env:           l.env,
 		Mounts:        l.mounts,
+		Container:     l.container,
 	}
 	code, err := runner.RunOnce(ctx, client, l.be, spec, l.logger.With("target", client.Target()))
 	if l.hooks.OnStop != nil {
