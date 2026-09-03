@@ -66,11 +66,20 @@ func TestWriteConnectSuccessReturnsWriterError(t *testing.T) {
 func TestConnectPlanDoesNotWriteFiles(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.yaml")
+	keyPath := filepath.Join(dir, "keys", "runner-app.pem")
 	var out bytes.Buffer
-	if err := connectPlan(&out, configPath, "octo", "", "runner-app", 0, ""); err != nil {
+	if err := connectPlan(&out, configPath, "octo", "", "runner-app", 4040, keyPath); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"no changes", "organization_self_hosted_runners=write", configPath, "remove auth.pat"} {
+	for _, want := range []string{
+		"no changes",
+		"organization_self_hosted_runners=write",
+		configPath,
+		"remove auth.pat",
+		"local port 4040",
+		keyPath,
+		"rerun this command without --dry-run",
+	} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("plan missing %q:\n%s", want, out.String())
 		}
@@ -78,7 +87,7 @@ func TestConnectPlanDoesNotWriteFiles(t *testing.T) {
 	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
 		t.Fatalf("dry run created config: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "multirunner-app.private-key.pem")); !os.IsNotExist(err) {
+	if _, err := os.Stat(keyPath); !os.IsNotExist(err) {
 		t.Fatalf("dry run created private key: %v", err)
 	}
 }

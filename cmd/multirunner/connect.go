@@ -91,8 +91,8 @@ Private key:  %s
 Config:       %s
 GitHub:       open browser; create and install a private App
 Local writes: private key; github scope/owner/repo; App credentials; remove auth.pat
-Apply with:   multirunner connect --%s "%s" --name "%s" --config "%s"
-`, target, scope, name, callback, permissions, keyOut, cfgPath, scope, target, name, cfgPath)
+Apply: rerun this command without --dry-run.
+`, target, scope, name, callback, permissions, keyOut, cfgPath)
 	return err
 }
 
