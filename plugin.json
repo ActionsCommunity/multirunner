@@ -1,0 +1,30 @@
+{
+  "name": "multirunner",
+  "description": "Operate Multirunner through focused setup, host, diagnosis, GitHub integration, and Windows QEMU skill routers.",
+  "version": "0.2.0",
+  "author": {
+    "name": "ActionsCommunity",
+    "url": "https://github.com/ActionsCommunity"
+  },
+  "repository": "https://github.com/ActionsCommunity/multirunner",
+  "license": "MIT",
+  "keywords": [
+    "github-actions",
+    "self-hosted-runners",
+    "ephemeral-runners",
+    "windows-containers",
+    "linux-containers",
+    "autoscaling",
+    "webhooks",
+    "runner-scale-sets",
+    "qemu",
+    "cache"
+  ],
+  "skills": [
+    "skills/multirunner-setup/",
+    "skills/multirunner-host/",
+    "skills/multirunner-diagnose/",
+    "skills/multirunner-github/",
+    "skills/multirunner-qemu/"
+  ]
+}

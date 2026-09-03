@@ -21,10 +21,83 @@ import (
 
 func TestBakeCommandExposesIntegrityFlags(t *testing.T) {
 	cmd := bakeCmd()
-	for _, name := range []string{"iso-sha256", "runner-sha256"} {
+	for _, name := range []string{"iso-sha256", "runner-sha256", "vnc", "vnc-web"} {
 		if cmd.Flags().Lookup(name) == nil {
 			t.Errorf("bake flag --%s is missing", name)
 		}
+	}
+}
+
+func TestInstallerDryRunFlagsExist(t *testing.T) {
+	root := rootCmd()
+	found := 0
+	for _, cmd := range root.Commands() {
+		if !strings.HasPrefix(cmd.Name(), "install-") {
+			continue
+		}
+		found++
+		if cmd.Flags().Lookup("dry-run") == nil {
+			t.Errorf("%s flag --dry-run is missing", cmd.Name())
+		}
+	}
+	if found == 0 {
+		t.Fatal("no install-* commands found")
+	}
+}
+
+func TestOtherMutatingCommandsExposeDryRun(t *testing.T) {
+	root := rootCmd()
+	if root.Flags().Lookup("dry-run") == nil {
+		t.Error("default run flag --dry-run is missing")
+	}
+	for _, path := range [][]string{{"run"}, {"connect"}, {"bake"}, {"service", "install"}, {"service", "uninstall"}, {"service", "start"}, {"service", "stop"}, {"service", "restart"}} {
+		cmd, _, err := root.Find(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cmd.Flag("dry-run") == nil {
+			t.Errorf("%s flag --dry-run is missing", strings.Join(path, " "))
+		}
+	}
+}
+
+func TestPlanRunReportsStartupMutationsWithoutCreatingThem(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	configYAML := `github:
+  scope: repo
+  owner: octo
+  repo: hello
+auth:
+  pat: test
+pools:
+  - name: linux
+    os: linux
+    size: 1
+    docker:
+      host: unix:///var/run/docker.sock
+`
+	if err := os.WriteFile(configPath, []byte(configYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	if err := planRun(&out, configPath, false); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"no changes", "image=", "runner registrations", "without --dry-run"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("plan missing %q:\n%s", want, out.String())
+		}
+	}
+}
+
+func TestBakeEmptyVNCWebDisablesDefaultVNC(t *testing.T) {
+	cmd := bakeCmd()
+	cmd.SetArgs([]string{"--vnc-web=", "--prepare-only"})
+	_ = cmd.Execute()
+	got, err := cmd.Flags().GetString("vnc")
+	if err != nil || got != "" {
+		t.Fatalf("--vnc after --vnc-web empty = %q, %v; want disabled", got, err)
 	}
 }
 
@@ -45,6 +118,61 @@ func TestQEMUHousekeepingRejectsUnexpectedISO(t *testing.T) {
 	if err := runQEMUHousekeeping(t.Context(), cfg, logger); err == nil ||
 		!strings.Contains(err.Error(), "Windows ISO SHA256 mismatch") {
 		t.Fatalf("housekeeping error = %v", err)
+	}
+}
+
+func TestDoctorDoesNotCleanQEMUWorkDir(t *testing.T) {
+	dir := t.TempDir()
+	workDir := filepath.Join(dir, "work")
+	if err := os.Mkdir(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	artifacts := []string{"runner.qcow2", "runner.iso", "runner.vars.fd", "runner.serial.log"}
+	for _, name := range artifacts {
+		if err := os.WriteFile(filepath.Join(workDir, name), []byte(name), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	configPath := filepath.Join(dir, "config.yaml")
+	configYAML := fmt.Sprintf(`github:
+  scope: org
+  owner: example
+auth:
+  pat: test
+pools:
+  - name: vm
+    os: windows
+    backend: qemu
+    qemu:
+      golden: %s
+      work_dir: %s
+`, filepath.ToSlash(filepath.Join(dir, "golden.qcow2")), filepath.ToSlash(workDir))
+	if err := os.WriteFile(configPath, []byte(configYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_ = doctor(configPath)
+	for _, name := range artifacts {
+		if _, err := os.Stat(filepath.Join(workDir, name)); err != nil {
+			t.Errorf("doctor changed %s: %v", name, err)
+		}
+	}
+}
+
+func TestPreparePoolCleansQEMUOrphans(t *testing.T) {
+	dir := t.TempDir()
+	orphan := filepath.Join(dir, "runner.qcow2")
+	if err := os.WriteFile(orphan, []byte("orphan"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pc := config.Pool{
+		Name: "vm", OS: "windows", Backend: "qemu",
+		QEMU: config.QEMU{Golden: filepath.Join(dir, "missing-golden.qcow2"), WorkDir: dir},
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	_, _ = preparePool(t.Context(), pc, false, false, logger)
+	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
+		t.Fatalf("orphan still exists after service pool preparation: %v", err)
 	}
 }
 

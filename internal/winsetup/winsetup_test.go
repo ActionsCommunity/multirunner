@@ -1,6 +1,7 @@
 package winsetup
 
 import (
+	"errors"
 	"regexp"
 	"strings"
 	"testing"
@@ -38,6 +39,47 @@ func TestInstallArgsIncludesDataRoot(t *testing.T) {
 		if args[i] != want[i] {
 			t.Errorf("installArgs[%d] = %s, want %s", i, args[i], want[i])
 		}
+	}
+}
+
+func TestContainerdDryRunDescribesServiceAndReboot(t *testing.T) {
+	got := formatInstallPlan("containerd", InstallOptions{}, installState{
+		InstallationType: "Client", Containers: "Disabled", HyperV: "Enabled", Service: "not installed",
+	}, nil)
+	for _, want := range []string{
+		"Dry run: no changes will be made.",
+		"Enable Containers and Hyper-V",
+		"Register or reconfigure and start the containerd service.",
+		"Reboot: may be required",
+		"Apply with: multirunner install-containerd",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("plan missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestWindowsDaemonDryRunUsesServerFeaturesAndDataRoot(t *testing.T) {
+	got := formatInstallPlan("windows-daemon", InstallOptions{DataRoot: `D:\containers`}, installState{
+		InstallationType: "Server Core", Containers: "Enabled", HyperV: "Disabled", Service: "Running",
+	}, nil)
+	for _, want := range []string{
+		"Enable Containers when disabled.",
+		`data-root D:\containers`,
+		"Reboot: not expected",
+		`Apply with: multirunner install-windows-daemon --data-root 'D:\containers'`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("plan missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestDryRunReportsIncompleteInspection(t *testing.T) {
+	got := formatInstallPlan("containerd", InstallOptions{}, installState{}, errors.New("probe failed"))
+	if !strings.Contains(got, "Host inspection: unavailable (probe failed)") ||
+		!strings.Contains(got, "Reboot: unknown") {
+		t.Fatalf("incomplete plan did not explain uncertainty:\n%s", got)
 	}
 }
 

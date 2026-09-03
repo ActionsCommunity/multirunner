@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "multirunner",
+  "displayName": "Multirunner",
+  "version": "0.2.0",
+  "description": "Operate Multirunner through focused setup, host, diagnosis, GitHub integration, and Windows QEMU skill routers.",
+  "author": {
+    "name": "ActionsCommunity",
+    "url": "https://github.com/ActionsCommunity"
+  },
+  "repository": "https://github.com/ActionsCommunity/multirunner",
+  "skills": "./skills/",
+  "license": "MIT",
+  "keywords": [
+    "github-actions",
+    "self-hosted-runners",
+    "ephemeral-runners",
+    "windows",
+    "qemu",
+    "webhooks",
+    "autoscaling",
+    "runner-scale-sets",
+    "cache"
+  ]
+}
