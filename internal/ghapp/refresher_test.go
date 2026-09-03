@@ -2,9 +2,9 @@ package ghapp
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -151,9 +151,24 @@ func TestRefresherLockSerialisesSeparateProcesses(t *testing.T) {
 	if saved.AccessToken != tokens[0] {
 		t.Errorf("sidecar holds %q, want the token both processes use (%q)", saved.AccessToken, tokens[0])
 	}
-	if _, err := os.Stat(path + ".lock"); err == nil {
-		t.Error("lock file was left behind")
+	// The sentinel is deliberately left on disk: the lock is the OS lock held on
+	// an open handle, and unlinking the file is what let one waiter delete
+	// another's lock. What matters is that it is no longer held.
+	if err := assertLockFree(path); err != nil {
+		t.Error(err)
 	}
+}
+
+// assertLockFree reports whether the sidecar's lock can be taken right now,
+// which is the only meaningful "released" check once the lock lives on a handle
+// rather than on the file's existence.
+func assertLockFree(path string) error {
+	unlock, err := lockTokenFile(context.Background(), path)
+	if err != nil {
+		return fmt.Errorf("lock is still held after the refresh finished: %w", err)
+	}
+	unlock()
+	return nil
 }
 
 // TestRefresherAdoptsTokenRotatedByAnotherProcess proves a refresher whose
@@ -199,5 +214,111 @@ func TestRefresherRejectsEmptyAccessToken(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "multirunner connect") {
 		t.Errorf("error = %v, want it to name `multirunner connect`", err)
+	}
+}
+
+// TestRefresherLockHoldsUnderHeavyContention is the regression test for a lock
+// that broke itself. When the lock was a sentinel file whose age decided whether
+// it was abandoned, every waiter independently removed the file it had just
+// stat'd - including one another's fresh locks - so contenders both "held" it,
+// unlock removed a lock its caller did not own, and on Windows a concurrent
+// remove made the next create fail with a permission error rather than ErrExist.
+// One refresh must survive a crowd, with no waiter erroring out.
+func TestRefresherLockHoldsUnderHeavyContention(t *testing.T) {
+	const contenders = 12
+
+	var calls int32
+	srv := rotatingServer(t, &calls)
+	path := seedToken(t, &UserToken{AccessToken: "ghu_old", RefreshToken: "ghr_old", Expiry: time.Now().Add(-time.Minute)})
+
+	// Distinct client ids stand in for distinct processes: the per-path cache
+	// does not merge them, so each contends on the file lock rather than on
+	// one shared mutex.
+	refreshers := make([]*TokenRefresher, contenders)
+	for i := range refreshers {
+		r, err := NewTokenRefresher(fmt.Sprintf("cid-%02d", i), srv.URL, path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		refreshers[i] = r
+	}
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	tokens := make([]string, contenders)
+	errs := make([]error, contenders)
+	for i, r := range refreshers {
+		wg.Add(1)
+		go func(i int, r *TokenRefresher) {
+			defer wg.Done()
+			<-start
+			tokens[i], errs[i] = r.AccessToken(context.Background())
+		}(i, r)
+	}
+	close(start)
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("contender %d failed instead of waiting its turn: %v", i, err)
+		}
+	}
+	if n := atomic.LoadInt32(&calls); n != 1 {
+		t.Errorf("refresh calls = %d, want 1: a second rotation invalidates the first pair", n)
+	}
+	for i, tok := range tokens {
+		if tok != tokens[0] {
+			t.Errorf("contender %d holds %q, want the single rotated token %q", i, tok, tokens[0])
+		}
+	}
+	if err := assertLockFree(path); err != nil {
+		t.Error(err)
+	}
+}
+
+// TestRefreshOutlivesTheCallerThatTriggeredIt pins that a cancelled caller does
+// not cancel the rotation. GitHub invalidates the old pair as soon as it
+// processes the request, so abandoning it mid-flight leaves the new pair on
+// GitHub's side only and this host holding a credential that is already dead.
+func TestRefreshOutlivesTheCallerThatTriggeredIt(t *testing.T) {
+	var calls int32
+	served := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&calls, 1)
+		// Long enough that a request bound to the caller's context would be
+		// cancelled before the response is written.
+		time.Sleep(150 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(fmtToken(n))
+		close(served)
+	}))
+	defer srv.Close()
+
+	path := seedToken(t, &UserToken{AccessToken: "ghu_old", RefreshToken: "ghr_old", Expiry: time.Now().Add(-time.Minute)})
+	r, err := NewTokenRefresher("cid-cancel", srv.URL, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		cancel()
+	}()
+	tok, err := r.AccessToken(ctx)
+	if err != nil {
+		t.Fatalf("refresh abandoned when the caller was cancelled: %v", err)
+	}
+
+	<-served
+	if tok == "ghu_old" {
+		t.Error("token was not rotated")
+	}
+	saved, err := LoadUserToken(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.AccessToken != tok {
+		t.Errorf("sidecar holds %q, want the rotated token %q", saved.AccessToken, tok)
 	}
 }
