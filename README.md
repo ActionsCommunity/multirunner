@@ -71,7 +71,7 @@ Download a binary for your OS/arch from the
 [Releases](../../releases) page, or build from source:
 
 ```sh
-go install github.com/ActionsCommunity/multirunner/cmd/multirunner@latest
+go install github.com/GerardSmit/multirunner/cmd/multirunner@latest
 ```
 
 Prebuilt binaries are published for **Linux, Windows, and macOS**, each in
