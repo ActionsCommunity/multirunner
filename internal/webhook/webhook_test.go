@@ -21,12 +21,15 @@ import (
 // recordingProvider stands in for a real GitHub provider and records which repo
 // the scaler was asked to place a runner on. Returning a nil client is the
 // legitimate "repo not managed here" answer, so no network access is needed.
-type recordingProvider struct{ asked []string }
+type recordingProvider struct {
+	asked  []string
+	client *github.Client
+}
 
 func (p *recordingProvider) ClientForSlot(int) *github.Client { return nil }
 func (p *recordingProvider) ClientFor(repo string) *github.Client {
 	p.asked = append(p.asked, repo)
-	return nil
+	return p.client
 }
 func (p *recordingProvider) QueuedJobs(context.Context) ([]github.QueuedJob, error) {
 	return nil, nil
@@ -105,6 +108,36 @@ func TestHandleWorkflowJobQueuedRoutesRepo(t *testing.T) {
 	}
 	if p.asked[0] != "o/repoB" {
 		t.Errorf("scaler asked to place on %q, want o/repoB", p.asked[0])
+	}
+}
+
+func TestHandleWorkflowJobQueuedResolvesWorkflowMetadata(t *testing.T) {
+	var requestedPath string
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestedPath = r.URL.Path
+		_, _ = io.WriteString(w, `{
+			"id": 42,
+			"path": ".github/workflows/build.yml",
+			"event": "workflow_dispatch",
+			"triggering_actor": {"login": "octocat"}
+		}`)
+	}))
+	defer api.Close()
+
+	client, err := github.New(context.Background(),
+		config.GitHub{URL: api.URL, Scope: config.ScopeRepo, Owner: "o", Repo: "repoB"},
+		config.Auth{PAT: "test-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret := "s3cret"
+	s := testServerWith(secret, &recordingProvider{client: client})
+	body := `{"action":"queued","repository":{"full_name":"o/repoB"},"workflow_job":{"run_id":42,"labels":["container-build"]}}`
+	if code := do(t, s, "workflow_job", sign(secret, []byte(body)), body); code != http.StatusOK {
+		t.Fatalf("queued = %d", code)
+	}
+	if requestedPath != "/api/v3/repos/o/repoB/actions/runs/42" {
+		t.Fatalf("workflow run metadata path = %q", requestedPath)
 	}
 }
 

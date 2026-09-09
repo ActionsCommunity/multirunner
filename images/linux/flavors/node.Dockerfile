@@ -14,6 +14,8 @@
 #   docker build -f images/linux/flavors/node.Dockerfile \
 #     --build-arg PARENT=multirunner/runner-linux-native-build:dev -t multirunner/runner-linux-node:dev .
 ARG PARENT=gerardsmit/multirunner-runner-linux:native-build
+FROM docker:29.8.0-cli@sha256:eccaacfeed644c7de222ff047483568cb988dde95476fbaaf10ea2d04921bb66 AS docker-cli
+
 FROM ${PARENT}
 
 USER root
@@ -21,11 +23,16 @@ ENV DEBIAN_FRONTEND=noninteractive \
     AGENT_TOOLSDIRECTORY=/opt/hostedtoolcache \
     RUNNER_TOOL_CACHE=/opt/hostedtoolcache
 COPY images/versions.json /tmp/image-versions.json
+COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
+COPY --from=docker-cli /usr/local/libexec/docker/cli-plugins/docker-buildx \
+    /usr/local/libexec/docker/cli-plugins/docker-buildx
 
 # actions/setup-node looks for <tool-cache>/node/<version>/<arch> and treats the
 # sibling `<arch>.complete` marker as proof the entry is fully written, so the
 # marker is only written once the extract has succeeded.
 RUN apt-get update -y && apt-get install -y --no-install-recommends ca-certificates curl xz-utils \
+    && docker --version | grep -F "Docker version 29.8.0" \
+    && docker buildx version | grep -F "v0.37.0" \
     && rm -rf /var/lib/apt/lists/* \
     && arch="$(dpkg --print-architecture)" \
     && case "$arch" in \

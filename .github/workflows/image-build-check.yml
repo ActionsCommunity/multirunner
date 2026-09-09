@@ -127,10 +127,45 @@ jobs:
             test "$(stat -c %U "$cache_dir")" = runner
             "$cache_dir/bin/node" --version
             test "$(corepack --version)" = "$COREPACK_VERSION"
+            docker --version | grep -F "Docker version 29.8.0"
+            docker buildx version | grep -F "v0.37.0"
           '
           docker run --rm --entrypoint bash $B:dotnet        -lc 'dotnet --list-sdks && node --version'
           docker run --rm --entrypoint bash $B:rust          -lc 'rustc --version && cargo --version'
           docker run --rm --entrypoint bash $B:go            -lc 'go version'
+
+      - name: Verify Docker socket group mapping
+        run: |
+          set -euo pipefail
+          B=mr-check-linux
+          cat > runner-probe.sh <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          test "$(id -u)" = 1001
+          test "$(id -g)" = 1001
+          socket_gid=$(stat -c '%g' /var/run/docker.sock)
+          id -G | tr ' ' '\n' | grep -Fx "$socket_gid"
+          docker version --format '{{.Server.Version}}'
+          docker buildx version | grep -F "v0.37.0"
+          EOF
+          chmod +x runner-probe.sh
+
+          docker run --rm \
+            -e JIT_CONFIG=probe \
+            -v "$PWD/runner-probe.sh:/home/runner/run.sh:ro" \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            $B:node
+
+          if docker run --rm \
+            -e JIT_CONFIG=probe \
+            -v "$PWD/runner-probe.sh:/home/runner/run.sh:ro" \
+            -v /dev/null:/var/run/docker.sock \
+            $B:node 2>non-socket.err; then
+            echo "entrypoint accepted a non-socket Docker mount" >&2
+            exit 1
+          fi
+          grep -F "is mounted but is not a Unix socket" non-socket.err
+          rm runner-probe.sh non-socket.err
 
       # The cache-redirect patch must live ONLY in the sidecar. If it leaks into
       # the live DLL, ACTIONS_RESULTS_URL is unset whenever cache.enabled is false

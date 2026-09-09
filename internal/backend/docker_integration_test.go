@@ -14,7 +14,18 @@ func TestDockerPing(t *testing.T) {
 	if host == "" {
 		t.Skip("set MULTIRUNNER_TEST_DOCKER_HOST to run")
 	}
-	be, err := NewDockerLinux(host)
+	tls := DockerTLSConfig{
+		CAFile:   os.Getenv("MULTIRUNNER_TEST_DOCKER_TLS_CA"),
+		CertFile: os.Getenv("MULTIRUNNER_TEST_DOCKER_TLS_CERT"),
+		KeyFile:  os.Getenv("MULTIRUNNER_TEST_DOCKER_TLS_KEY"),
+	}
+	var be Backend
+	var err error
+	if tls != (DockerTLSConfig{}) {
+		be, err = NewDockerLinuxTLS(host, tls)
+	} else {
+		be, err = NewDockerLinux(host)
+	}
 	if err != nil {
 		t.Fatalf("NewDockerLinux: %v", err)
 	}

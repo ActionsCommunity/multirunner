@@ -153,3 +153,72 @@ func TestRunOneOnWithoutAnyClientFailsCleanly(t *testing.T) {
 		t.Errorf("hooks fired start=%d stop=%d, want 0/0 for a launch that never began", starts, stops)
 	}
 }
+
+func TestRunOneOnRejectsRepositoryOutsidePoolBinding(t *testing.T) {
+	var starts, stops int
+	l := NewLauncher(
+		config.Pool{
+			Name:       "container-build",
+			OS:         "linux",
+			Size:       1,
+			NamePrefix: "mr",
+			Repository: "o/allowed",
+		},
+		"img",
+		failImageBackend{},
+		&countingProvider{},
+		nil,
+		nil,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Hooks{
+			OnStart: func(string) { starts++ },
+			OnStop:  func(string, int, error) { stops++ },
+		},
+	)
+
+	_, err := l.RunOneOn(context.Background(), testClient(t, "https://api.github.com/", "other"))
+	if err == nil || !strings.Contains(err.Error(), "repository o/other") || !strings.Contains(err.Error(), "is not allowed") {
+		t.Fatalf("RunOneOn error = %v, want repository binding failure", err)
+	}
+	if starts != 0 || stops != 0 {
+		t.Errorf("hooks fired start=%d stop=%d, want 0/0 for a rejected repository", starts, stops)
+	}
+}
+
+func TestRunJobRejectsWorkflowOutsidePoolAuthorization(t *testing.T) {
+	var starts int
+	client := testClient(t, "https://api.github.com/", "allowed")
+	l := NewLauncher(
+		config.Pool{
+			Name:          "container-build",
+			OS:            "linux",
+			Size:          1,
+			NamePrefix:    "mr",
+			Repository:    "o/allowed",
+			Workflows:     []string{".github/workflows/build.yml"},
+			WorkflowEvent: "workflow_dispatch",
+			WorkflowActor: "owner",
+		},
+		"img",
+		failImageBackend{},
+		&countingProvider{},
+		nil,
+		nil,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Hooks{OnStart: func(string) { starts++ }},
+	)
+
+	job := github.QueuedJob{
+		Client:       client,
+		Labels:       []string{"container-build"},
+		WorkflowPath: ".github/workflows/ci.yml",
+		Event:        "pull_request",
+		Actor:        "contributor",
+	}
+	if _, err := l.RunJob(context.Background(), job); err == nil {
+		t.Fatal("unauthorized workflow job was accepted")
+	}
+	if starts != 0 {
+		t.Errorf("start hook fired %d times for an unauthorized workflow", starts)
+	}
+}

@@ -27,6 +27,35 @@ if [ -n "${ACTIONS_RESULTS_URL:-}" ] && [ -f bin/Runner.Worker.dll.mrpatched ]; 
   cp -f bin/Runner.Worker.dll.mrpatched bin/Runner.Worker.dll
 fi
 
-./run.sh --jitconfig "${JIT_CONFIG}" &
+runner_as_user=()
+runner_command=(./run.sh --jitconfig "${JIT_CONFIG}")
+docker_socket=/var/run/docker.sock
+if [ -e "${docker_socket}" ]; then
+  if [ ! -S "${docker_socket}" ]; then
+    echo "ERROR: ${docker_socket} is mounted but is not a Unix socket" >&2
+    exit 1
+  fi
+
+  socket_gid=$(stat -c '%g' "${docker_socket}")
+  socket_group=$(getent group "${socket_gid}" | cut -d: -f1 || true)
+  if [ -z "${socket_group}" ]; then
+    socket_group="multirunner-docker-${socket_gid}"
+    sudo groupadd --gid "${socket_gid}" "${socket_group}"
+  fi
+  sudo usermod --append --groups "${socket_group}" runner
+
+  runner_as_user=(sudo --preserve-env --set-home --user runner --)
+  runner_command=("${runner_as_user[@]}" ./run.sh --jitconfig "${JIT_CONFIG}")
+  if ! "${runner_as_user[@]}" test -r "${docker_socket}" 2>/dev/null; then
+    echo "ERROR: runner cannot read ${docker_socket} after group mapping" >&2
+    exit 1
+  fi
+  if ! "${runner_as_user[@]}" test -w "${docker_socket}" 2>/dev/null; then
+    echo "ERROR: runner cannot write ${docker_socket} after group mapping" >&2
+    exit 1
+  fi
+fi
+
+"${runner_command[@]}" &
 runner_pid=$!
 wait "${runner_pid}"

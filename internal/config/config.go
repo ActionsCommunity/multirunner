@@ -184,6 +184,10 @@ type Pool struct {
 	Containerd             Containerd `yaml:"containerd"`
 	RunnerGroupID          int64      `yaml:"runner_group_id"`
 	Labels                 []string   `yaml:"labels"`
+	Repository             string     `yaml:"repository"`
+	Workflows              []string   `yaml:"workflows"`
+	WorkflowEvent          string     `yaml:"workflow_event"`
+	WorkflowActor          string     `yaml:"workflow_actor"`
 	WorkFolder             string     `yaml:"work_folder"`
 	NamePrefix             string     `yaml:"name_prefix"`
 	Docker                 Docker     `yaml:"docker"`
@@ -196,6 +200,31 @@ type Pool struct {
 	// RunnerGroup is the runner group the scale set is created in. Empty means
 	// the default group.
 	RunnerGroup string `yaml:"runner_group"`
+}
+
+// CanServeRepository reports whether this pool may register a runner to target.
+// An empty binding preserves the existing all-configured-repositories behavior.
+func (p Pool) CanServeRepository(target string) bool {
+	return p.Repository == "" || strings.EqualFold(p.Repository, target)
+}
+
+// CanServeJob applies the optional repository and workflow authorization tuple.
+func (p Pool) CanServeJob(target, workflow, event, actor string) bool {
+	if !p.CanServeRepository(target) {
+		return false
+	}
+	if len(p.Workflows) == 0 {
+		return true
+	}
+	if !strings.EqualFold(p.WorkflowEvent, event) || !strings.EqualFold(p.WorkflowActor, actor) {
+		return false
+	}
+	for _, allowed := range p.Workflows {
+		if allowed == workflow {
+			return true
+		}
+	}
+	return false
 }
 
 // publishedFlavors lists the per-OS image flavors CI builds and pushes as tags
@@ -332,10 +361,22 @@ type Containerd struct {
 
 // Docker configures a pool's backend daemon.
 type Docker struct {
-	Host        string `yaml:"host"`
-	EnableDinD  bool   `yaml:"enable_dind"`
-	Isolation   string `yaml:"isolation"`    // process | hyperv | auto (default, windows)
-	WindowsDinD string `yaml:"windows_dind"` // off | host-pipe | hyperv
+	Host        string    `yaml:"host"`
+	TLS         DockerTLS `yaml:"tls"`
+	EnableDinD  bool      `yaml:"enable_dind"`
+	Isolation   string    `yaml:"isolation"`    // process | hyperv | auto (default, windows)
+	WindowsDinD string    `yaml:"windows_dind"` // off | host-pipe | hyperv
+}
+
+// DockerTLS configures mutual-TLS client authentication for a Docker endpoint.
+type DockerTLS struct {
+	CAFile   string `yaml:"ca"`
+	CertFile string `yaml:"cert"`
+	KeyFile  string `yaml:"key"`
+}
+
+func (t DockerTLS) configured() bool {
+	return t.CAFile != "" || t.CertFile != "" || t.KeyFile != ""
 }
 
 // ToolCache configures hostedtoolcache sharing.
@@ -582,8 +623,63 @@ func (c *Config) Validate() error {
 		} else if p.Docker.Host == "" {
 			return fmt.Errorf("pools[%q].docker.host is required", p.Name)
 		}
+		if p.Docker.TLS.configured() {
+			if p.Docker.TLS.CAFile == "" || p.Docker.TLS.CertFile == "" || p.Docker.TLS.KeyFile == "" {
+				return fmt.Errorf("pools[%q].docker.tls requires ca, cert, and key", p.Name)
+			}
+			if !strings.HasPrefix(strings.ToLower(p.Docker.Host), "tcp://") {
+				return fmt.Errorf("pools[%q].docker.tls requires a tcp:// docker.host", p.Name)
+			}
+		}
 		if p.Size < 1 {
 			return fmt.Errorf("pools[%q].size must be >= 1", p.Name)
+		}
+		if p.Repository != "" {
+			parts := strings.Split(p.Repository, "/")
+			if len(parts) != 2 || parts[0] == "" || parts[1] == "" ||
+				strings.TrimSpace(p.Repository) != p.Repository ||
+				strings.ContainsAny(p.Repository, " \t\r\n") {
+				return fmt.Errorf("pools[%q].repository must be owner/repo without whitespace", p.Name)
+			}
+			if !c.Provisioning.IsAutoscale() {
+				return fmt.Errorf("pools[%q].repository requires provisioning: autoscale", p.Name)
+			}
+			managed := false
+			for _, ref := range c.GitHub.RepoTargets() {
+				if strings.EqualFold(p.Repository, ref.Owner+"/"+ref.Repo) {
+					managed = true
+					break
+				}
+			}
+			if !managed {
+				return fmt.Errorf("pools[%q].repository %q is not managed by github scope", p.Name, p.Repository)
+			}
+		}
+		if len(p.Workflows) != 0 || p.WorkflowEvent != "" || p.WorkflowActor != "" {
+			if p.Repository == "" {
+				return fmt.Errorf("pools[%q].workflows requires repository", p.Name)
+			}
+			if len(p.Workflows) == 0 || p.WorkflowEvent == "" || p.WorkflowActor == "" {
+				return fmt.Errorf("pools[%q] workflow authorization requires workflows, workflow_event, and workflow_actor", p.Name)
+			}
+			seenWorkflows := make(map[string]struct{}, len(p.Workflows))
+			for _, workflow := range p.Workflows {
+				if !strings.HasPrefix(workflow, ".github/workflows/") ||
+					(!strings.HasSuffix(workflow, ".yml") && !strings.HasSuffix(workflow, ".yaml")) ||
+					strings.Contains(workflow, "..") || strings.ContainsAny(workflow, " \t\r\n@") {
+					return fmt.Errorf("pools[%q].workflows contains invalid workflow path %q", p.Name, workflow)
+				}
+				if _, duplicate := seenWorkflows[workflow]; duplicate {
+					return fmt.Errorf("pools[%q].workflows repeats %q", p.Name, workflow)
+				}
+				seenWorkflows[workflow] = struct{}{}
+			}
+			if strings.ContainsAny(p.WorkflowEvent, " \t\r\n") {
+				return fmt.Errorf("pools[%q].workflow_event must not contain whitespace", p.Name)
+			}
+			if strings.ContainsAny(p.WorkflowActor, " \t\r\n/") {
+				return fmt.Errorf("pools[%q].workflow_actor must be one GitHub login", p.Name)
+			}
 		}
 		if c.Provisioning.IsScaleset() && p.ScaleSet == "" {
 			// Without this the pool would start, hold a session against nothing,

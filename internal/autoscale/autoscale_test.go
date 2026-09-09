@@ -46,3 +46,13 @@ func TestLabelsMatchStillRejectsWrongOS(t *testing.T) {
 		t.Fatalf("labelsMatch(%v, %v) = true, want false", pool, job)
 	}
 }
+
+func TestContainerBuildLabelDoesNotMatchGenericLinuxJob(t *testing.T) {
+	pool := []string{"container-build"}
+	if labelsMatch(pool, []string{"self-hosted", "Linux", "X64"}) {
+		t.Fatal("custom-only container-build pool matched a generic Linux job")
+	}
+	if !labelsMatch(pool, []string{"container-build"}) {
+		t.Fatal("custom-only container-build pool rejected its explicit label")
+	}
+}

@@ -64,39 +64,44 @@ func (s *Scaler) Run(ctx context.Context) error {
 // that triggered it. Empty or unmanaged repositories are ignored.
 // Launches use the scaler's long-lived context (NOT the caller's), so a webhook
 // handler returning does not cancel the runner.
-func (s *Scaler) OnQueued(repo string, labels []string) {
+func (s *Scaler) OnQueued(ctx context.Context, repo string, runID int64, labels []string) {
 	client := s.gh.ClientFor(repo)
 	if client == nil {
 		s.logger.Warn("ignoring queued job for unmanaged repository", "repo", repo)
 		return
 	}
-	s.launchFor(client, labels)
+	job, err := client.ResolveQueuedJob(ctx, runID, labels)
+	if err != nil {
+		s.logger.Warn("ignoring queued job whose workflow metadata could not be resolved",
+			"repo", repo, "run_id", runID, "err", err)
+		return
+	}
+	s.launchFor(job)
 }
 
-// launchFor launches one runner on client for the first matching pool with spare
-// capacity.
-func (s *Scaler) launchFor(client *github.Client, labels []string) {
+// launchFor launches one runner for the first authorized matching pool with
+// spare capacity.
+func (s *Scaler) launchFor(job github.QueuedJob) {
 	for _, st := range s.states {
-		if labelsMatch(st.l.Labels(), labels) {
-			if s.tryLaunch(st, client) {
+		if st.l.Allows(job) && labelsMatch(st.l.Labels(), job.Labels) {
+			if s.tryLaunch(st, job) {
 				return
 			}
 		}
 	}
-	s.logger.Debug("queued job: no matching pool with spare capacity", "labels", labels)
+	s.logger.Debug("queued job: no authorized matching pool with spare capacity",
+		"repo", job.Client.Target(), "workflow", job.WorkflowPath,
+		"event", job.Event, "actor", job.Actor, "labels", job.Labels)
 }
 
-func (s *Scaler) tryLaunch(st *state, client *github.Client) bool {
+func (s *Scaler) tryLaunch(st *state, job github.QueuedJob) bool {
 	select {
 	case st.sem <- struct{}{}:
-		target := "rotation"
-		if client != nil {
-			target = client.Target()
-		}
+		target := job.Client.Target()
 		s.logger.Info("scaling up", "pool", st.l.Name(), "target", target)
 		go func() {
 			defer func() { <-st.sem }()
-			if _, err := st.l.RunOneOn(s.baseCtx, client); err != nil && s.baseCtx.Err() == nil {
+			if _, err := st.l.RunJob(s.baseCtx, job); err != nil && s.baseCtx.Err() == nil {
 				s.logger.Error("runner failed", "pool", st.l.Name(), "err", err)
 			}
 		}()
@@ -135,7 +140,7 @@ func (s *Scaler) reconcile() {
 		}
 	}
 	for _, job := range jobs {
-		s.launchFor(job.Client, job.Labels)
+		s.launchFor(job)
 	}
 }
 

@@ -154,7 +154,11 @@ func TestQueuedJobLabels(t *testing.T) {
 				return
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"workflow_runs": []map[string]any{{"id": 101}},
+				"workflow_runs": []map[string]any{{
+					"id": 101, "path": ".github/workflows/build.yml",
+					"event":            "workflow_dispatch",
+					"triggering_actor": map[string]any{"login": "octocat"},
+				}},
 			})
 		case "/repos/octo/hello/actions/runs/101/jobs":
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -177,6 +181,81 @@ func TestQueuedJobLabels(t *testing.T) {
 	}
 	if len(labels) != 1 || len(labels[0]) != 3 || labels[0][1] != "linux" {
 		t.Fatalf("labels = %#v", labels)
+	}
+}
+
+func TestQueuedWorkflowJobsCarriesAuthorizationMetadata(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/octo/hello/actions/runs":
+			if r.URL.Query().Get("status") == "in_progress" {
+				_ = json.NewEncoder(w).Encode(map[string]any{"workflow_runs": []map[string]any{}})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"workflow_runs": []map[string]any{{
+					"id": 101, "path": ".github/workflows/build.yml",
+					"event":            "workflow_dispatch",
+					"triggering_actor": map[string]any{"login": "octocat"},
+				}},
+			})
+		case "/repos/octo/hello/actions/runs/101/jobs":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"jobs": []map[string]any{{
+					"status": "queued", "labels": []string{"container-build"},
+				}},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv, config.ScopeRepo, "octo", "hello")
+	jobs, err := c.QueuedWorkflowJobs(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("jobs = %#v", jobs)
+	}
+	job := jobs[0]
+	if job.WorkflowPath != ".github/workflows/build.yml" ||
+		job.Event != "workflow_dispatch" || job.Actor != "octocat" {
+		t.Fatalf("authorization metadata = %#v", job)
+	}
+}
+
+func TestResolveQueuedJobUsesWorkflowRunMetadata(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/octo/hello/actions/runs/101" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": 101, "path": ".github/workflows/build.yml",
+			"event": "workflow_dispatch",
+			"actor": map[string]any{"login": "octocat"},
+		})
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv, config.ScopeRepo, "octo", "hello")
+	job, err := c.ResolveQueuedJob(context.Background(), 101, []string{"container-build"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.Client != c || job.WorkflowPath != ".github/workflows/build.yml" ||
+		job.Event != "workflow_dispatch" || job.Actor != "octocat" ||
+		len(job.Labels) != 1 || job.Labels[0] != "container-build" {
+		t.Fatalf("resolved job = %#v", job)
+	}
+}
+
+func TestResolveQueuedJobRejectsInvalidRunID(t *testing.T) {
+	c := &Client{scope: config.ScopeRepo, owner: "octo", repo: "hello"}
+	if _, err := c.ResolveQueuedJob(context.Background(), 0, nil); err == nil {
+		t.Fatal("zero workflow run id was accepted")
 	}
 }
 

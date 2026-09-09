@@ -75,6 +75,7 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		Action      string `json:"action"`
 		WorkflowJob struct {
 			Labels []string `json:"labels"`
+			RunID  int64    `json:"run_id"`
 		} `json:"workflow_job"`
 		// Repository identifies where the job is queued. A repo-scoped runner
 		// binds to one repo, so the scaler needs this to register the runner
@@ -89,8 +90,10 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	if payload.Action == "queued" {
 		s.logger.Info("workflow_job queued",
-			"repo", payload.Repository.FullName, "labels", payload.WorkflowJob.Labels)
-		s.scaler.OnQueued(payload.Repository.FullName, payload.WorkflowJob.Labels)
+			"repo", payload.Repository.FullName, "run_id", payload.WorkflowJob.RunID,
+			"labels", payload.WorkflowJob.Labels)
+		s.scaler.OnQueued(r.Context(), payload.Repository.FullName,
+			payload.WorkflowJob.RunID, payload.WorkflowJob.Labels)
 	}
 	w.WriteHeader(http.StatusOK)
 }
