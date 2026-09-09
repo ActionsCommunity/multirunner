@@ -117,20 +117,27 @@ function Export-ClientCertificateSet {
         }
         & icacls.exe $Destination /inheritance:r `
             /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' `
-            "*${currentUserSID}:(OI)(CI)F" `
-            /T /C /Q | Out-Null
+            "*${currentUserSID}:(OI)(CI)F" /C /Q | Out-Null
         if ($LASTEXITCODE -ne 0) {
             throw "Could not prepare certificate ACLs on $Destination"
         }
         foreach ($file in @('ca.pem', 'cert.pem', 'key.pem')) {
-            Copy-Item -LiteralPath (Join-Path $staging $file) -Destination (Join-Path $Destination $file) -Force
-        }
-        & icacls.exe $Destination /inheritance:r `
-            /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' `
-            "*${currentUserSID}:(OI)(CI)F" `
-            /T /C /Q | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            throw "Could not restrict certificate ACLs on $Destination"
+            $target = Join-Path $Destination $file
+            if (Test-Path -LiteralPath $target) {
+                & icacls.exe $target /inheritance:r `
+                    /grant:r '*S-1-5-18:F' '*S-1-5-32-544:F' "*${currentUserSID}:F" `
+                    /C /Q | Out-Null
+                if ($LASTEXITCODE -ne 0) {
+                    throw "Could not recover certificate ACL on $target"
+                }
+            }
+            Copy-Item -LiteralPath (Join-Path $staging $file) -Destination $target -Force
+            & icacls.exe $target /inheritance:r `
+                /grant:r '*S-1-5-18:F' '*S-1-5-32-544:F' "*${currentUserSID}:F" `
+                /C /Q | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                throw "Could not restrict certificate ACL on $target"
+            }
         }
     }
     finally {
