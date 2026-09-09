@@ -154,7 +154,7 @@ function Get-RunnerImageID {
         [Parameter(Mandatory)][hashtable]$Certificates
     )
 
-    $imageID = Invoke-Docker -Arguments @(
+    $imageID = @(Invoke-Docker -Arguments @(
         '--tlsverify',
         '--tlscacert', $Certificates.CA,
         '--tlscert', $Certificates.Cert,
@@ -163,7 +163,7 @@ function Get-RunnerImageID {
         'image', 'inspect',
         '--format', '{{.Id}}',
         $ImageName
-    )
+    ))
     if ($imageID.Count -ne 1 -or $imageID[0] -notmatch '^sha256:[0-9a-f]{64}$') {
         throw "Unexpected runner image ID: $($imageID -join ', ')"
     }
@@ -283,7 +283,7 @@ if (-not $containerExists) {
 Wait-ForDaemon -Name $ContainerName -TimeoutSeconds 90
 Export-ClientCertificateSet -Name $ContainerName -Destination $CertificateDirectory
 
-$version = Invoke-Docker -Arguments @(
+$version = @(Invoke-Docker -Arguments @(
     '--tlsverify',
     '--tlscacert', $ClientCertificates.CA,
     '--tlscert', $ClientCertificates.Cert,
@@ -291,7 +291,7 @@ $version = Invoke-Docker -Arguments @(
     '--host', $DockerHost,
     'version',
     '--format', '{{.Server.Version}}'
-)
+))
 if ($version.Count -ne 1 -or $version[0] -ne '29.8.0') {
     throw "Unexpected container-build Docker daemon version: $($version -join ', ')"
 }
