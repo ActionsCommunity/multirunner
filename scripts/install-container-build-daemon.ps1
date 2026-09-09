@@ -110,10 +110,21 @@ function Export-ClientCertificateSet {
         }
 
         New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+        $currentUserSID = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        & takeown.exe /F $Destination /A /R /D Y | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "Could not take ownership of certificate directory $Destination"
+        }
+        & icacls.exe $Destination /inheritance:r `
+            /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' `
+            "*${currentUserSID}:(OI)(CI)F" `
+            /T /C /Q | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "Could not prepare certificate ACLs on $Destination"
+        }
         foreach ($file in @('ca.pem', 'cert.pem', 'key.pem')) {
             Copy-Item -LiteralPath (Join-Path $staging $file) -Destination (Join-Path $Destination $file) -Force
         }
-        $currentUserSID = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
         & icacls.exe $Destination /inheritance:r `
             /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' `
             "*${currentUserSID}:(OI)(CI)F" `
