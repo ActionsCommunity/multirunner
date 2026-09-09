@@ -42,7 +42,7 @@ The script creates these durable resources:
 | `multirunner-container-build-docker` | Pinned Docker 29.8.0 daemon with restart policy |
 | `multirunner-container-build-certs` | Server and client mutual TLS certificates |
 | `multirunner-container-build-data` | Builder images and cache |
-| `C:\multirunner\container-build\tls` | ACL-protected client certificates for the service |
+| `C:\multirunner\container-build\tls` | ACL-protected client certificates for SYSTEM, Administrators, and the installing administrator |
 
 The client certificate and key stay on the host. They are never injected into
 runner containers or GitHub workflow environments. The installer also builds
