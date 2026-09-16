@@ -333,6 +333,12 @@ func (p Pool) DockerSocketPath() string {
 	return "/var/run/docker.sock"
 }
 
+// SharedWorkspacePath is the runner work directory as seen by both the runner
+// container and its Docker daemon.
+func (p Pool) SharedWorkspacePath() string {
+	return "/home/runner/" + p.WorkFolder
+}
+
 // QEMU configures the x86-64 Windows VM backend.
 type QEMU struct {
 	Golden  string `yaml:"golden"`   // path to the golden qcow2 (built by `multirunner bake`)
@@ -361,11 +367,12 @@ type Containerd struct {
 
 // Docker configures a pool's backend daemon.
 type Docker struct {
-	Host        string    `yaml:"host"`
-	TLS         DockerTLS `yaml:"tls"`
-	EnableDinD  bool      `yaml:"enable_dind"`
-	Isolation   string    `yaml:"isolation"`    // process | hyperv | auto (default, windows)
-	WindowsDinD string    `yaml:"windows_dind"` // off | host-pipe | hyperv
+	Host           string    `yaml:"host"`
+	TLS            DockerTLS `yaml:"tls"`
+	EnableDinD     bool      `yaml:"enable_dind"`
+	ShareWorkspace bool      `yaml:"share_workspace"`
+	Isolation      string    `yaml:"isolation"`    // process | hyperv | auto (default, windows)
+	WindowsDinD    string    `yaml:"windows_dind"` // off | host-pipe | hyperv
 }
 
 // DockerTLS configures mutual-TLS client authentication for a Docker endpoint.
@@ -629,6 +636,19 @@ func (c *Config) Validate() error {
 			}
 			if !strings.HasPrefix(strings.ToLower(p.Docker.Host), "tcp://") {
 				return fmt.Errorf("pools[%q].docker.tls requires a tcp:// docker.host", p.Name)
+			}
+		}
+		if p.Docker.ShareWorkspace {
+			if !p.Docker.EnableDinD {
+				return fmt.Errorf("pools[%q].docker.share_workspace requires enable_dind", p.Name)
+			}
+			if p.OS != "linux" || (p.Backend != "" && p.Backend != "docker") {
+				return fmt.Errorf("pools[%q].docker.share_workspace requires the Linux Docker backend", p.Name)
+			}
+			if p.WorkFolder == "." || p.WorkFolder == ".." ||
+				strings.TrimSpace(p.WorkFolder) != p.WorkFolder ||
+				strings.ContainsAny(p.WorkFolder, `/\`) {
+				return fmt.Errorf("pools[%q].work_folder must be one relative directory name when docker.share_workspace is enabled", p.Name)
 			}
 		}
 		if p.Size < 1 {

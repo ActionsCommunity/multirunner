@@ -14,6 +14,10 @@ param(
 
     [string]$DataVolume = 'multirunner-container-build-data',
 
+    [string]$WorkspaceDirectory = 'C:\multirunner\container-build\workspaces',
+
+    [string[]]$WorkFolders = @('_work'),
+
     [string]$ServiceName = 'multirunner',
 
     [string]$SourceDirectory = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path,
@@ -87,6 +91,36 @@ function Wait-ForDaemon {
 
     $logs = & docker logs $Name 2>&1
     throw "Container-build Docker daemon did not become ready: $([string]::Join("`n", @($logs)))"
+}
+
+function Initialize-WorkspaceDirectory {
+    param(
+        [Parameter(Mandatory)][string]$Directory,
+        [Parameter(Mandatory)][string[]]$Folders
+    )
+
+    New-Item -ItemType Directory -Path $Directory -Force | Out-Null
+    $currentUserSID = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    & takeown.exe /F $Directory /A /R /D Y | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not take ownership of workspace directory $Directory"
+    }
+    & icacls.exe $Directory /inheritance:r `
+        /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' `
+        "*${currentUserSID}:(OI)(CI)M" /C /Q | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not secure workspace directory $Directory"
+    }
+
+    foreach ($folder in $Folders) {
+        if ([string]::IsNullOrWhiteSpace($folder) -or
+            $folder -in @('.', '..') -or
+            $folder.Trim() -ne $folder -or
+            $folder -match '[/\\]') {
+            throw "Work folder must be one relative directory name: $folder"
+        }
+        New-Item -ItemType Directory -Path (Join-Path $Directory $folder) -Force | Out-Null
+    }
 }
 
 function Export-ClientCertificateSet {
@@ -264,6 +298,7 @@ if ($RotateCertificates -and (Test-DockerResource -Type volume -Name $Certificat
 
 Initialize-Volume -Name $CertificateVolume
 Initialize-Volume -Name $DataVolume
+Initialize-WorkspaceDirectory -Directory $WorkspaceDirectory -Folders $WorkFolders
 
 if (-not $containerExists) {
     Invoke-Docker -Arguments @(
@@ -276,11 +311,22 @@ if (-not $containerExists) {
         '--publish', "127.0.0.1:${Port}:2376",
         '--volume', "${CertificateVolume}:/certs",
         '--volume', "${DataVolume}:/var/lib/docker",
+        '--volume', "${WorkspaceDirectory}:/home/runner",
         $Image
     ) | Out-Null
 }
 
 Wait-ForDaemon -Name $ContainerName -TimeoutSeconds 90
+$workspaceMount = @(
+    Invoke-Docker -Arguments @(
+        'container', 'inspect',
+        '--format', '{{range .Mounts}}{{if eq .Destination "/home/runner"}}{{.Source}}{{end}}{{end}}',
+        $ContainerName
+    )
+)
+if ($workspaceMount.Count -ne 1 -or [string]::IsNullOrWhiteSpace($workspaceMount[0])) {
+    throw "Container $ContainerName has no /home/runner workspace mount. Re-run with -Replace."
+}
 Export-ClientCertificateSet -Name $ContainerName -Destination $CertificateDirectory
 
 $version = @(Invoke-Docker -Arguments @(
@@ -314,6 +360,8 @@ Write-Output "container=$ContainerName"
 Write-Output "image=$Image"
 Write-Output "docker_host=$DockerHost"
 Write-Output "certificates=$CertificateDirectory"
+Write-Output "workspaces=$WorkspaceDirectory"
+Write-Output "work_folders=$($WorkFolders -join ',')"
 Write-Output "runner_image=$RunnerImage"
 Write-Output "runner_image_id=$runnerImageID"
 Write-Output 'status=ready'

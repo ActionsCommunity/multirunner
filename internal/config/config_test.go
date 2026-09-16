@@ -374,6 +374,61 @@ func TestToolCachePath(t *testing.T) {
 	}
 }
 
+func TestSharedWorkspacePath(t *testing.T) {
+	pool := Pool{WorkFolder: "_work-pr"}
+	if got := pool.SharedWorkspacePath(); got != "/home/runner/_work-pr" {
+		t.Fatalf("SharedWorkspacePath = %q", got)
+	}
+}
+
+func TestDockerSharedWorkspaceValidation(t *testing.T) {
+	for name, pool := range map[string]string{
+		"requires dind": `
+    os: linux
+    docker: {host: h, share_workspace: true}`,
+		"requires linux": `
+    os: windows
+    docker: {host: h, enable_dind: true, share_workspace: true}`,
+		"requires docker backend": `
+    os: linux
+    backend: containerd
+    docker: {host: h, enable_dind: true, share_workspace: true}`,
+		"rejects nested work folder": `
+    os: linux
+    work_folder: nested/work
+    docker: {host: h, enable_dind: true, share_workspace: true}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := writeConfig(t, `
+github: {scope: repo, owner: octocat, repo: api}
+auth: {pat: x}
+pools:
+  - name: builder
+`+pool)
+			if _, err := Load(p); err == nil {
+				t.Fatal("invalid shared workspace configuration was accepted")
+			}
+		})
+	}
+
+	p := writeConfig(t, `
+github: {scope: repo, owner: octocat, repo: api}
+auth: {pat: x}
+pools:
+  - name: builder
+    os: linux
+    work_folder: _work-pr
+    docker: {host: h, enable_dind: true, share_workspace: true}
+`)
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load valid shared workspace: %v", err)
+	}
+	if !cfg.Pools[0].Docker.ShareWorkspace {
+		t.Fatal("share_workspace was not loaded")
+	}
+}
+
 func TestGitCacheEnabled(t *testing.T) {
 	if (GitCache{Mode: "off"}).Enabled() {
 		t.Error("off should be disabled")

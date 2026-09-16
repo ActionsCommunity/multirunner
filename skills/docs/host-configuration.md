@@ -310,6 +310,13 @@ label, and `repository` binding for container publication jobs; see
 [Container build runners](../../docs/container-build-runners.md). It is
 primarily a Linux socket setting and does not make Windows DinD work.
 
+`docker.share_workspace: true` additionally bind-mounts
+`/home/runner/<work_folder>` into a Linux Docker runner. Use it only with a
+dedicated daemon whose `/home/runner` path is backed by the workspace directory
+created by `scripts/install-container-build-daemon.ps1`. Pass every pool's
+`work_folder` to the installer's `-WorkFolders` parameter. Docker actions need
+this shared path because their child containers bind the parent workspace.
+
 ## Cache
 
 The embedded cache runs on the multirunner host when `cache.enabled: true`,
@@ -669,6 +676,7 @@ default is applied only while the owning feature is switched on.
 | `pools[].docker.host` | string | Required nonempty for every pool whose `backend` is not `qemu`, including `containerd`, which ignores the value. |
 | `pools[].docker.tls.ca`, `cert`, `key` | string | Empty. Mutual-TLS client files; all three are required together and require a `tcp://` Docker host. |
 | `pools[].docker.enable_dind` | bool | `false`. `true` mounts `/var/run/docker.sock` into the runner at the same path. Linux container backends. |
+| `pools[].docker.share_workspace` | bool | `false`. Shares `/home/runner/<work_folder>` with Docker action containers. Requires `enable_dind` and the Linux Docker backend. |
 | `pools[].docker.isolation` | string | Empty/`auto`, `process`, or `hyperv`. Windows Docker backend only. `auto` requires a verified-local `npipe://` host and otherwise fails backend construction. Unused on Linux. |
 | `pools[].docker.windows_dind` | string | Parsed but never read. Inert. |
 | `pools[].tool_cache.mode` | string | Empty or `off` = no mount. Only `shared-volume` mounts, and only with a nonempty `volume`. |

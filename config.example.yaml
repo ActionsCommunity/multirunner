@@ -96,6 +96,7 @@ pools:
       #   npipe:////./pipe/docker_engine
       host: "tcp://127.0.0.1:2375"
       enable_dind: false          # trusted Linux jobs only: mounts the host Docker socket
+      share_workspace: false      # shares the runner work path for Docker actions
     tool_cache:
       mode: "shared-volume"
       volume: "mr-toolcache-linux"

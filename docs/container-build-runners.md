@@ -18,9 +18,10 @@ Use one dedicated Docker daemon for container-build runners:
 4. One multirunner pool connects to that daemon, binds to one repository, and
    carries only the `container-build` label.
 5. The runner receives the builder daemon socket through `enable_dind`.
-6. Publishing workflows remain manual and keep registry credentials in their
+6. Docker actions receive a shared workspace path through `share_workspace`.
+7. Publishing workflows remain manual and keep registry credentials in their
    repository only.
-7. Ordinary jobs in the protected repository request a separate `general-ci`
+8. Ordinary jobs in the protected repository request a separate `general-ci`
    label that the builder runner does not carry.
 
 The Docker-in-Docker container is privileged. Compromise of a build job grants
@@ -32,7 +33,7 @@ Docker API access to the daemon that runs general multirunner workloads.
 Run the installer from an elevated PowerShell 7 session:
 
 ```powershell
-.\scripts\install-container-build-daemon.ps1
+.\scripts\install-container-build-daemon.ps1 -WorkFolders _work
 ```
 
 The script creates these durable resources:
@@ -43,6 +44,7 @@ The script creates these durable resources:
 | `multirunner-container-build-certs` | Server and client mutual TLS certificates |
 | `multirunner-container-build-data` | Builder images and cache |
 | `C:\multirunner\container-build\tls` | ACL-protected client certificates for SYSTEM, Administrators, and the installing administrator |
+| `C:\multirunner\container-build\workspaces` | Workspace paths shared between a runner and Docker action containers |
 
 The client certificate and key stay on the host. They are never injected into
 runner containers or GitHub workflow environments. The installer also builds
@@ -105,7 +107,16 @@ pools:
         cert: 'C:\multirunner\container-build\tls\cert.pem'
         key: 'C:\multirunner\container-build\tls\key.pem'
       enable_dind: true
+      share_workspace: true
 ```
+
+`share_workspace` bind-mounts `/home/runner/<work_folder>` into the runner at
+the same path. The installer mounts its workspace directory at `/home/runner`
+inside the dedicated daemon, which lets Docker actions resolve the bind paths
+that the Actions runner passes to the daemon. Pass every configured work folder
+to `-WorkFolders`; the installer creates them with access for Docker Desktop.
+Use a distinct `work_folder` for each pool sharing one daemon so concurrent jobs
+cannot write to the same path.
 
 Use `runs-on: [container-build]` only in trusted workflows. Labels select
 runners but are not an authorization system. The `repository` binding is a
