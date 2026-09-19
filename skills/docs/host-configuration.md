@@ -81,7 +81,7 @@ Every `pools[]` entry needs a unique `name` and `os: linux` or `os: windows`.
 | `max_consecutive_failures` | `pool`/`autoscale` failure-log threshold; `0` becomes `5`. It is not a circuit breaker: slots continue exponential retry. A negative value is accepted and makes the extra "hit max consecutive failures" message log from the first failure. Scale-set runners do not use it. |
 | `scale_set`, `runner_group` | Scale-set-only fields. `scale_set` is required and unique per pool; empty `runner_group` selects GitHub's default group. Startup can create or update this remote GitHub state, including labels. |
 | `image`, `image_tier` | Container image selection for the Docker and containerd backends; see [Images and tiers](#images-and-tiers). Ignored by `backend: qemu`. |
-| `repository`, `workflows`, `workflow_event`, `workflow_actor` | Optional autoscale authorization tuple. The launcher refuses to register that pool when repository or workflow-run metadata differs. |
+| `repository`, `workflows`, `workflow_event`, `workflow_actor`, `workflow_ref` | Optional autoscale authorization tuple. The launcher refuses to register that pool when repository or active workflow-run metadata differs. |
 | `docker`, `containerd`, `qemu` | Backend blocks. Only the block matching `backend` is read at launch, except `docker.host`, which is validated for every non-QEMU pool. |
 | `tool_cache` | See [Tool cache and Docker socket](#tool-cache-and-docker-socket). |
 
@@ -307,7 +307,7 @@ root-equivalent authority over that Docker host because a job can start
 privileged containers and mount daemon filesystems. Keep it disabled unless the
 job trust boundary explicitly allows it. Use a dedicated daemon, custom-only
 label, and `repository` binding for container publication jobs; see
-[Container build runners](../../docs/container-build-runners.md). It is
+[Container build runners](container-build-runners.md). It is
 primarily a Linux socket setting and does not make Windows DinD work.
 
 `docker.share_workspace: true` additionally bind-mounts
@@ -670,13 +670,14 @@ default is applied only while the owning feature is switched on.
 | `pools[].scale_set` | string | Empty. Required, and unique per pool, when `provisioning: scaleset`; ignored in other modes. |
 | `pools[].runner_group` | string | Empty selects GitHub's default group. Scale-set mode only. |
 | `pools[].repository` | string | Empty. Optional `owner/repo` binding accepted only with autoscale provisioning and a repository managed by the configured GitHub scope. |
-| `pools[].workflows` | string array | Empty. Allowed workflow file paths for an authorized pool; requires `repository`, `workflow_event`, and `workflow_actor`. |
+| `pools[].workflows` | string array | Empty. Allowed workflow file paths for an authorized pool; requires `repository`, `workflow_event`, `workflow_actor`, and `workflow_ref`. |
 | `pools[].workflow_event` | string | Empty. Exact workflow-run event required when `workflows` is configured. |
-| `pools[].workflow_actor` | string | Empty. GitHub login that must have triggered the workflow run when `workflows` is configured. |
+| `pools[].workflow_actor` | string | Empty. GitHub login that must be the workflow run's `triggering_actor`. Missing metadata is rejected. |
+| `pools[].workflow_ref` | string | Empty. Exact `head_branch` required when `workflows` is configured, normally the protected default branch. |
 | `pools[].docker.host` | string | Required nonempty for every pool whose `backend` is not `qemu`, including `containerd`, which ignores the value. |
-| `pools[].docker.tls.ca`, `cert`, `key` | string | Empty. Mutual-TLS client files; all three are required together and require a `tcp://` Docker host. |
+| `pools[].docker.tls.ca`, `cert`, `key` | string | Empty. Docker-backend mutual-TLS client files; all three are required together and require a `tcp://` Docker host. |
 | `pools[].docker.enable_dind` | bool | `false`. `true` mounts `/var/run/docker.sock` into the runner at the same path. Linux container backends. |
-| `pools[].docker.share_workspace` | bool | `false`. Shares `/home/runner/<work_folder>` with Docker action containers. Requires `enable_dind` and the Linux Docker backend. |
+| `pools[].docker.share_workspace` | bool | `false`. Shares `/home/runner/<work_folder>` with Docker action containers. Requires `enable_dind`, the Linux Docker backend, and `size: 1`; pools on one daemon must use distinct work folders. |
 | `pools[].docker.isolation` | string | Empty/`auto`, `process`, or `hyperv`. Windows Docker backend only. `auto` requires a verified-local `npipe://` host and otherwise fails backend construction. Unused on Linux. |
 | `pools[].docker.windows_dind` | string | Parsed but never read. Inert. |
 | `pools[].tool_cache.mode` | string | Empty or `off` = no mount. Only `shared-volume` mounts, and only with a nonempty `volume`. |

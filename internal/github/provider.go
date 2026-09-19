@@ -45,10 +45,13 @@ type ClientProvider interface {
 // where the work actually is instead of wherever rotation happens to point.
 type QueuedJob struct {
 	Client       *Client
+	Repository   string
 	Labels       []string
 	WorkflowPath string
 	Event        string
 	Actor        string
+	Ref          string
+	Status       string
 }
 
 // Verify *Client satisfies ClientProvider at compile time.
@@ -88,6 +91,9 @@ func pairWith(c *Client, jobs []QueuedJob) []QueuedJob {
 	out := make([]QueuedJob, len(jobs))
 	for i, job := range jobs {
 		job.Client = c
+		if job.Repository == "" && c.scope == config.ScopeRepo {
+			job.Repository = c.Target()
+		}
 		out[i] = job
 	}
 	return out

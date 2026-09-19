@@ -73,7 +73,7 @@ func TestConnectPlanDoesNotWriteFiles(t *testing.T) {
 	}
 	for _, want := range []string{
 		"no changes",
-		"organization_self_hosted_runners=write",
+		"organization_self_hosted_runners=write, actions=read",
 		configPath,
 		"remove auth.pat",
 		"local port 4040",

@@ -92,8 +92,7 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.logger.Info("workflow_job queued",
 			"repo", payload.Repository.FullName, "run_id", payload.WorkflowJob.RunID,
 			"labels", payload.WorkflowJob.Labels)
-		s.scaler.OnQueued(r.Context(), payload.Repository.FullName,
-			payload.WorkflowJob.RunID, payload.WorkflowJob.Labels)
+		s.scaler.OnQueued(payload.Repository.FullName, payload.WorkflowJob.RunID, payload.WorkflowJob.Labels)
 	}
 	w.WriteHeader(http.StatusOK)
 }

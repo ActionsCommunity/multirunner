@@ -157,6 +157,8 @@ func TestQueuedJobLabels(t *testing.T) {
 				"workflow_runs": []map[string]any{{
 					"id": 101, "path": ".github/workflows/build.yml",
 					"event":            "workflow_dispatch",
+					"head_branch":      "main",
+					"status":           "queued",
 					"triggering_actor": map[string]any{"login": "octocat"},
 				}},
 			})
@@ -196,6 +198,8 @@ func TestQueuedWorkflowJobsCarriesAuthorizationMetadata(t *testing.T) {
 				"workflow_runs": []map[string]any{{
 					"id": 101, "path": ".github/workflows/build.yml",
 					"event":            "workflow_dispatch",
+					"head_branch":      "main",
+					"status":           "queued",
 					"triggering_actor": map[string]any{"login": "octocat"},
 				}},
 			})
@@ -221,7 +225,8 @@ func TestQueuedWorkflowJobsCarriesAuthorizationMetadata(t *testing.T) {
 	}
 	job := jobs[0]
 	if job.WorkflowPath != ".github/workflows/build.yml" ||
-		job.Event != "workflow_dispatch" || job.Actor != "octocat" {
+		job.Event != "workflow_dispatch" || job.Actor != "octocat" ||
+		job.Ref != "main" || job.Status != "queued" {
 		t.Fatalf("authorization metadata = %#v", job)
 	}
 }
@@ -234,19 +239,22 @@ func TestResolveQueuedJobUsesWorkflowRunMetadata(t *testing.T) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"id": 101, "path": ".github/workflows/build.yml",
-			"event": "workflow_dispatch",
-			"actor": map[string]any{"login": "octocat"},
+			"event":            "workflow_dispatch",
+			"head_branch":      "main",
+			"status":           "queued",
+			"triggering_actor": map[string]any{"login": "octocat"},
 		})
 	}))
 	defer srv.Close()
 
 	c := newTestClient(t, srv, config.ScopeRepo, "octo", "hello")
-	job, err := c.ResolveQueuedJob(context.Background(), 101, []string{"container-build"})
+	job, err := c.ResolveQueuedJob(context.Background(), "octo/hello", 101, []string{"container-build"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if job.Client != c || job.WorkflowPath != ".github/workflows/build.yml" ||
 		job.Event != "workflow_dispatch" || job.Actor != "octocat" ||
+		job.Ref != "main" || job.Status != "queued" ||
 		len(job.Labels) != 1 || job.Labels[0] != "container-build" {
 		t.Fatalf("resolved job = %#v", job)
 	}
@@ -254,8 +262,49 @@ func TestResolveQueuedJobUsesWorkflowRunMetadata(t *testing.T) {
 
 func TestResolveQueuedJobRejectsInvalidRunID(t *testing.T) {
 	c := &Client{scope: config.ScopeRepo, owner: "octo", repo: "hello"}
-	if _, err := c.ResolveQueuedJob(context.Background(), 0, nil); err == nil {
+	if _, err := c.ResolveQueuedJob(context.Background(), "octo/hello", 0, nil); err == nil {
 		t.Fatal("zero workflow run id was accepted")
+	}
+}
+
+func TestResolveQueuedJobUsesWebhookRepositoryForOrgClient(t *testing.T) {
+	var requestedPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestedPath = r.URL.Path
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": 42, "path": ".github/workflows/build.yml",
+			"event":            "workflow_dispatch",
+			"head_branch":      "main",
+			"status":           "in_progress",
+			"triggering_actor": map[string]any{"login": "octocat"},
+		})
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv, config.ScopeOrg, "octo", "")
+	if _, err := c.ResolveQueuedJob(context.Background(), "octo/repo", 42, nil); err != nil {
+		t.Fatal(err)
+	}
+	if requestedPath != "/repos/octo/repo/actions/runs/42" {
+		t.Fatalf("workflow run metadata path = %q", requestedPath)
+	}
+}
+
+func TestResolveQueuedJobRejectsInactiveOrUnattributedRun(t *testing.T) {
+	for name, payload := range map[string]string{
+		"inactive":                 `{"id":101,"status":"completed","triggering_actor":{"login":"octocat"}}`,
+		"missing triggering actor": `{"id":101,"status":"queued","actor":{"login":"octocat"}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.WriteString(w, payload)
+			}))
+			defer srv.Close()
+			c := newTestClient(t, srv, config.ScopeRepo, "octo", "hello")
+			if _, err := c.ResolveQueuedJob(context.Background(), "octo/hello", 101, nil); err == nil {
+				t.Fatal("unsafe workflow run was accepted")
+			}
+		})
 	}
 }
 

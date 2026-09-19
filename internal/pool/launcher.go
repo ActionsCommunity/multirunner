@@ -57,10 +57,18 @@ func (l *Launcher) Labels() []string { return l.cfg.Labels }
 
 // Allows reports whether this pool may register a runner for job.
 func (l *Launcher) Allows(job github.QueuedJob) bool {
+	target := job.Repository
+	if target == "" && job.Client != nil {
+		target = job.Client.Target()
+	}
 	return job.Client != nil && l.cfg.CanServeJob(
-		job.Client.Target(), job.WorkflowPath, job.Event, job.Actor,
+		target, job.WorkflowPath, job.Event, job.Actor, job.Ref,
 	)
 }
+
+// RequiresWorkflowMetadata reports whether this pool authorizes jobs using
+// fields that are available only from the workflow-run record.
+func (l *Launcher) RequiresWorkflowMetadata() bool { return len(l.cfg.Workflows) != 0 }
 
 // EnsureImage makes sure the runner image is present.
 func (l *Launcher) EnsureImage(ctx context.Context) error {
@@ -102,9 +110,13 @@ func (l *Launcher) RunJob(ctx context.Context, job github.QueuedJob) (int, error
 		return 0, fmt.Errorf("pool %s: no github client available to register a runner", l.cfg.Name)
 	}
 	if !l.Allows(job) {
+		target := job.Repository
+		if target == "" {
+			target = client.Target()
+		}
 		return 0, fmt.Errorf(
 			"pool %s: job from repository %s workflow %q event %q actor %q is not allowed",
-			l.cfg.Name, client.Target(), job.WorkflowPath, job.Event, job.Actor,
+			l.cfg.Name, target, job.WorkflowPath, job.Event, job.Actor,
 		)
 	}
 	if l.hooks.OnStart != nil {

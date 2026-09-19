@@ -198,6 +198,7 @@ func TestRunJobRejectsWorkflowOutsidePoolAuthorization(t *testing.T) {
 			Workflows:     []string{".github/workflows/build.yml"},
 			WorkflowEvent: "workflow_dispatch",
 			WorkflowActor: "owner",
+			WorkflowRef:   "main",
 		},
 		"img",
 		failImageBackend{},
@@ -210,10 +211,12 @@ func TestRunJobRejectsWorkflowOutsidePoolAuthorization(t *testing.T) {
 
 	job := github.QueuedJob{
 		Client:       client,
+		Repository:   "o/allowed",
 		Labels:       []string{"container-build"},
 		WorkflowPath: ".github/workflows/ci.yml",
 		Event:        "pull_request",
 		Actor:        "contributor",
+		Ref:          "feature",
 	}
 	if _, err := l.RunJob(context.Background(), job); err == nil {
 		t.Fatal("unauthorized workflow job was accepted")

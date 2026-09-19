@@ -188,6 +188,7 @@ type Pool struct {
 	Workflows              []string   `yaml:"workflows"`
 	WorkflowEvent          string     `yaml:"workflow_event"`
 	WorkflowActor          string     `yaml:"workflow_actor"`
+	WorkflowRef            string     `yaml:"workflow_ref"`
 	WorkFolder             string     `yaml:"work_folder"`
 	NamePrefix             string     `yaml:"name_prefix"`
 	Docker                 Docker     `yaml:"docker"`
@@ -209,14 +210,16 @@ func (p Pool) CanServeRepository(target string) bool {
 }
 
 // CanServeJob applies the optional repository and workflow authorization tuple.
-func (p Pool) CanServeJob(target, workflow, event, actor string) bool {
+func (p Pool) CanServeJob(target, workflow, event, actor, ref string) bool {
 	if !p.CanServeRepository(target) {
 		return false
 	}
 	if len(p.Workflows) == 0 {
 		return true
 	}
-	if !strings.EqualFold(p.WorkflowEvent, event) || !strings.EqualFold(p.WorkflowActor, actor) {
+	if !strings.EqualFold(p.WorkflowEvent, event) ||
+		!strings.EqualFold(p.WorkflowActor, actor) ||
+		!strings.EqualFold(p.WorkflowRef, ref) {
 		return false
 	}
 	for _, allowed := range p.Workflows {
@@ -631,6 +634,9 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("pools[%q].docker.host is required", p.Name)
 		}
 		if p.Docker.TLS.configured() {
+			if p.Backend != "" && p.Backend != "docker" {
+				return fmt.Errorf("pools[%q].docker.tls requires the Docker backend", p.Name)
+			}
 			if p.Docker.TLS.CAFile == "" || p.Docker.TLS.CertFile == "" || p.Docker.TLS.KeyFile == "" {
 				return fmt.Errorf("pools[%q].docker.tls requires ca, cert, and key", p.Name)
 			}
@@ -650,6 +656,9 @@ func (c *Config) Validate() error {
 				strings.ContainsAny(p.WorkFolder, `/\`) {
 				return fmt.Errorf("pools[%q].work_folder must be one relative directory name when docker.share_workspace is enabled", p.Name)
 			}
+			if p.Size != 1 {
+				return fmt.Errorf("pools[%q].docker.share_workspace requires size: 1", p.Name)
+			}
 		}
 		if p.Size < 1 {
 			return fmt.Errorf("pools[%q].size must be >= 1", p.Name)
@@ -664,23 +673,28 @@ func (c *Config) Validate() error {
 			if !c.Provisioning.IsAutoscale() {
 				return fmt.Errorf("pools[%q].repository requires provisioning: autoscale", p.Name)
 			}
-			managed := false
-			for _, ref := range c.GitHub.RepoTargets() {
-				if strings.EqualFold(p.Repository, ref.Owner+"/"+ref.Repo) {
-					managed = true
-					break
+			targets := c.GitHub.RepoTargets()
+			if len(targets) > 0 {
+				managed := false
+				for _, ref := range targets {
+					if strings.EqualFold(p.Repository, ref.Owner+"/"+ref.Repo) {
+						managed = true
+						break
+					}
 				}
-			}
-			if !managed {
-				return fmt.Errorf("pools[%q].repository %q is not managed by github scope", p.Name, p.Repository)
+				if !managed {
+					return fmt.Errorf("pools[%q].repository %q is not managed by github scope", p.Name, p.Repository)
+				}
+			} else if c.GitHub.Scope == ScopeOrg && !strings.EqualFold(parts[0], c.GitHub.Owner) {
+				return fmt.Errorf("pools[%q].repository %q is outside github organization %q", p.Name, p.Repository, c.GitHub.Owner)
 			}
 		}
-		if len(p.Workflows) != 0 || p.WorkflowEvent != "" || p.WorkflowActor != "" {
+		if len(p.Workflows) != 0 || p.WorkflowEvent != "" || p.WorkflowActor != "" || p.WorkflowRef != "" {
 			if p.Repository == "" {
 				return fmt.Errorf("pools[%q].workflows requires repository", p.Name)
 			}
-			if len(p.Workflows) == 0 || p.WorkflowEvent == "" || p.WorkflowActor == "" {
-				return fmt.Errorf("pools[%q] workflow authorization requires workflows, workflow_event, and workflow_actor", p.Name)
+			if len(p.Workflows) == 0 || p.WorkflowEvent == "" || p.WorkflowActor == "" || p.WorkflowRef == "" {
+				return fmt.Errorf("pools[%q] workflow authorization requires workflows, workflow_event, workflow_actor, and workflow_ref", p.Name)
 			}
 			seenWorkflows := make(map[string]struct{}, len(p.Workflows))
 			for _, workflow := range p.Workflows {
@@ -700,6 +714,9 @@ func (c *Config) Validate() error {
 			if strings.ContainsAny(p.WorkflowActor, " \t\r\n/") {
 				return fmt.Errorf("pools[%q].workflow_actor must be one GitHub login", p.Name)
 			}
+			if strings.ContainsAny(p.WorkflowRef, " \t\r\n") {
+				return fmt.Errorf("pools[%q].workflow_ref must not contain whitespace", p.Name)
+			}
 		}
 		if c.Provisioning.IsScaleset() && p.ScaleSet == "" {
 			// Without this the pool would start, hold a session against nothing,
@@ -709,6 +726,19 @@ func (c *Config) Validate() error {
 		if err := p.validateImageTier(); err != nil {
 			return err
 		}
+	}
+
+	sharedWorkspaces := make(map[string]string)
+	for _, p := range c.Pools {
+		if !p.Docker.ShareWorkspace {
+			continue
+		}
+		key := strings.ToLower(p.Docker.Host) + "\x00" + strings.ToLower(p.WorkFolder)
+		if previous, duplicate := sharedWorkspaces[key]; duplicate {
+			return fmt.Errorf("pools[%q] and pools[%q] share docker.host %q and work_folder %q with docker.share_workspace enabled",
+				previous, p.Name, p.Docker.Host, p.WorkFolder)
+		}
+		sharedWorkspaces[key] = p.Name
 	}
 
 	if c.Provisioning.IsScaleset() {

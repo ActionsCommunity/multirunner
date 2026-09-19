@@ -44,7 +44,7 @@ if [ -e "${docker_socket}" ]; then
   fi
   sudo usermod --append --groups "${socket_group}" runner
 
-  runner_as_user=(sudo --preserve-env --set-home --user runner --)
+  runner_as_user=(sudo --preserve-env --set-home --user runner -- env "PATH=${PATH}")
   runner_command=("${runner_as_user[@]}" ./run.sh --jitconfig "${JIT_CONFIG}")
   if ! "${runner_as_user[@]}" test -r "${docker_socket}" 2>/dev/null; then
     echo "ERROR: runner cannot read ${docker_socket} after group mapping" >&2

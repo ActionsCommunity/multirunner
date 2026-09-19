@@ -64,19 +64,39 @@ func (s *Scaler) Run(ctx context.Context) error {
 // that triggered it. Empty or unmanaged repositories are ignored.
 // Launches use the scaler's long-lived context (NOT the caller's), so a webhook
 // handler returning does not cancel the runner.
-func (s *Scaler) OnQueued(ctx context.Context, repo string, runID int64, labels []string) {
+func (s *Scaler) OnQueued(repo string, runID int64, labels []string) {
 	client := s.gh.ClientFor(repo)
 	if client == nil {
 		s.logger.Warn("ignoring queued job for unmanaged repository", "repo", repo)
 		return
 	}
-	job, err := client.ResolveQueuedJob(ctx, runID, labels)
-	if err != nil {
-		s.logger.Warn("ignoring queued job whose workflow metadata could not be resolved",
-			"repo", repo, "run_id", runID, "err", err)
+	job := github.QueuedJob{
+		Client: client, Repository: repo, Labels: append([]string(nil), labels...),
+	}
+	requiresMetadata := false
+	for _, st := range s.states {
+		if labelsMatch(st.l.Labels(), labels) && st.l.RequiresWorkflowMetadata() {
+			requiresMetadata = true
+			break
+		}
+	}
+	if !requiresMetadata {
+		s.launchFor(job)
 		return
 	}
-	s.launchFor(job)
+	ctx := s.baseCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	go func() {
+		resolved, err := client.ResolveQueuedJob(ctx, repo, runID, labels)
+		if err != nil {
+			s.logger.Warn("ignoring queued job whose workflow metadata could not be resolved",
+				"repo", repo, "run_id", runID, "err", err)
+			return
+		}
+		s.launchFor(resolved)
+	}()
 }
 
 // launchFor launches one runner for the first authorized matching pool with
@@ -90,7 +110,7 @@ func (s *Scaler) launchFor(job github.QueuedJob) {
 		}
 	}
 	s.logger.Debug("queued job: no authorized matching pool with spare capacity",
-		"repo", job.Client.Target(), "workflow", job.WorkflowPath,
+		"repo", job.Repository, "workflow", job.WorkflowPath,
 		"event", job.Event, "actor", job.Actor, "labels", job.Labels)
 }
 

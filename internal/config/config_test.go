@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -397,6 +398,10 @@ func TestDockerSharedWorkspaceValidation(t *testing.T) {
     os: linux
     work_folder: nested/work
     docker: {host: h, enable_dind: true, share_workspace: true}`,
+		"requires size one": `
+    os: linux
+    size: 2
+    docker: {host: h, enable_dind: true, share_workspace: true}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			p := writeConfig(t, `
@@ -426,6 +431,37 @@ pools:
 	}
 	if !cfg.Pools[0].Docker.ShareWorkspace {
 		t.Fatal("share_workspace was not loaded")
+	}
+
+	p = writeConfig(t, `
+github: {scope: repo, owner: octocat, repo: api}
+auth: {pat: x}
+pools:
+  - {name: first, os: linux, work_folder: shared, docker: {host: h, enable_dind: true, share_workspace: true}}
+  - {name: second, os: linux, work_folder: shared, docker: {host: h, enable_dind: true, share_workspace: true}}
+`)
+	if _, err := Load(p); err == nil || !strings.Contains(err.Error(), "share docker.host") {
+		t.Fatalf("Load error = %v, want duplicate shared workspace failure", err)
+	}
+}
+
+func TestDockerTLSRequiresDockerBackend(t *testing.T) {
+	for _, backend := range []string{"containerd", "qemu"} {
+		p := writeConfig(t, fmt.Sprintf(`
+github: {scope: repo, owner: octocat, repo: api}
+auth: {pat: x}
+pools:
+  - name: unsafe
+    os: windows
+    backend: %s
+    qemu: {golden: golden.vhdx}
+    docker:
+      host: tcp://127.0.0.1:2376
+      tls: {ca: ca.pem, cert: cert.pem, key: key.pem}
+`, backend))
+		if _, err := Load(p); err == nil || !strings.Contains(err.Error(), "requires the Docker backend") {
+			t.Fatalf("backend %s error = %v, want Docker backend failure", backend, err)
+		}
 	}
 }
 
@@ -761,6 +797,7 @@ pools:
       - .github/workflows/verify.yaml
     workflow_event: workflow_dispatch
     workflow_actor: octocat
+    workflow_ref: main
     labels: [container-build]
     docker: {host: h}
 `)
@@ -769,14 +806,15 @@ pools:
 		t.Fatalf("Load: %v", err)
 	}
 	pool := c.Pools[0]
-	if !pool.CanServeJob("OCTOCAT/API", ".github/workflows/build.yml", "WORKFLOW_DISPATCH", "OctoCat") {
+	if !pool.CanServeJob("OCTOCAT/API", ".github/workflows/build.yml", "WORKFLOW_DISPATCH", "OctoCat", "MAIN") {
 		t.Fatal("matching workflow authorization tuple was rejected")
 	}
 	for name, allowed := range map[string]bool{
-		"other repository": pool.CanServeJob("octocat/web", ".github/workflows/build.yml", "workflow_dispatch", "octocat"),
-		"other workflow":   pool.CanServeJob("octocat/api", ".github/workflows/ci.yml", "workflow_dispatch", "octocat"),
-		"other event":      pool.CanServeJob("octocat/api", ".github/workflows/build.yml", "pull_request", "octocat"),
-		"other actor":      pool.CanServeJob("octocat/api", ".github/workflows/build.yml", "workflow_dispatch", "contributor"),
+		"other repository": pool.CanServeJob("octocat/web", ".github/workflows/build.yml", "workflow_dispatch", "octocat", "main"),
+		"other workflow":   pool.CanServeJob("octocat/api", ".github/workflows/ci.yml", "workflow_dispatch", "octocat", "main"),
+		"other event":      pool.CanServeJob("octocat/api", ".github/workflows/build.yml", "pull_request", "octocat", "main"),
+		"other actor":      pool.CanServeJob("octocat/api", ".github/workflows/build.yml", "workflow_dispatch", "contributor", "main"),
+		"other ref":        pool.CanServeJob("octocat/api", ".github/workflows/build.yml", "workflow_dispatch", "octocat", "feature"),
 	} {
 		if allowed {
 			t.Errorf("%s unexpectedly matched workflow authorization", name)
@@ -797,8 +835,25 @@ pools:
     labels: [container-build]
     docker: {host: h}
 `)
-	if _, err := Load(p); err == nil || !strings.Contains(err.Error(), "requires workflows, workflow_event, and workflow_actor") {
+	if _, err := Load(p); err == nil || !strings.Contains(err.Error(), "requires workflows, workflow_event, workflow_actor, and workflow_ref") {
 		t.Fatalf("Load error = %v, want complete workflow authorization failure", err)
+	}
+}
+
+func TestPoolRepositoryBindingAllowsOrganizationWebhookScope(t *testing.T) {
+	p := writeConfig(t, `
+github: {scope: org, owner: octocat}
+auth: {pat: x}
+provisioning: webhook
+pools:
+  - name: builder
+    os: linux
+    repository: octocat/api
+    labels: [container-build]
+    docker: {host: h}
+`)
+	if _, err := Load(p); err != nil {
+		t.Fatalf("Load organization repository binding: %v", err)
 	}
 }
 

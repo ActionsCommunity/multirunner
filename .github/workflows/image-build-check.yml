@@ -156,6 +156,19 @@ jobs:
             -v /var/run/docker.sock:/var/run/docker.sock \
             $B:node
 
+          cat > runner-probe.sh <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          go version
+          docker version --format '{{.Server.Version}}'
+          EOF
+          chmod +x runner-probe.sh
+          docker run --rm \
+            -e JIT_CONFIG=probe \
+            -v "$PWD/runner-probe.sh:/home/runner/run.sh:ro" \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            $B:go
+
           if docker run --rm \
             -e JIT_CONFIG=probe \
             -v "$PWD/runner-probe.sh:/home/runner/run.sh:ro" \

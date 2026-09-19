@@ -30,7 +30,11 @@ Docker API access to the daemon that runs general multirunner workloads.
 
 ## Provision the daemon
 
-Run the installer from an elevated PowerShell 7 session:
+This topology requires `provisioning: autoscale` with `github.scope: repo` or
+`github.scope: repos`. The protected repository must appear in the configured
+GitHub repository targets.
+
+Run the installer from an elevated PowerShell 7 session at the repository root:
 
 ```powershell
 .\scripts\install-container-build-daemon.ps1 -WorkFolders _work
@@ -91,13 +95,14 @@ pools:
   - name: container-build
     os: linux
     size: 1
-    image: sha256:<runner-image-id-from-installer>
+    image: <sha256-image-id-from-installer>
     labels: [container-build]
-    repository: jongio/backyahdbbq
+    repository: owner/protected-repo
     workflows:
       - .github/workflows/build-api-image.yml
     workflow_event: workflow_dispatch
-    workflow_actor: jongio
+    workflow_actor: <actor-login>
+    workflow_ref: main
     work_folder: _work
     name_prefix: multirunner
     docker:
@@ -122,9 +127,11 @@ Use `runs-on: [container-build]` only in trusted workflows. Labels select
 runners but are not an authorization system. The `repository` binding is a
 second check in the autoscaler and launcher, so the pool cannot register to
 another repository even if that repository requests the same label. The
-workflow path, event, and actor tuple is resolved from GitHub's workflow-run
-record before launch. A pull-request workflow that requests the label is
-rejected before a runner is registered.
+workflow path, event, triggering actor, and ref tuple is resolved from GitHub's
+active workflow-run record before launch. A pull-request workflow or a workflow
+dispatched from another ref is rejected before a runner is registered. This
+gates runner registration. Once registered, GitHub can assign any matching
+queued job to an idle runner, which is why the pool must use a custom-only label.
 
 Add `general-ci` to the normal Linux pool and require it on every ordinary
 self-hosted workflow in the protected repository:

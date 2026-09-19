@@ -133,6 +133,7 @@ workspace or local marketplace when installing it for Codex. The root
 
 - [CLI reference](skills/docs/cli-reference.md)
 - [Host configuration reference](skills/docs/host-configuration.md)
+- [Container build runners](skills/docs/container-build-runners.md)
 - [QEMU Windows guide](skills/docs/qemu-windows.md)
 
 ---
@@ -200,10 +201,10 @@ auth:
 Short entries inherit `github.owner`; explicit `owner/repo` entries can span
 accounts when PAT authentication is used. A GitHub App installation belongs to
 one account, so App-authenticated lists must all use that installation account.
-The App also needs repository Administration write and Contents read permissions.
-Apps created by the current `multirunner connect --repo ...` flow request both.
-For an older App, add Contents read under the App's repository permissions and
-approve the updated permission on its installation.
+The App also needs repository Administration write, Actions read, and Contents
+read permissions. Apps created by the current `multirunner connect` flow
+request them. For an older App, add Actions read and Contents read under the
+App's repository permissions, then approve the updated installation permissions.
 
 In fixed pool mode, every pool needs at least as many slots as configured
 repositories so each repository receives a warm runner. `multirunner doctor`

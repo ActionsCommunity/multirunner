@@ -259,11 +259,15 @@ func (c *Client) QueuedJobLabels(ctx context.Context) ([][]string, error) {
 
 // ResolveQueuedJob enriches a workflow_job webhook event from the authoritative
 // workflow-run record before a privileged pool can authorize it.
-func (c *Client) ResolveQueuedJob(ctx context.Context, runID int64, labels []string) (QueuedJob, error) {
+func (c *Client) ResolveQueuedJob(ctx context.Context, repository string, runID int64, labels []string) (QueuedJob, error) {
 	if runID <= 0 {
 		return QueuedJob{}, fmt.Errorf("workflow run id must be positive")
 	}
-	run, _, err := c.gh.Actions.GetWorkflowRunByID(ctx, c.owner, c.repo, runID)
+	owner, repo, ok := strings.Cut(repository, "/")
+	if !ok || owner == "" || repo == "" {
+		return QueuedJob{}, fmt.Errorf("repository must be owner/repo")
+	}
+	run, _, err := c.gh.Actions.GetWorkflowRunByID(ctx, owner, repo, runID)
 	if err != nil {
 		return QueuedJob{}, fmt.Errorf("get workflow run %d: %w", runID, err)
 	}
@@ -271,7 +275,14 @@ func (c *Client) ResolveQueuedJob(ctx context.Context, runID int64, labels []str
 		return QueuedJob{}, fmt.Errorf("get workflow run %d returned no run", runID)
 	}
 	job := queuedJobMetadata(run)
+	if job.Actor == "" {
+		return QueuedJob{}, fmt.Errorf("workflow run %d has no triggering actor", runID)
+	}
+	if job.Status != "queued" && job.Status != "in_progress" {
+		return QueuedJob{}, fmt.Errorf("workflow run %d is not active: status %q", runID, job.Status)
+	}
 	job.Client = c
+	job.Repository = repository
 	job.Labels = append([]string(nil), labels...)
 	return job, nil
 }
@@ -311,15 +322,12 @@ func queuedJobMetadata(run *github.WorkflowRun) QueuedJob {
 	if triggering := run.GetTriggeringActor(); triggering != nil {
 		actor = triggering.GetLogin()
 	}
-	if actor == "" {
-		if original := run.GetActor(); original != nil {
-			actor = original.GetLogin()
-		}
-	}
 	return QueuedJob{
 		WorkflowPath: run.GetPath(),
 		Event:        run.GetEvent(),
 		Actor:        actor,
+		Ref:          run.GetHeadBranch(),
+		Status:       run.GetStatus(),
 	}
 }
 
