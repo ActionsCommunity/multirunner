@@ -207,7 +207,7 @@ func (c *Client) QueuedJobLabels(ctx context.Context) ([][]string, error) {
 	}
 	runIDs := make([]int64, 0)
 	seen := make(map[int64]struct{})
-	for _, status := range []string{"queued", "in_progress"} {
+	for _, status := range []string{"queued", "in_progress", "pending"} {
 		opts := &github.ListWorkflowRunsOptions{
 			Status:      status,
 			ListOptions: github.ListOptions{PerPage: 100},
