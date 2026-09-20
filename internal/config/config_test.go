@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -374,6 +375,96 @@ func TestToolCachePath(t *testing.T) {
 	}
 }
 
+func TestSharedWorkspacePath(t *testing.T) {
+	pool := Pool{WorkFolder: "_work-pr"}
+	if got := pool.SharedWorkspacePath(); got != "/home/runner/_work-pr" {
+		t.Fatalf("SharedWorkspacePath = %q", got)
+	}
+}
+
+func TestDockerSharedWorkspaceValidation(t *testing.T) {
+	for name, pool := range map[string]string{
+		"requires dind": `
+    os: linux
+    docker: {host: h, share_workspace: true}`,
+		"requires linux": `
+    os: windows
+    docker: {host: h, enable_dind: true, share_workspace: true}`,
+		"requires docker backend": `
+    os: linux
+    backend: containerd
+    docker: {host: h, enable_dind: true, share_workspace: true}`,
+		"rejects nested work folder": `
+    os: linux
+    work_folder: nested/work
+    docker: {host: h, enable_dind: true, share_workspace: true}`,
+		"requires size one": `
+    os: linux
+    size: 2
+    docker: {host: h, enable_dind: true, share_workspace: true}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := writeConfig(t, `
+github: {scope: repo, owner: octocat, repo: api}
+auth: {pat: x}
+pools:
+  - name: builder
+`+pool)
+			if _, err := Load(p); err == nil {
+				t.Fatal("invalid shared workspace configuration was accepted")
+			}
+		})
+	}
+
+	p := writeConfig(t, `
+github: {scope: repo, owner: octocat, repo: api}
+auth: {pat: x}
+pools:
+  - name: builder
+    os: linux
+    work_folder: _work-pr
+    docker: {host: h, enable_dind: true, share_workspace: true}
+`)
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load valid shared workspace: %v", err)
+	}
+	if !cfg.Pools[0].Docker.ShareWorkspace {
+		t.Fatal("share_workspace was not loaded")
+	}
+
+	p = writeConfig(t, `
+github: {scope: repo, owner: octocat, repo: api}
+auth: {pat: x}
+pools:
+  - {name: first, os: linux, work_folder: shared, docker: {host: h, enable_dind: true, share_workspace: true}}
+  - {name: second, os: linux, work_folder: shared, docker: {host: h, enable_dind: true, share_workspace: true}}
+`)
+	if _, err := Load(p); err == nil || !strings.Contains(err.Error(), "share docker.host") {
+		t.Fatalf("Load error = %v, want duplicate shared workspace failure", err)
+	}
+}
+
+func TestDockerTLSRequiresDockerBackend(t *testing.T) {
+	for _, backend := range []string{"containerd", "qemu"} {
+		p := writeConfig(t, fmt.Sprintf(`
+github: {scope: repo, owner: octocat, repo: api}
+auth: {pat: x}
+pools:
+  - name: unsafe
+    os: windows
+    backend: %s
+    qemu: {golden: golden.vhdx}
+    docker:
+      host: tcp://127.0.0.1:2376
+      tls: {ca: ca.pem, cert: cert.pem, key: key.pem}
+`, backend))
+		if _, err := Load(p); err == nil || !strings.Contains(err.Error(), "requires the Docker backend") {
+			t.Fatalf("backend %s error = %v, want Docker backend failure", backend, err)
+		}
+	}
+}
+
 func TestGitCacheEnabled(t *testing.T) {
 	if (GitCache{Mode: "off"}).Enabled() {
 		t.Error("off should be disabled")
@@ -622,6 +713,170 @@ auth: {app_id: 1, installation_id: 2, private_key_path: key.pem}
 pools: [{name: p, os: linux, docker: {host: h}}]`)
 	if _, err := Load(p); err == nil || !strings.Contains(err.Error(), "one installation account") {
 		t.Fatalf("Load error = %v, want installation-account error", err)
+	}
+}
+
+func TestPoolRepositoryBindingAllowsManagedAutoscaleRepository(t *testing.T) {
+	p := writeConfig(t, `
+github:
+  scope: repos
+  owner: octocat
+  repos: [api, web]
+auth: {pat: x}
+provisioning: autoscale
+pools:
+  - name: builder
+    os: linux
+    repository: octocat/api
+    labels: [container-build]
+    docker: {host: h}
+`)
+	c, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !c.Pools[0].CanServeRepository("OCTOCAT/API") {
+		t.Fatal("repository binding must match case-insensitively")
+	}
+	if c.Pools[0].CanServeRepository("octocat/web") {
+		t.Fatal("repository binding allowed a different managed repository")
+	}
+}
+
+func TestPoolRepositoryBindingRejectsUnmanagedRepository(t *testing.T) {
+	p := writeConfig(t, `
+github:
+  scope: repos
+  owner: octocat
+  repos: [api]
+auth: {pat: x}
+provisioning: autoscale
+pools:
+  - name: builder
+    os: linux
+    repository: octocat/other
+    labels: [container-build]
+    docker: {host: h}
+`)
+	if _, err := Load(p); err == nil || !strings.Contains(err.Error(), "is not managed") {
+		t.Fatalf("Load error = %v, want unmanaged repository failure", err)
+	}
+}
+
+func TestPoolRepositoryBindingRequiresAutoscale(t *testing.T) {
+	p := writeConfig(t, `
+github: {scope: repo, owner: octocat, repo: api}
+auth: {pat: x}
+provisioning: pool
+pools:
+  - name: builder
+    os: linux
+    repository: octocat/api
+    labels: [container-build]
+    docker: {host: h}
+`)
+	if _, err := Load(p); err == nil || !strings.Contains(err.Error(), "requires provisioning: autoscale") {
+		t.Fatalf("Load error = %v, want autoscale requirement", err)
+	}
+}
+
+func TestPoolWorkflowAuthorizationMatchesFullTuple(t *testing.T) {
+	p := writeConfig(t, `
+github:
+  scope: repos
+  owner: octocat
+  repos: [api]
+auth: {pat: x}
+provisioning: autoscale
+pools:
+  - name: builder
+    os: linux
+    repository: octocat/api
+    workflows:
+      - .github/workflows/build.yml
+      - .github/workflows/verify.yaml
+    workflow_event: workflow_dispatch
+    workflow_actor: octocat
+    workflow_ref: main
+    labels: [container-build]
+    docker: {host: h}
+`)
+	c, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	pool := c.Pools[0]
+	if !pool.CanServeJob("OCTOCAT/API", ".github/workflows/build.yml", "WORKFLOW_DISPATCH", "OctoCat", "MAIN") {
+		t.Fatal("matching workflow authorization tuple was rejected")
+	}
+	for name, allowed := range map[string]bool{
+		"other repository": pool.CanServeJob("octocat/web", ".github/workflows/build.yml", "workflow_dispatch", "octocat", "main"),
+		"other workflow":   pool.CanServeJob("octocat/api", ".github/workflows/ci.yml", "workflow_dispatch", "octocat", "main"),
+		"other event":      pool.CanServeJob("octocat/api", ".github/workflows/build.yml", "pull_request", "octocat", "main"),
+		"other actor":      pool.CanServeJob("octocat/api", ".github/workflows/build.yml", "workflow_dispatch", "contributor", "main"),
+		"other ref":        pool.CanServeJob("octocat/api", ".github/workflows/build.yml", "workflow_dispatch", "octocat", "feature"),
+	} {
+		if allowed {
+			t.Errorf("%s unexpectedly matched workflow authorization", name)
+		}
+	}
+}
+
+func TestPoolWorkflowAuthorizationRequiresCompleteTuple(t *testing.T) {
+	p := writeConfig(t, `
+github: {scope: repo, owner: octocat, repo: api}
+auth: {pat: x}
+provisioning: autoscale
+pools:
+  - name: builder
+    os: linux
+    repository: octocat/api
+    workflows: [.github/workflows/build.yml]
+    labels: [container-build]
+    docker: {host: h}
+`)
+	if _, err := Load(p); err == nil || !strings.Contains(err.Error(), "requires workflows, workflow_event, workflow_actor, and workflow_ref") {
+		t.Fatalf("Load error = %v, want complete workflow authorization failure", err)
+	}
+}
+
+func TestPoolRepositoryBindingAllowsOrganizationWebhookScope(t *testing.T) {
+	p := writeConfig(t, `
+github: {scope: org, owner: octocat}
+auth: {pat: x}
+provisioning: webhook
+pools:
+  - name: builder
+    os: linux
+    repository: octocat/api
+    labels: [container-build]
+    docker: {host: h}
+`)
+	if _, err := Load(p); err != nil {
+		t.Fatalf("Load organization repository binding: %v", err)
+	}
+}
+
+func TestDockerTLSRequiresCompleteTCPConfiguration(t *testing.T) {
+	for name, docker := range map[string]string{
+		"missing key": `{host: "tcp://127.0.0.1:2376", tls: {ca: ca.pem, cert: cert.pem}}`,
+		"named pipe":  `{host: "npipe:////./pipe/docker_engine", tls: {ca: ca.pem, cert: cert.pem, key: key.pem}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := writeConfig(t, `
+github: {scope: repo, owner: octocat, repo: api}
+auth: {pat: x}
+provisioning: autoscale
+pools:
+  - name: builder
+    os: linux
+    labels: [container-build]
+    docker: `+docker+`
+`)
+			if _, err := Load(p); err == nil {
+				t.Fatal("invalid Docker TLS configuration was accepted")
+			}
+		})
 	}
 }
 

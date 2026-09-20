@@ -198,13 +198,14 @@ func (c *Client) RunnerBusy(ctx context.Context, runnerID int64) (bool, error) {
 	return out.GetBusy(), nil
 }
 
-// QueuedJobLabels returns the requested labels for queued workflow jobs in repo
-// scope. Org/enterprise scope returns nil (no cheap REST endpoint; use webhook
-// mode there).
-func (c *Client) QueuedJobLabels(ctx context.Context) ([][]string, error) {
+// QueuedWorkflowJobs returns queued jobs with the workflow metadata needed for
+// pool authorization. Org/enterprise scope returns nil because there is no
+// cheap repository workflow-runs endpoint for those scopes.
+func (c *Client) QueuedWorkflowJobs(ctx context.Context) ([]QueuedJob, error) {
 	if c.scope != config.ScopeRepo {
 		return nil, nil
 	}
+	runsByID := make(map[int64]*github.WorkflowRun)
 	runIDs := make([]int64, 0)
 	seen := make(map[int64]struct{})
 	for _, status := range []string{"queued", "in_progress", "pending"} {
@@ -222,6 +223,7 @@ func (c *Client) QueuedJobLabels(ctx context.Context) ([][]string, error) {
 				if _, ok := seen[id]; !ok {
 					seen[id] = struct{}{}
 					runIDs = append(runIDs, id)
+					runsByID[id] = run
 				}
 			}
 			if resp.NextPage == 0 {
@@ -230,23 +232,71 @@ func (c *Client) QueuedJobLabels(ctx context.Context) ([][]string, error) {
 			opts.Page = resp.NextPage
 		}
 	}
-	var labels [][]string
+	var queued []QueuedJob
 	for _, runID := range runIDs {
-		jobs, err := c.queuedJobsForRun(ctx, runID)
+		jobs, err := c.queuedJobsForRun(ctx, runsByID[runID])
 		if err != nil {
 			return nil, err
 		}
-		labels = append(labels, jobs...)
+		queued = append(queued, jobs...)
+	}
+	return queued, nil
+}
+
+// QueuedJobLabels preserves the label-only view for diagnostics and callers
+// that do not make authorization decisions.
+func (c *Client) QueuedJobLabels(ctx context.Context) ([][]string, error) {
+	jobs, err := c.QueuedWorkflowJobs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	labels := make([][]string, len(jobs))
+	for i, job := range jobs {
+		labels[i] = job.Labels
 	}
 	return labels, nil
 }
 
-func (c *Client) queuedJobsForRun(ctx context.Context, runID int64) ([][]string, error) {
+// ResolveQueuedJob enriches a workflow_job webhook event from the authoritative
+// workflow-run record before a privileged pool can authorize it.
+func (c *Client) ResolveQueuedJob(ctx context.Context, repository string, runID int64, labels []string) (QueuedJob, error) {
+	if runID <= 0 {
+		return QueuedJob{}, fmt.Errorf("workflow run id must be positive")
+	}
+	owner, repo, ok := strings.Cut(repository, "/")
+	if !ok || owner == "" || repo == "" {
+		return QueuedJob{}, fmt.Errorf("repository must be owner/repo")
+	}
+	run, _, err := c.gh.Actions.GetWorkflowRunByID(ctx, owner, repo, runID)
+	if err != nil {
+		return QueuedJob{}, fmt.Errorf("get workflow run %d: %w", runID, err)
+	}
+	if run == nil {
+		return QueuedJob{}, fmt.Errorf("get workflow run %d returned no run", runID)
+	}
+	job := queuedJobMetadata(run)
+	if job.Actor == "" {
+		return QueuedJob{}, fmt.Errorf("workflow run %d has no triggering actor", runID)
+	}
+	if job.Status != "queued" && job.Status != "in_progress" {
+		return QueuedJob{}, fmt.Errorf("workflow run %d is not active: status %q", runID, job.Status)
+	}
+	job.Client = c
+	job.Repository = repository
+	job.Labels = append([]string(nil), labels...)
+	return job, nil
+}
+
+func (c *Client) queuedJobsForRun(ctx context.Context, run *github.WorkflowRun) ([]QueuedJob, error) {
+	if run == nil {
+		return nil, fmt.Errorf("queued workflow run is nil")
+	}
+	runID := run.GetID()
 	opts := &github.ListWorkflowJobsOptions{
 		Filter:      "latest",
 		ListOptions: github.ListOptions{PerPage: 100},
 	}
-	var labels [][]string
+	var queued []QueuedJob
 	for {
 		jobs, resp, err := c.gh.Actions.ListWorkflowJobs(ctx, c.owner, c.repo, runID, opts)
 		if err != nil {
@@ -254,7 +304,9 @@ func (c *Client) queuedJobsForRun(ctx context.Context, runID int64) ([][]string,
 		}
 		for _, job := range jobs.Jobs {
 			if job.GetStatus() == "queued" {
-				labels = append(labels, job.Labels)
+				item := queuedJobMetadata(run)
+				item.Labels = append([]string(nil), job.Labels...)
+				queued = append(queued, item)
 			}
 		}
 		if resp.NextPage == 0 {
@@ -262,7 +314,21 @@ func (c *Client) queuedJobsForRun(ctx context.Context, runID int64) ([][]string,
 		}
 		opts.Page = resp.NextPage
 	}
-	return labels, nil
+	return queued, nil
+}
+
+func queuedJobMetadata(run *github.WorkflowRun) QueuedJob {
+	actor := ""
+	if triggering := run.GetTriggeringActor(); triggering != nil {
+		actor = triggering.GetLogin()
+	}
+	return QueuedJob{
+		WorkflowPath: run.GetPath(),
+		Event:        run.GetEvent(),
+		Actor:        actor,
+		Ref:          run.GetHeadBranch(),
+		Status:       run.GetStatus(),
+	}
 }
 
 // Scope reports the configured scope.

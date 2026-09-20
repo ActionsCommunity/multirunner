@@ -19,6 +19,9 @@ func TestBuildManifest(t *testing.T) {
 	if perms["organization_self_hosted_runners"] != "write" {
 		t.Errorf("org perms = %v", perms)
 	}
+	if perms["actions"] != "read" {
+		t.Errorf("org actions permission = %v, want read", perms["actions"])
+	}
 	if m["redirect_url"] != "http://127.0.0.1:9/callback" {
 		t.Errorf("redirect_url = %v", m["redirect_url"])
 	}
@@ -33,6 +36,9 @@ func TestBuildManifest(t *testing.T) {
 	}
 	if m["default_permissions"].(map[string]any)["contents"] != "read" {
 		t.Errorf("repo contents permission = %v, want read", m["default_permissions"])
+	}
+	if m["default_permissions"].(map[string]any)["actions"] != "read" {
+		t.Errorf("repo actions permission = %v, want read", m["default_permissions"])
 	}
 }
 

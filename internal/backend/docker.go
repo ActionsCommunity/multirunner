@@ -12,6 +12,13 @@ import (
 	"github.com/docker/docker/client"
 )
 
+// DockerTLSConfig identifies the mutual-TLS client files for one Docker daemon.
+type DockerTLSConfig struct {
+	CAFile   string
+	CertFile string
+	KeyFile  string
+}
+
 // dockerBackend drives a single Docker daemon (Linux or Windows). The OS-specific
 // constructors set host, name, and isolation.
 type dockerBackend struct {
@@ -21,15 +28,33 @@ type dockerBackend struct {
 	autoPull  bool
 }
 
-func newDockerBackend(name, host string, isolation container.Isolation) (*dockerBackend, error) {
-	cli, err := client.NewClientWithOpts(
+func newDockerBackend(name, host string, isolation container.Isolation, tls DockerTLSConfig) (*dockerBackend, error) {
+	opts := []client.Opt{
 		client.WithHost(host),
 		client.WithAPIVersionNegotiation(),
-	)
+	}
+	tlsOpt, err := dockerTLSClientOption(tls)
+	if err != nil {
+		return nil, fmt.Errorf("docker client (%s): %w", host, err)
+	}
+	if tlsOpt != nil {
+		opts = append(opts, tlsOpt)
+	}
+	cli, err := client.NewClientWithOpts(opts...)
 	if err != nil {
 		return nil, fmt.Errorf("docker client (%s): %w", host, err)
 	}
 	return &dockerBackend{cli: cli, name: name, isolation: isolation, autoPull: true}, nil
+}
+
+func dockerTLSClientOption(tls DockerTLSConfig) (client.Opt, error) {
+	if tls == (DockerTLSConfig{}) {
+		return nil, nil
+	}
+	if tls.CAFile == "" || tls.CertFile == "" || tls.KeyFile == "" {
+		return nil, fmt.Errorf("CA, certificate, and key files are all required")
+	}
+	return client.WithTLSClientConfig(tls.CAFile, tls.CertFile, tls.KeyFile), nil
 }
 
 func (b *dockerBackend) Name() string { return b.name }
