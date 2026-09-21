@@ -1,9 +1,11 @@
 package scaleset
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -72,12 +74,13 @@ type fakeHandle struct {
 	closeOnce sync.Once
 	killCount int
 	blockKill bool
+	exitCode  int
 }
 
 func (h *fakeHandle) Wait(ctx context.Context) (int, error) {
 	select {
 	case <-h.done:
-		return 0, nil
+		return h.exitCode, nil
 	case <-ctx.Done():
 		return 0, ctx.Err()
 	}
@@ -135,6 +138,16 @@ func (b *fakeBackend) requests() []backend.LaunchRequest {
 func (b *fakeBackend) finish(i int) {
 	b.mu.Lock()
 	h := b.handles[i]
+	b.mu.Unlock()
+	h.complete()
+}
+
+// fail ends a runner with a non-zero exit code, the shape of a runner that never
+// took a job: a rejected image, a runner build GitHub refuses, a bad JIT config.
+func (b *fakeBackend) fail(i, code int) {
+	b.mu.Lock()
+	h := b.handles[i]
+	h.exitCode = code
 	b.mu.Unlock()
 	h.complete()
 }
@@ -212,7 +225,12 @@ func TestDesiredCountIsIdempotentWhileRunnersAreUp(t *testing.T) {
 	}
 }
 
-func TestExitedRunnerFreesItsSlot(t *testing.T) {
+// TestExitedRunnerIsReplacedImmediately pins that a freed slot is refilled as
+// soon as the runner exits, without waiting for the listener's next message.
+// Waiting for it halves throughput for the rest of a queue: with a cap of 2, two
+// runners finishing moments apart left one slot idle for a whole poll interval,
+// so six queued jobs ran one at a time instead of two.
+func TestExitedRunnerIsReplacedImmediately(t *testing.T) {
 	be := &fakeBackend{}
 	l := New(&fakeJIT{}, be, Options{ScaleSetID: 1})
 
@@ -220,14 +238,56 @@ func TestExitedRunnerFreesItsSlot(t *testing.T) {
 		t.Fatalf("launch: %v", err)
 	}
 	be.finish(0)
-	waitFor(t, func() bool { return l.Running() == 1 })
 
-	// The slot is free, so asking for 2 again starts exactly one replacement.
-	if _, err := l.HandleDesiredRunnerCount(context.Background(), 2); err != nil {
-		t.Fatalf("relaunch: %v", err)
+	// No second HandleDesiredRunnerCount: the replacement must come from the exit.
+	waitFor(t, func() bool { return len(be.requests()) == 3 })
+	waitFor(t, func() bool { return l.Running() == 2 })
+}
+
+// TestExitedRunnerIsNotReplacedPastDemand pins the bound on that refill: GitHub
+// asking for one runner must not be turned into an endless supply of them as
+// each finishes.
+func TestExitedRunnerIsNotReplacedPastDemand(t *testing.T) {
+	be := &fakeBackend{}
+	l := New(&fakeJIT{}, be, Options{ScaleSetID: 1})
+
+	if _, err := l.HandleDesiredRunnerCount(context.Background(), 1); err != nil {
+		t.Fatalf("launch: %v", err)
 	}
-	if n := len(be.requests()); n != 3 {
-		t.Fatalf("launched %d runners in total, want 3", n)
+	// The queue drains: GitHub now wants nothing.
+	if _, err := l.HandleDesiredRunnerCount(context.Background(), 0); err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	be.finish(0)
+
+	waitFor(t, func() bool { return l.Running() == 0 })
+	if n := len(be.requests()); n != 1 {
+		t.Errorf("launched %d runners, want 1 (no refill once demand is gone)", n)
+	}
+}
+
+// TestShutdownStopsRefilling pins that a runner exiting during shutdown does not
+// start a replacement that would outlive the shutdown.
+func TestShutdownStopsRefilling(t *testing.T) {
+	be := &fakeBackend{}
+	l := New(&fakeJIT{}, be, Options{ScaleSetID: 1})
+
+	if _, err := l.HandleDesiredRunnerCount(context.Background(), 2); err != nil {
+		t.Fatalf("launch: %v", err)
+	}
+	if err := l.Shutdown(context.Background()); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+	waitFor(t, func() bool { return l.Running() == 0 })
+
+	if n := len(be.requests()); n != 2 {
+		t.Errorf("launched %d runners, want the original 2 and no refill", n)
+	}
+	if _, err := l.HandleDesiredRunnerCount(context.Background(), 4); err != nil {
+		t.Fatalf("post-shutdown call: %v", err)
+	}
+	if n := len(be.requests()); n != 2 {
+		t.Errorf("launched %d runners after shutdown, want no new ones", n)
 	}
 }
 
@@ -383,5 +443,98 @@ func TestJobCallbacksDoNotProvision(t *testing.T) {
 	}
 	if n := len(be.requests()); n != 0 {
 		t.Fatalf("job callbacks launched %d runners, want 0", n)
+	}
+}
+
+// TestAwaitExitReportsAShortRun pins that a runner which dies before taking a
+// job is reported. Silence here is the failure that reads as "the job just sits
+// queued": the listener re-launches on the next poll and nothing says why.
+func TestAwaitExitReportsAShortRun(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	l := New(&fakeJIT{}, &fakeBackend{}, Options{ScaleSetID: 1, Image: "img", Logger: logger})
+	l.awaitExit("mr-scaleset-1-dead", &instantHandle{code: 1})
+
+	out := buf.String()
+	if !strings.Contains(out, "runner exited without completing a job") {
+		t.Errorf("a non-zero exit was not reported:\n%s", out)
+	}
+	if !strings.Contains(out, "mr-scaleset-1-dead") {
+		t.Errorf("the report does not name the runner:\n%s", out)
+	}
+	if l.Running() != 0 {
+		t.Errorf("running = %d, want the slot freed", l.Running())
+	}
+}
+
+// TestAwaitExitReportsACleanExitQuietly pins that a runner which exited 0 is not
+// reported as a failure however briefly it lived. An ephemeral runner can finish
+// a small job in seconds, so a duration heuristic here produces false alarms on
+// every fast job - which is exactly what it did the first time.
+func TestAwaitExitReportsACleanExitQuietly(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	l := New(&fakeJIT{}, &fakeBackend{}, Options{ScaleSetID: 1, Image: "img", Logger: logger})
+	l.awaitExit("mr-scaleset-1-ok", &slowHandle{})
+
+	if out := buf.String(); strings.Contains(out, "level=ERROR") || strings.Contains(out, "level=WARN") {
+		t.Errorf("a clean exit was reported as a problem:\n%s", out)
+	}
+}
+
+// instantHandle is a runner that exits immediately with a code.
+type instantHandle struct{ code int }
+
+func (h *instantHandle) Wait(context.Context) (int, error) { return h.code, nil }
+func (h *instantHandle) Kill(context.Context) error        { return nil }
+func (h *instantHandle) ID() string                        { return "instant" }
+func (h *instantHandle) Logs(context.Context) (io.ReadCloser, error) {
+	return io.NopCloser(strings.NewReader("")), nil
+}
+
+// slowHandle is a runner that lived long enough to have taken a job.
+type slowHandle struct{}
+
+func (h *slowHandle) Wait(context.Context) (int, error) {
+	time.Sleep(10 * time.Millisecond)
+	return 0, nil
+}
+func (h *slowHandle) Kill(context.Context) error { return nil }
+func (h *slowHandle) ID() string                 { return "slow" }
+func (h *slowHandle) Logs(context.Context) (io.ReadCloser, error) {
+	return io.NopCloser(strings.NewReader("")), nil
+}
+
+// TestFailedRunnerIsNotReplacedImmediately pins the bound on refilling that the
+// throughput fix needs. A runner that completed a job earns an instant
+// replacement; one that died without taking a job must not, or a rejected image
+// becomes a launch loop paced only by container start time, each iteration
+// registering a fresh runner with GitHub. Those wait for the listener's next
+// message instead.
+func TestFailedRunnerIsNotReplacedImmediately(t *testing.T) {
+	be := &fakeBackend{}
+	l := New(&fakeJIT{}, be, Options{ScaleSetID: 1, MaxRunners: 2})
+
+	if _, err := l.HandleDesiredRunnerCount(context.Background(), 2); err != nil {
+		t.Fatalf("launch: %v", err)
+	}
+	be.fail(0, 1)
+
+	waitFor(t, func() bool { return l.Running() == 1 })
+	// Give a refill the same window a successful exit's replacement gets.
+	time.Sleep(100 * time.Millisecond)
+	if n := len(be.requests()); n != 2 {
+		t.Errorf("launched %d runners, want the original 2: a runner that died must not be replaced until the listener asks again", n)
+	}
+
+	// The listener asking again is still honoured, so the pool recovers once
+	// GitHub confirms the work is still there.
+	if _, err := l.HandleDesiredRunnerCount(context.Background(), 2); err != nil {
+		t.Fatalf("relaunch: %v", err)
+	}
+	if n := len(be.requests()); n != 3 {
+		t.Errorf("launched %d runners, want a replacement on the next message", n)
 	}
 }
