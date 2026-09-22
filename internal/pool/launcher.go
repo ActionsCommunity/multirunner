@@ -55,6 +55,21 @@ func (l *Launcher) Max() int { return l.cfg.Size }
 // Labels are the runner labels for this pool.
 func (l *Launcher) Labels() []string { return l.cfg.Labels }
 
+// Allows reports whether this pool may register a runner for job.
+func (l *Launcher) Allows(job github.QueuedJob) bool {
+	target := job.Repository
+	if target == "" && job.Client != nil {
+		target = job.Client.Target()
+	}
+	return job.Client != nil && l.cfg.CanServeJob(
+		target, job.WorkflowPath, job.Event, job.Actor, job.Ref,
+	)
+}
+
+// RequiresWorkflowMetadata reports whether this pool authorizes jobs using
+// fields that are available only from the workflow-run record.
+func (l *Launcher) RequiresWorkflowMetadata() bool { return len(l.cfg.Workflows) != 0 }
+
 // EnsureImage makes sure the runner image is present.
 func (l *Launcher) EnsureImage(ctx context.Context) error {
 	l.logger.Info("ensuring runner image", "image", l.image)
@@ -83,10 +98,26 @@ func (l *Launcher) RunOneForSlot(ctx context.Context, slot int) (int, error) {
 // job; otherwise the runner idles on a repo that has no work while the job that
 // triggered the launch stays queued. A nil client is rejected.
 func (l *Launcher) RunOneOn(ctx context.Context, client *github.Client) (int, error) {
+	return l.RunJob(ctx, github.QueuedJob{Client: client})
+}
+
+// RunJob provisions a fresh JIT runner for an authorized queued job.
+func (l *Launcher) RunJob(ctx context.Context, job github.QueuedJob) (int, error) {
+	client := job.Client
 	// Resolve before the OnStart hook so an unusable pool cannot leak an
 	// unmatched start into the metrics.
 	if client == nil {
 		return 0, fmt.Errorf("pool %s: no github client available to register a runner", l.cfg.Name)
+	}
+	if !l.Allows(job) {
+		target := job.Repository
+		if target == "" {
+			target = client.Target()
+		}
+		return 0, fmt.Errorf(
+			"pool %s: job from repository %s workflow %q event %q actor %q is not allowed",
+			l.cfg.Name, target, job.WorkflowPath, job.Event, job.Actor,
+		)
 	}
 	if l.hooks.OnStart != nil {
 		l.hooks.OnStart(l.cfg.Name)

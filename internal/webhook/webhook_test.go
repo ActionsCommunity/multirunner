@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GerardSmit/multirunner/internal/autoscale"
 	"github.com/GerardSmit/multirunner/internal/config"
@@ -21,12 +22,15 @@ import (
 // recordingProvider stands in for a real GitHub provider and records which repo
 // the scaler was asked to place a runner on. Returning a nil client is the
 // legitimate "repo not managed here" answer, so no network access is needed.
-type recordingProvider struct{ asked []string }
+type recordingProvider struct {
+	asked  []string
+	client *github.Client
+}
 
 func (p *recordingProvider) ClientForSlot(int) *github.Client { return nil }
 func (p *recordingProvider) ClientFor(repo string) *github.Client {
 	p.asked = append(p.asked, repo)
-	return nil
+	return p.client
 }
 func (p *recordingProvider) QueuedJobs(context.Context) ([]github.QueuedJob, error) {
 	return nil, nil
@@ -35,6 +39,11 @@ func (p *recordingProvider) Scope() config.Scope { return config.ScopeRepo }
 
 func testServerWith(secret string, gh github.ClientProvider) *Server {
 	sc := autoscale.New([]*pool.Launcher{}, gh, config.ScopeRepo, 0, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	return New("127.0.0.1:0", "/webhook", secret, sc, slog.New(slog.NewTextHandler(io.Discard, nil)))
+}
+
+func testServerWithLaunchers(secret string, gh github.ClientProvider, launchers ...*pool.Launcher) *Server {
+	sc := autoscale.New(launchers, gh, config.ScopeRepo, 0, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	return New("127.0.0.1:0", "/webhook", secret, sc, slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 
@@ -106,6 +115,84 @@ func TestHandleWorkflowJobQueuedRoutesRepo(t *testing.T) {
 	if p.asked[0] != "o/repoB" {
 		t.Errorf("scaler asked to place on %q, want o/repoB", p.asked[0])
 	}
+}
+
+func TestHandleWorkflowJobQueuedDoesNotFetchUnusedWorkflowMetadata(t *testing.T) {
+	var requestedPath string
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestedPath = r.URL.Path
+		_, _ = io.WriteString(w, `{
+			"id": 42,
+			"path": ".github/workflows/build.yml",
+			"event": "workflow_dispatch",
+			"triggering_actor": {"login": "octocat"}
+		}`)
+	}))
+	defer api.Close()
+
+	client, err := github.New(context.Background(),
+		config.GitHub{URL: api.URL, Scope: config.ScopeRepo, Owner: "o", Repo: "repoB"},
+		config.Auth{PAT: "test-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	secret := "s3cret"
+	s := testServerWith(secret, &recordingProvider{client: client})
+	body := `{"action":"queued","repository":{"full_name":"o/repoB"},"workflow_job":{"run_id":42,"labels":["container-build"]}}`
+	if code := do(t, s, "workflow_job", sign(secret, []byte(body)), body); code != http.StatusOK {
+		t.Fatalf("queued = %d", code)
+	}
+	if requestedPath != "" {
+		t.Fatalf("unused workflow run metadata was requested at %q", requestedPath)
+	}
+}
+
+func TestHandleWorkflowJobQueuedReturnsBeforeRequiredMetadataLookupCompletes(t *testing.T) {
+	requestStarted := make(chan struct{})
+	releaseRequest := make(chan struct{})
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(requestStarted)
+		<-releaseRequest
+		_, _ = io.WriteString(w, `{"id":42,"status":"completed","triggering_actor":{"login":"octocat"}}`)
+	}))
+	defer api.Close()
+
+	client, err := github.New(context.Background(),
+		config.GitHub{URL: api.URL, Scope: config.ScopeRepo, Owner: "o", Repo: "repoB"},
+		config.Auth{PAT: "test-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	launcher := pool.NewLauncher(config.Pool{
+		Name:          "builder",
+		Repository:    "o/repoB",
+		Labels:        []string{"container-build"},
+		Workflows:     []string{".github/workflows/build.yml"},
+		WorkflowEvent: "workflow_dispatch",
+		WorkflowActor: "octocat",
+		WorkflowRef:   "main",
+	}, "", nil, &recordingProvider{}, nil, nil,
+		slog.New(slog.NewTextHandler(io.Discard, nil)), pool.Hooks{})
+	s := testServerWithLaunchers("", &recordingProvider{client: client}, launcher)
+	body := `{"action":"queued","repository":{"full_name":"o/repoB"},"workflow_job":{"run_id":42,"labels":["container-build"]}}`
+
+	returned := make(chan int, 1)
+	go func() { returned <- do(t, s, "workflow_job", "", body) }()
+	select {
+	case code := <-returned:
+		if code != http.StatusOK {
+			t.Errorf("queued = %d", code)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("webhook response waited for workflow metadata")
+	}
+	select {
+	case <-requestStarted:
+	case <-time.After(time.Second):
+		t.Fatal("asynchronous workflow metadata lookup did not start")
+	}
+	close(releaseRequest)
 }
 
 func TestHandleBadSignature(t *testing.T) {

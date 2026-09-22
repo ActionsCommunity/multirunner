@@ -976,11 +976,25 @@ func newBackend(pc config.Pool) (backend.Backend, error) {
 	}
 	switch pc.OS {
 	case "linux":
+		if tls := dockerTLSConfig(pc); tls != (backend.DockerTLSConfig{}) {
+			return backend.NewDockerLinuxTLS(pc.Docker.Host, tls)
+		}
 		return backend.NewDockerLinux(pc.Docker.Host)
 	case "windows":
+		if tls := dockerTLSConfig(pc); tls != (backend.DockerTLSConfig{}) {
+			return backend.NewDockerWindowsTLS(pc.Docker.Host, pc.Docker.Isolation, tls)
+		}
 		return backend.NewDockerWindows(pc.Docker.Host, pc.Docker.Isolation)
 	default:
 		return nil, nil
+	}
+}
+
+func dockerTLSConfig(pc config.Pool) backend.DockerTLSConfig {
+	return backend.DockerTLSConfig{
+		CAFile:   pc.Docker.TLS.CAFile,
+		CertFile: pc.Docker.TLS.CertFile,
+		KeyFile:  pc.Docker.TLS.KeyFile,
 	}
 }
 

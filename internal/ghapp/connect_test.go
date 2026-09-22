@@ -85,6 +85,9 @@ func TestManifestProperties(t *testing.T) {
 						if m["redirect_url"] != "http://127.0.0.1:9/callback" {
 							t.Errorf("redirect_url = %v", m["redirect_url"])
 						}
+						if m["setup_url"] != "http://127.0.0.1:9/setup" {
+							t.Errorf("setup_url = %v", m["setup_url"])
+						}
 					})
 				}
 			}

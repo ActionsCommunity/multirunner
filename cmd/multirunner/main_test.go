@@ -46,6 +46,27 @@ func TestInstallerDryRunFlagsExist(t *testing.T) {
 	}
 }
 
+func TestNewBackendUsesDockerTLSConfiguration(t *testing.T) {
+	pool := config.Pool{
+		OS: "linux",
+		Docker: config.Docker{
+			Host: "tcp://127.0.0.1:2376",
+			TLS: config.DockerTLS{
+				CAFile: "missing-ca.pem", CertFile: "missing-cert.pem", KeyFile: "missing-key.pem",
+			},
+		},
+	}
+	if _, err := newBackend(pool); err == nil {
+		t.Fatal("Linux backend ignored Docker TLS certificate paths")
+	}
+
+	pool.OS = "windows"
+	pool.Docker.Isolation = "process"
+	if _, err := newBackend(pool); err == nil {
+		t.Fatal("Windows backend ignored Docker TLS certificate paths")
+	}
+}
+
 func TestOtherMutatingCommandsExposeDryRun(t *testing.T) {
 	root := rootCmd()
 	if root.Flags().Lookup("dry-run") == nil {

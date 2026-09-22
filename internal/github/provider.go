@@ -44,8 +44,14 @@ type ClientProvider interface {
 // queued it. Carrying the client is what lets the scaler register the new runner
 // where the work actually is instead of wherever rotation happens to point.
 type QueuedJob struct {
-	Client *Client
-	Labels []string
+	Client       *Client
+	Repository   string
+	Labels       []string
+	WorkflowPath string
+	Event        string
+	Actor        string
+	Ref          string
+	Status       string
 }
 
 // Verify *Client satisfies ClientProvider at compile time.
@@ -64,11 +70,11 @@ func (c *Client) ClientFor(repo string) *Client {
 
 // QueuedJobs returns this client's queued jobs, each paired with the client.
 func (c *Client) QueuedJobs(ctx context.Context) ([]QueuedJob, error) {
-	labels, err := c.QueuedJobLabels(ctx)
+	jobs, err := c.QueuedWorkflowJobs(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return pairWith(c, labels), nil
+	return pairWith(c, jobs), nil
 }
 
 // Target names the registration target for logging: "owner/repo" in repo scope,
@@ -81,12 +87,16 @@ func (c *Client) Target() string {
 }
 
 // pairWith tags each label set with the client whose repo produced it.
-func pairWith(c *Client, labels [][]string) []QueuedJob {
-	jobs := make([]QueuedJob, 0, len(labels))
-	for _, l := range labels {
-		jobs = append(jobs, QueuedJob{Client: c, Labels: l})
+func pairWith(c *Client, jobs []QueuedJob) []QueuedJob {
+	out := make([]QueuedJob, len(jobs))
+	for i, job := range jobs {
+		job.Client = c
+		if job.Repository == "" && c.scope == config.ScopeRepo {
+			job.Repository = c.Target()
+		}
+		out[i] = job
 	}
-	return jobs
+	return out
 }
 
 // RepoSet wraps multiple per-repo *Clients. Warm-pool placement is stable by
@@ -165,12 +175,12 @@ func (rs *RepoSet) QueuedJobs(ctx context.Context) ([]QueuedJob, error) {
 	for offset := range rs.clients {
 		i := (start + offset) % len(rs.clients)
 		c := rs.clients[i]
-		labels, err := c.QueuedJobLabels(ctx)
+		jobs, err := c.QueuedWorkflowJobs(ctx)
 		if err != nil {
 			failures[rs.repos[i]] = err
 			continue
 		}
-		all = append(all, pairWith(c, labels)...)
+		all = append(all, pairWith(c, jobs)...)
 	}
 	if len(failures) > 0 {
 		return all, &RepoPollError{Failures: failures, Total: len(rs.clients)}

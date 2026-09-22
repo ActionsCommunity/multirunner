@@ -161,8 +161,6 @@ jobs:
           username: gerardsmit
           password: ${{ secrets.DOCKER_PAT }}
 
-      - uses: docker/setup-buildx-action@v3
-
       - name: Build + push windows runner images
         shell: bash
         # Git Bash rewrites the `/c` and `/s` switches handed to cmd into

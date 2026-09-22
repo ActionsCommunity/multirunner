@@ -146,15 +146,21 @@ func TestQueuedJobLabels(t *testing.T) {
 		switch r.URL.Path {
 		case "/repos/octo/hello/actions/runs":
 			status := r.URL.Query().Get("status")
-			if status != "queued" && status != "in_progress" {
+			if status != "queued" && status != "in_progress" && status != "pending" {
 				t.Errorf("status query = %q", status)
 			}
-			if status == "in_progress" {
+			if status == "in_progress" || status == "pending" {
 				_ = json.NewEncoder(w).Encode(map[string]any{"workflow_runs": []map[string]any{}})
 				return
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"workflow_runs": []map[string]any{{"id": 101}},
+				"workflow_runs": []map[string]any{{
+					"id": 101, "path": ".github/workflows/build.yml",
+					"event":            "workflow_dispatch",
+					"head_branch":      "main",
+					"status":           "queued",
+					"triggering_actor": map[string]any{"login": "octocat"},
+				}},
 			})
 		case "/repos/octo/hello/actions/runs/101/jobs":
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -180,6 +186,128 @@ func TestQueuedJobLabels(t *testing.T) {
 	}
 }
 
+func TestQueuedWorkflowJobsCarriesAuthorizationMetadata(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/octo/hello/actions/runs":
+			if r.URL.Query().Get("status") == "in_progress" {
+				_ = json.NewEncoder(w).Encode(map[string]any{"workflow_runs": []map[string]any{}})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"workflow_runs": []map[string]any{{
+					"id": 101, "path": ".github/workflows/build.yml",
+					"event":            "workflow_dispatch",
+					"head_branch":      "main",
+					"status":           "queued",
+					"triggering_actor": map[string]any{"login": "octocat"},
+				}},
+			})
+		case "/repos/octo/hello/actions/runs/101/jobs":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"jobs": []map[string]any{{
+					"status": "queued", "labels": []string{"container-build"},
+				}},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv, config.ScopeRepo, "octo", "hello")
+	jobs, err := c.QueuedWorkflowJobs(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("jobs = %#v", jobs)
+	}
+	job := jobs[0]
+	if job.WorkflowPath != ".github/workflows/build.yml" ||
+		job.Event != "workflow_dispatch" || job.Actor != "octocat" ||
+		job.Ref != "main" || job.Status != "queued" {
+		t.Fatalf("authorization metadata = %#v", job)
+	}
+}
+
+func TestResolveQueuedJobUsesWorkflowRunMetadata(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/octo/hello/actions/runs/101" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": 101, "path": ".github/workflows/build.yml",
+			"event":            "workflow_dispatch",
+			"head_branch":      "main",
+			"status":           "queued",
+			"triggering_actor": map[string]any{"login": "octocat"},
+		})
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv, config.ScopeRepo, "octo", "hello")
+	job, err := c.ResolveQueuedJob(context.Background(), "octo/hello", 101, []string{"container-build"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.Client != c || job.WorkflowPath != ".github/workflows/build.yml" ||
+		job.Event != "workflow_dispatch" || job.Actor != "octocat" ||
+		job.Ref != "main" || job.Status != "queued" ||
+		len(job.Labels) != 1 || job.Labels[0] != "container-build" {
+		t.Fatalf("resolved job = %#v", job)
+	}
+}
+
+func TestResolveQueuedJobRejectsInvalidRunID(t *testing.T) {
+	c := &Client{scope: config.ScopeRepo, owner: "octo", repo: "hello"}
+	if _, err := c.ResolveQueuedJob(context.Background(), "octo/hello", 0, nil); err == nil {
+		t.Fatal("zero workflow run id was accepted")
+	}
+}
+
+func TestResolveQueuedJobUsesWebhookRepositoryForOrgClient(t *testing.T) {
+	var requestedPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestedPath = r.URL.Path
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": 42, "path": ".github/workflows/build.yml",
+			"event":            "workflow_dispatch",
+			"head_branch":      "main",
+			"status":           "in_progress",
+			"triggering_actor": map[string]any{"login": "octocat"},
+		})
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv, config.ScopeOrg, "octo", "")
+	if _, err := c.ResolveQueuedJob(context.Background(), "octo/repo", 42, nil); err != nil {
+		t.Fatal(err)
+	}
+	if requestedPath != "/repos/octo/repo/actions/runs/42" {
+		t.Fatalf("workflow run metadata path = %q", requestedPath)
+	}
+}
+
+func TestResolveQueuedJobRejectsInactiveOrUnattributedRun(t *testing.T) {
+	for name, payload := range map[string]string{
+		"inactive":                 `{"id":101,"status":"completed","triggering_actor":{"login":"octocat"}}`,
+		"missing triggering actor": `{"id":101,"status":"queued","actor":{"login":"octocat"}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.WriteString(w, payload)
+			}))
+			defer srv.Close()
+			c := newTestClient(t, srv, config.ScopeRepo, "octo", "hello")
+			if _, err := c.ResolveQueuedJob(context.Background(), "octo/hello", 101, nil); err == nil {
+				t.Fatal("unsafe workflow run was accepted")
+			}
+		})
+	}
+}
+
 func TestQueuedJobLabelsPaginatesRunsAndJobsAndChecksActiveRuns(t *testing.T) {
 	var srv *httptest.Server
 	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -194,6 +322,8 @@ func TestQueuedJobLabelsPaginatesRunsAndJobsAndChecksActiveRuns(t *testing.T) {
 				_ = json.NewEncoder(w).Encode(map[string]any{"workflow_runs": []map[string]any{{"id": 102}}})
 			case r.URL.Query().Get("status") == "in_progress":
 				_ = json.NewEncoder(w).Encode(map[string]any{"workflow_runs": []map[string]any{{"id": 201}}})
+			case r.URL.Query().Get("status") == "pending":
+				_ = json.NewEncoder(w).Encode(map[string]any{"workflow_runs": []map[string]any{{"id": 301}}})
 			default:
 				t.Errorf("unexpected runs query = %q", r.URL.RawQuery)
 			}
@@ -214,6 +344,10 @@ func TestQueuedJobLabelsPaginatesRunsAndJobsAndChecksActiveRuns(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"jobs": []map[string]any{
 				{"status": "queued", "labels": []string{"self-hosted", "active-run"}},
 			}})
+		case "/repos/octo/hello/actions/runs/301/jobs":
+			_ = json.NewEncoder(w).Encode(map[string]any{"jobs": []map[string]any{
+				{"status": "queued", "labels": []string{"self-hosted", "pending-run"}},
+			}})
 		default:
 			t.Errorf("unexpected path = %s", r.URL.String())
 			http.NotFound(w, r)
@@ -226,10 +360,11 @@ func TestQueuedJobLabelsPaginatesRunsAndJobsAndChecksActiveRuns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("QueuedJobLabels: %v", err)
 	}
-	if len(labels) != 3 {
-		t.Fatalf("labels = %#v, want jobs from two job pages and one active run", labels)
+	if len(labels) != 4 {
+		t.Fatalf("labels = %#v, want jobs from two job pages, one active run, and one pending run", labels)
 	}
-	if labels[0][1] != "first-page" || labels[1][1] != "second-page" || labels[2][1] != "active-run" {
+	if labels[0][1] != "first-page" || labels[1][1] != "second-page" ||
+		labels[2][1] != "active-run" || labels[3][1] != "pending-run" {
 		t.Fatalf("labels arrived in wrong order: %#v", labels)
 	}
 }

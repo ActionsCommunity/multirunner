@@ -37,7 +37,7 @@ jobs:
             CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
               go build -trimpath -ldflags "-s -w" -o "$out" ./cmd/multirunner
           done
-          ( cd dist && sha256sum * > SHA256SUMS.txt )
+          ( cd dist && sha256sum ./* > SHA256SUMS.txt )
           ls -la dist
 
       - name: Upload build artifacts

@@ -16,13 +16,23 @@ import (
 // or "hyperv" explicitly because their local registry cannot describe the
 // daemon host.
 func NewDockerWindows(host, isolation string) (Backend, error) {
+	return newDockerWindows(host, isolation, DockerTLSConfig{})
+}
+
+// NewDockerWindowsTLS creates a Windows Docker backend using mutual-TLS client
+// credentials.
+func NewDockerWindowsTLS(host, isolation string, tls DockerTLSConfig) (Backend, error) {
+	return newDockerWindows(host, isolation, tls)
+}
+
+func newDockerWindows(host, isolation string, tls DockerTLSConfig) (Backend, error) {
 	if isolation == "" || isolation == "auto" {
 		if !isLocalWindowsPipe(host) {
 			return nil, fmt.Errorf("docker windows isolation=auto requires a verified-local npipe host; set isolation to process or hyperv for %q", host)
 		}
 		isolation = autoIsolation()
 	}
-	return newDockerBackend("docker-windows", host, container.Isolation(isolation))
+	return newDockerBackend("docker-windows", host, container.Isolation(isolation), tls)
 }
 
 func isLocalWindowsPipe(host string) bool {
