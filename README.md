@@ -362,6 +362,8 @@ heuristic scan finds `self-hosted` in a workflow. The workflow scan is advisory
 because custom-label and matrix expressions may not contain that literal;
 authentication, permission, timeout, and truncated-tree failures still make
 doctor exit non-zero instead of reporting an incomplete preflight as ready.
+The one exception is the shared device-flow App on a `--repo` connect: it has
+no `contents: read` by design, so doctor skips the scan with a note.
 
 ### Windows runners with QEMU
 

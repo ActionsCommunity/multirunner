@@ -30,6 +30,8 @@ diagnosing. All come from the current source; redact values before sharing.
   pools report `UNREACHABLE` spuriously; re-run with the hung pool isolated.
 - For `repo`/`repos` scope, Actions disabled is a hard failure; no `self-hosted`
   workflow found is a note only, failing only when the scan was incomplete.
+  A 403 on the scan under the shared device-flow App is a skip note, not a
+  failure: that App has no `contents: read`; `--own-app` restores the check.
 - For `org`/`enterprise` scope, `doctor` lists one runner to prove the
   credential reaches the runner-admin API, reporting a rejected credential or
   missing scope apart from an unknown owner or enterprise slug. An empty runner

@@ -246,6 +246,10 @@ func (c *Client) CreateRegistrationToken(ctx context.Context) (string, error) {
 // best-effort cleanup races with that and should treat this as success.
 var ErrRunnerNotFound = errors.New("runner registration not found")
 
+// ErrContentsForbidden marks a tree read the credential could not perform even
+// though it can see the repository: the contents permission is missing.
+var ErrContentsForbidden = errors.New("contents permission missing")
+
 // DeleteRunner removes a runner registration from GitHub by ID. Ephemeral
 // runners self-remove after their one job, so this is the cleanup path for
 // runners that exited without consuming their registration. Returns
@@ -420,6 +424,12 @@ func (c *Client) RepoFilePaths(ctx context.Context) ([]string, error) {
 	}
 	tree, _, err := c.gh.Git.GetTree(ctx, c.owner, c.repo, repo.GetDefaultBranch(), true)
 	if err != nil {
+		// The repo GET above already succeeded, so a 403 here is specifically the
+		// contents permission: the credential can see the repo but not its tree.
+		var ghErr *github.ErrorResponse
+		if errors.As(err, &ghErr) && ghErr.Response != nil && ghErr.Response.StatusCode == http.StatusForbidden {
+			err = errors.Join(ErrContentsForbidden, err)
+		}
 		return nil, fmt.Errorf("get tree (%s): %w", repo.GetDefaultBranch(), err)
 	}
 	if tree.GetTruncated() {

@@ -5,6 +5,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -24,6 +25,7 @@ import (
 	"github.com/GerardSmit/multirunner/internal/backend"
 	"github.com/GerardSmit/multirunner/internal/cache"
 	"github.com/GerardSmit/multirunner/internal/config"
+	"github.com/GerardSmit/multirunner/internal/ghapp"
 	"github.com/GerardSmit/multirunner/internal/gitcache"
 	"github.com/GerardSmit/multirunner/internal/github"
 	"github.com/GerardSmit/multirunner/internal/metrics"
@@ -1162,13 +1164,27 @@ func warnNoSelfHostedWorkflows(ctx context.Context, cfg *config.Config) error {
 	var unused []string
 	var incomplete []repoCheckResult
 	results := runRepoChecks(ctx, cfg, repoTargetsSelfHosted)
+	var skipped []string
 	for _, result := range results {
-		if result.err != nil {
+		switch {
+		case result.err != nil && usesSharedRepoApp(cfg.Auth) && errors.Is(result.err, github.ErrContentsForbidden):
+			// The shared repo App registers runners only; it has no contents:read
+			// on purpose, so this is the documented limit rather than a
+			// misconfiguration. Failing on it would fail every repo connect that
+			// went through the device flow.
+			skipped = append(skipped, result.name)
+		case result.err != nil:
 			fmt.Printf("\n[%s] could not scan workflows: %v\n", result.name, result.err)
 			incomplete = append(incomplete, result)
-		} else if !result.ok {
+		case !result.ok:
 			unused = append(unused, result.name)
 		}
+	}
+	if len(skipped) > 0 {
+		fmt.Printf("\nNOTE: workflow scan skipped for %d of %d configured repo(s): %s\n"+
+			"        the shared device-flow App has no contents:read, so doctor cannot see .github/workflows.\n"+
+			"        Runners still register; use `multirunner connect --own-app` if you want this check.\n",
+			len(skipped), len(results), strings.Join(skipped, ", "))
 	}
 	if len(unused) > 0 {
 		fmt.Printf("\nNOTE: heuristic scan found no workflow targeting a self-hosted runner in %d of %d configured repo(s): %s\n"+
@@ -1181,6 +1197,13 @@ func warnNoSelfHostedWorkflows(ctx context.Context, cfg *config.Config) error {
 		return fmt.Errorf("workflow scans incomplete for %d repo(s)", len(incomplete))
 	}
 	return nil
+}
+
+// usesSharedRepoApp reports whether auth is the device flow against the
+// published repo App. A hand-set client_id names some other App whose
+// permissions are unknown, so its 403s keep failing doctor.
+func usesSharedRepoApp(auth config.Auth) bool {
+	return auth.IsDeviceApp() && (auth.ClientID == "" || auth.ClientID == ghapp.DefaultPersonalClientID)
 }
 
 // repoTargetsSelfHosted reports whether any workflow file mentions the

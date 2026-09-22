@@ -158,7 +158,9 @@ read-only repository reachability check.
 `multirunner doctor --config <path>` validates the auth shape and performs
 bounded read-only checks using the configured multirunner credentials. For
 `repo` and `repos`, Actions disabled is a hard failure, while a missing
-`self-hosted` workflow is only a note unless the scan was incomplete. For `org`
+`self-hosted` workflow is only a note unless the scan was incomplete. Under the
+shared device-flow App the scan is skipped with a note rather than failed,
+since that App has no `contents: read` by design. For `org`
 and `enterprise`, doctor lists one runner to prove the credential reaches the
 runner-admin API for that scope; a wrong token, a token missing `admin:org` or
 `manage_runners:enterprise`, and an unknown org login or enterprise slug are

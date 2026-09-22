@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/GerardSmit/multirunner/internal/config"
+	"github.com/GerardSmit/multirunner/internal/ghapp"
 	"github.com/GerardSmit/multirunner/internal/winvm"
 )
 
@@ -556,6 +557,105 @@ func TestWarnNoSelfHostedWorkflowsChecksRepoScope(t *testing.T) {
 	out := captureStdout(t, func() { warnNoSelfHostedWorkflows(context.Background(), cfg) })
 	if !strings.Contains(out, "heuristic") || !strings.Contains(out, "o/a") {
 		t.Fatalf("single-repo workflow output = %q", out)
+	}
+}
+
+// forbiddenServer answers 403 on paths matching forbidPath (the answer GitHub
+// gives an App for a permission it was never granted) and serves the repo
+// otherwise.
+func forbiddenServer(t *testing.T, forbidPath string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, forbidPath) {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = io.WriteString(w, `{"message":"Resource not accessible by integration"}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"default_branch":"main"}`)
+	}))
+}
+
+func forbiddenTreeServer(t *testing.T) *httptest.Server { return forbiddenServer(t, "/git/trees/") }
+
+func deviceAuth(t *testing.T) config.Auth {
+	t.Helper()
+	tokenPath := filepath.Join(t.TempDir(), "token.json")
+	if err := ghapp.SaveUserToken(tokenPath, &ghapp.UserToken{
+		AccessToken:  "ghu_x",
+		RefreshToken: "ghr_x",
+		Expiry:       time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return config.Auth{ClientID: ghapp.DefaultPersonalClientID, TokenPath: tokenPath}
+}
+
+// TestWarnNoSelfHostedWorkflowsSkipsScanForDeviceApp pins that the shared repo
+// App's missing contents:read is reported as a note, not a preflight failure:
+// every device-flow repo connect hits this 403, and the runners still register.
+func TestWarnNoSelfHostedWorkflowsSkipsScanForDeviceApp(t *testing.T) {
+	srv := forbiddenTreeServer(t)
+	defer srv.Close()
+
+	cfg := selfHostedConfig(t, srv)
+	cfg.GitHub.Scope = config.ScopeRepo
+	cfg.GitHub.Repo = "a"
+	cfg.GitHub.Repos = nil
+	cfg.Auth = deviceAuth(t)
+
+	var err error
+	out := captureStdout(t, func() { err = warnNoSelfHostedWorkflows(context.Background(), cfg) })
+	if err != nil {
+		t.Fatalf("device-app 403 must not fail doctor: %v (output %q)", err, out)
+	}
+	for _, want := range []string{"NOTE", "skipped", "o/a", "--own-app"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q: %q", want, out)
+		}
+	}
+	if strings.Contains(out, "could not scan") {
+		t.Errorf("403 under device auth still reported as a scan failure: %q", out)
+	}
+}
+
+// The skip is only for the published repo App's known permission set. A PAT,
+// a device flow against some other client_id, or a 403 on the repo itself
+// (which the shared App's metadata:read always allows) stays a failure.
+func TestWarnNoSelfHostedWorkflowsStillFailsOnOtherForbidden(t *testing.T) {
+	cases := []struct {
+		name   string
+		forbid string
+		auth   func(*testing.T) config.Auth
+	}{
+		{"pat", "/git/trees/", func(*testing.T) config.Auth { return config.Auth{PAT: "x"} }},
+		{"custom client id", "/git/trees/", func(t *testing.T) config.Auth {
+			a := deviceAuth(t)
+			a.ClientID = "Iv23liSomeOtherApp"
+			return a
+		}},
+		{"repo get forbidden", "/repos/o/a", deviceAuth},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := forbiddenServer(t, tc.forbid)
+			defer srv.Close()
+
+			cfg := selfHostedConfig(t, srv)
+			cfg.GitHub.Scope = config.ScopeRepo
+			cfg.GitHub.Repo = "a"
+			cfg.GitHub.Repos = nil
+			cfg.Auth = tc.auth(t)
+
+			var err error
+			out := captureStdout(t, func() { err = warnNoSelfHostedWorkflows(context.Background(), cfg) })
+			if err == nil {
+				t.Fatalf("403 must fail doctor; output %q", out)
+			}
+			if !strings.Contains(out, "could not scan workflows") {
+				t.Errorf("output missing scan failure: %q", out)
+			}
+		})
 	}
 }
 
