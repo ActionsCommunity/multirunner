@@ -23,8 +23,17 @@ type SessionOptions struct {
 	RunnerGroup string
 	// Labels are advertised by the scale set, so runs-on can target it.
 	Labels []string
+	// Target is the GitHub target URL used as a reconciliation boundary.
+	Target string
+	// Pool distinguishes backend resources when names and labels overlap.
+	Pool string
+	// Instance is the stable host identity. Empty uses the OS hostname.
+	Instance string
 	// Launch describes how to start each runner.
 	Launch Options
+	// OnStateChange reports whether this required session is serving,
+	// backing off, or permanently unavailable.
+	OnStateChange func(SessionAvailability)
 }
 
 // Run holds a long-poll session open for one pool and provisions runners onto
@@ -39,58 +48,69 @@ func Run(
 	opts SessionOptions,
 	logger *slog.Logger,
 ) error {
-	if err := be.EnsureImage(ctx, opts.Launch.Image); err != nil {
+	sessionCtx, cancelSession := context.WithCancel(ctx)
+	defer cancelSession()
+
+	if backend.OwnedRunnerStoreFor(be) == nil {
+		return permanentSessionError{fmt.Errorf(
+			"backend %q does not support scale-set ownership reconciliation", be.Name())}
+	}
+	if err := be.EnsureImage(sessionCtx, opts.Launch.Image); err != nil {
 		return fmt.Errorf("ensure image for %q: %w", opts.Name, err)
 	}
 
-	groupID, err := runnerGroupID(ctx, client, opts.RunnerGroup)
+	groupID, err := runnerGroupID(sessionCtx, client, opts.RunnerGroup)
 	if err != nil {
-		return err
+		return classifySessionError(err)
 	}
 
-	set, err := ensureScaleSet(ctx, client, opts, groupID, logger)
+	set, err := ensureScaleSet(sessionCtx, client, opts, groupID, logger)
 	if err != nil {
-		return err
+		return classifySessionError(err)
 	}
 	client.SetSystemInfo(systemInfo(set.ID))
 
-	owner, err := os.Hostname()
-	if err != nil || owner == "" {
-		owner = "multirunner"
+	instance := opts.Instance
+	if instance == "" {
+		instance, err = os.Hostname()
+		if err != nil || instance == "" {
+			instance = "multirunner"
+		}
+	}
+	poolName := opts.Pool
+	if poolName == "" {
+		poolName = opts.Name
+	}
+	ownership := backend.RunnerOwnership{
+		Instance:   instance,
+		Target:     opts.Target,
+		Pool:       poolName,
+		ScaleSetID: set.ID,
 	}
 	// One host can hold several sessions, so an ambiguous owner makes a stuck
 	// session impossible to attribute back to a pool.
-	owner = fmt.Sprintf("%s-%s", owner, opts.Name)
-
-	session, err := client.MessageSessionClient(ctx, set.ID, owner)
-	if err != nil {
-		return fmt.Errorf("open message session for %q: %w", opts.Name, err)
-	}
-	defer func() {
-		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-		defer cancel()
-		if err := session.Close(closeCtx); err != nil {
-			logger.Warn("close message session failed", slog.String("scaleSet", opts.Name), slog.Any("error", err))
-		}
-	}()
-
-	l, err := listener.New(session, listener.Config{
-		ScaleSetID: set.ID,
-		MaxRunners: opts.Launch.MaxRunners,
-		Logger:     logger.WithGroup("listener"),
-	})
-	if err != nil {
-		return fmt.Errorf("create listener for %q: %w", opts.Name, err)
-	}
+	owner := fmt.Sprintf("%s-%s", instance, opts.Name)
 
 	launchOpts := opts.Launch
 	launchOpts.ScaleSetID = set.ID
-	launcher := New(client, be, launchOpts)
+	launchOpts.Ownership = ownership
+	launchOpts.Logger = logger.WithGroup("launcher")
+	launcher := New(sessionCtx, client, be, launchOpts)
 	defer func() {
 		if err := launcher.Shutdown(context.WithoutCancel(ctx)); err != nil {
 			logger.Warn("stop scale set runners failed", slog.String("scaleSet", opts.Name), slog.Any("error", err))
 		}
 	}()
+	reconciled, err := launcher.Reconcile(sessionCtx)
+	if err != nil {
+		return classifySessionError(fmt.Errorf("reconcile scale set %q: %w", opts.Name, err))
+	}
+	if reconciled > 0 {
+		logger.Info("reconciled runners from previous process",
+			slog.String("scaleSet", opts.Name),
+			slog.Int("count", reconciled))
+	}
+	go launcher.reconcilePeriodically(sessionCtx)
 
 	logger.Info("listening for jobs",
 		slog.String("scaleSet", opts.Name),
@@ -98,10 +118,63 @@ func Run(
 		slog.String("backend", be.Name()),
 	)
 
-	if err := l.Run(ctx, launcher); err != nil && !errors.Is(err, context.Canceled) {
-		return fmt.Errorf("listener for %q stopped: %w", opts.Name, err)
+	listenerSession := listenerSession{
+		client: client, scaleSetID: set.ID, owner: owner,
+		opts: opts, launcher: launcher, logger: logger,
+	}
+	return superviseSession(sessionCtx, SupervisedSession{
+		Name:          opts.Name,
+		Run:           listenerSession.run,
+		OnStateChange: opts.OnStateChange,
+	}, defaultSupervisorConfig(), logger)
+}
+
+type listenerSession struct {
+	client     *scaleset.Client
+	scaleSetID int
+	owner      string
+	opts       SessionOptions
+	launcher   *Launcher
+	logger     *slog.Logger
+}
+
+func (s listenerSession) run(ctx context.Context, available func()) error {
+	session, err := s.client.MessageSessionClient(ctx, s.scaleSetID, s.owner)
+	if err != nil {
+		return classifySessionError(fmt.Errorf("open message session for %q: %w", s.opts.Name, err))
+	}
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		if err := session.Close(closeCtx); err != nil {
+			s.logger.Warn("close message session failed", slog.String("scaleSet", s.opts.Name), slog.Any("error", err))
+		}
+	}()
+
+	l, err := listener.New(session, listener.Config{
+		ScaleSetID: s.scaleSetID,
+		MaxRunners: s.opts.Launch.MaxRunners,
+		Logger:     s.logger.WithGroup("listener"),
+	})
+	if err != nil {
+		return classifySessionError(fmt.Errorf("create listener for %q: %w", s.opts.Name, err))
+	}
+	available()
+	if err := l.Run(ctx, s.launcher); err != nil && !errors.Is(err, context.Canceled) {
+		return classifySessionError(fmt.Errorf("listener for %q stopped: %w", s.opts.Name, err))
 	}
 	return nil
+}
+
+func classifySessionError(err error) error {
+	if isPermanentSessionError(err) {
+		return permanentSessionError{err}
+	}
+	return err
+}
+
+type permanentSessionError struct {
+	error
 }
 
 func runnerGroupID(ctx context.Context, client *scaleset.Client, name string) (int, error) {

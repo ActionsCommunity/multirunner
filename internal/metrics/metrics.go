@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -21,6 +22,9 @@ type Metrics struct {
 	active *prometheus.GaugeVec
 	jobs   *prometheus.CounterVec
 	reprov *prometheus.CounterVec
+
+	healthMu         sync.RWMutex
+	requiredSessions map[string]bool
 }
 
 // New builds the metrics set.
@@ -36,7 +40,10 @@ func New() *Metrics {
 		Name: "multirunner_reprovision_errors_total", Help: "Runner launch/JIT errors.",
 	}, []string{"pool"})
 	reg.MustRegister(active, jobs, reprov)
-	return &Metrics{reg: reg, active: active, jobs: jobs, reprov: reprov}
+	return &Metrics{
+		reg: reg, active: active, jobs: jobs, reprov: reprov,
+		requiredSessions: make(map[string]bool),
+	}
 }
 
 // Hooks returns pool lifecycle hooks that update the metrics.
@@ -55,15 +62,43 @@ func (m *Metrics) Hooks() pool.Hooks {
 	}
 }
 
-// Serve runs the /metrics + /health endpoints until ctx is cancelled.
-func (m *Metrics) Serve(ctx context.Context, listen string, logger *slog.Logger) error {
+// SetRequiredSessionAvailable records whether a required scale-set session is
+// currently able to serve work.
+func (m *Metrics) SetRequiredSessionAvailable(name string, available bool) {
+	m.healthMu.Lock()
+	defer m.healthMu.Unlock()
+	m.requiredSessions[name] = available
+}
+
+func (m *Metrics) healthy() bool {
+	m.healthMu.RLock()
+	defer m.healthMu.RUnlock()
+	for _, available := range m.requiredSessions {
+		if !available {
+			return false
+		}
+	}
+	return true
+}
+
+// Handler returns the metrics and health HTTP surface.
+func (m *Metrics) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(m.reg, promhttp.HandlerOpts{}))
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
+		if !m.healthy() {
+			http.Error(w, "degraded", http.StatusServiceUnavailable)
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, "ok")
 	})
-	srv := &http.Server{Addr: listen, Handler: mux}
+	return mux
+}
+
+// Serve runs the /metrics + /health endpoints until ctx is cancelled.
+func (m *Metrics) Serve(ctx context.Context, listen string, logger *slog.Logger) error {
+	srv := &http.Server{Addr: listen, Handler: m.Handler()}
 	go func() {
 		logger.Info("metrics listening", "addr", listen)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
