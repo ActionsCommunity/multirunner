@@ -24,7 +24,7 @@ const (
 	serviceWorkerConfigEnv      = "MULTIRUNNER_INTERNAL_SERVICE_CONFIG"
 	serviceWorkerInstallDepsEnv = "MULTIRUNNER_INTERNAL_SERVICE_INSTALL_DEPS"
 	serviceWorkerInteractiveEnv = "MULTIRUNNER_INTERNAL_SERVICE_INTERACTIVE"
-	serviceWorkerStopTimeout    = 8 * time.Second
+	serviceWorkerStopTimeout    = 12 * time.Second
 	serviceOutputDrainTimeout   = time.Second
 )
 

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"syscall"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -16,7 +17,9 @@ type windowsSupervisedProcessGroup struct {
 	job windows.Handle
 }
 
-func prepareSupervisedProcess(*exec.Cmd) {}
+func prepareSupervisedProcess(cmd *exec.Cmd) {
+	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_NEW_PROCESS_GROUP}
+}
 
 func attachSupervisedProcess(cmd *exec.Cmd) (supervisedProcessGroup, error) {
 	if cmd.Process == nil {
