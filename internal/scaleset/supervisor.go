@@ -171,7 +171,7 @@ func isPermanentSessionError(err error) bool {
 		return true
 	}
 	message := err.Error()
-	for _, status := range []string{"400", "401", "403", "422"} {
+	for _, status := range []string{"400", "422"} {
 		if isHTTPStatusMessage(message, status) {
 			return true
 		}

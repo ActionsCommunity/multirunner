@@ -213,7 +213,7 @@ func (b *containerdBackend) ListOwnedRunners(ctx context.Context, ownership Runn
 	for _, key := range keys {
 		args = append(args, "--filter", "label="+key+"="+labels[key])
 	}
-	args = append(args, "--format", "{{.ID}}")
+	args = append(args, "--no-trunc", "--format", "{{.ID}}")
 	out, err := b.run(ctx, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list owned containers: %w", err)

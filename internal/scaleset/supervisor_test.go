@@ -155,10 +155,10 @@ func TestRunSupervisedSurfacesPermanentFailure(t *testing.T) {
 	permanentReturned := make(chan struct{})
 	sessions := []SupervisedSession{
 		{
-			Name: "unauthorized",
+			Name: "invalid-configuration",
 			Run: func(context.Context, func()) error {
 				close(permanentReturned)
-				return errors.New(`request failed(status="401 Unauthorized")`)
+				return errors.New(`request failed(status="400 Bad Request")`)
 			},
 		},
 		{
@@ -187,7 +187,7 @@ func TestRunSupervisedSurfacesPermanentFailure(t *testing.T) {
 	cancel()
 	err := <-done
 	if err == nil {
-		t.Fatal("runSupervised returned nil for permanent authentication failure")
+		t.Fatal("runSupervised returned nil for permanent configuration failure")
 	}
 	<-siblingCanceled
 }
@@ -212,15 +212,24 @@ func TestHTTPNotFoundIsRecoverable(t *testing.T) {
 	}
 }
 
-func TestAuthenticationAndConfigurationErrorsRemainPermanent(t *testing.T) {
+func TestConfigurationErrorsRemainPermanent(t *testing.T) {
 	for _, err := range []error{
 		errors.New(`request failed(status="400 Bad Request")`),
-		errors.New(`request failed(status="401 Unauthorized")`),
-		errors.New(`request failed(status="403 Forbidden")`),
 		errors.New(`request failed(status="422 Unprocessable Entity")`),
 	} {
 		if !isPermanentSessionError(err) {
 			t.Errorf("error %q was not permanent", err)
+		}
+	}
+}
+
+func TestAuthenticationAndRateLimitErrorsAreRecoverable(t *testing.T) {
+	for _, err := range []error{
+		errors.New(`request failed(status="401 Unauthorized")`),
+		errors.New(`request failed(status="403 Forbidden")`),
+	} {
+		if isPermanentSessionError(err) {
+			t.Errorf("error %q was permanent, want retry", err)
 		}
 	}
 }
@@ -258,7 +267,7 @@ func TestSupervisorReportsPermanentUnavailability(t *testing.T) {
 	err := superviseSession(t.Context(), SupervisedSession{
 		Name: "linux",
 		Run: func(context.Context, func()) error {
-			return errors.New(`request failed(status="401 Unauthorized")`)
+			return errors.New(`request failed(status="400 Bad Request")`)
 		},
 		OnStateChange: func(state SessionAvailability) {
 			states = append(states, state)

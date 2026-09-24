@@ -363,6 +363,9 @@ func TestContainerdOwnedRunnerStoreRejectsForeignResource(t *testing.T) {
 		t.Fatalf("owned runners = %+v", got)
 	}
 	joined := strings.Join(listArgs, " ")
+	if !strings.Contains(joined, "--no-trunc") {
+		t.Errorf("container ID listing may truncate resource IDs: %v", listArgs)
+	}
 	for key, value := range reconciliationLabels(ownership) {
 		if !strings.Contains(joined, "label="+key+"="+value) {
 			t.Errorf("ownership filter missing %s=%s: %v", key, value, listArgs)

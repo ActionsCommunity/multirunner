@@ -513,12 +513,12 @@ func TestFailedLaunchRegistrationCleanupRetriesWithoutStoppingListener(t *testin
 }
 
 func TestPermanentLaunchFailureStopsListenerCallback(t *testing.T) {
-	jit := &fakeJIT{err: errors.New(`request failed(status="401 Unauthorized")`)}
+	jit := &fakeJIT{err: errors.New(`request failed(status="400 Bad Request")`)}
 	l := New(t.Context(), jit, &fakeBackend{}, Options{ScaleSetID: 1})
 
 	got, err := l.HandleDesiredRunnerCount(t.Context(), 1)
 	if err == nil {
-		t.Fatal("permanent authentication failure was suppressed")
+		t.Fatal("permanent configuration failure was suppressed")
 	}
 	if got != 0 {
 		t.Fatalf("reported %d runners, want 0", got)
