@@ -181,16 +181,18 @@ func TestSanitizedLogTailRetainsCrashSummaryWithLatestDiagnostics(t *testing.T) 
 	}
 }
 
-type failingReader struct{}
+// erroringReader is a source whose read fails, standing in for a service pipe
+// that breaks mid-capture.
+type erroringReader struct{}
 
-func (failingReader) Read([]byte) (int, error) {
+func (erroringReader) Read([]byte) (int, error) {
 	return 0, io.ErrUnexpectedEOF
 }
 
 func TestCopyServiceOutputSanitizesReadErrors(t *testing.T) {
 	logger := &recordingServiceLogger{}
 	tail := &sanitizedLogTail{}
-	copyServiceOutputWithSecrets(failingReader{}, logger, tail, "configured-secret")
+	copyServiceOutputWithSecrets(erroringReader{}, logger, tail, "configured-secret")
 	if len(logger.errors) != 1 || !strings.Contains(tail.String(), "capture failed") {
 		t.Fatalf("capture error logger=%v tail=%q", logger.errors, tail.String())
 	}

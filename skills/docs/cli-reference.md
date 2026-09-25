@@ -31,6 +31,7 @@ optional braces) as the variable name, and only for:
 
 - `auth.pat`
 - `auth.private_key_path`
+- `auth.token_path`
 - `webhook.secret`
 - `cache.access_token`
 
@@ -106,39 +107,128 @@ real startup do.
 ```text
 multirunner connect --org <org> [options]
 multirunner connect --repo <owner/repo> [options]
+multirunner connect --org <org> --own-app [options]
 ```
+
+`connect` has two credential models that differ in who owns the credential.
+**Device flow (default):** authorizes the shared public "Multirunner Connect" App
+with a device code and saves the resulting user access token; nothing is created,
+no browser callback, works over SSH, and the credential is tied to the authorizing
+user (it dies with their org access). **Own app (`--own-app`):** creates a
+dedicated GitHub App via the manifest browser flow, yielding an org-owned
+installation credential that survives an individual leaving the org. On a terminal
+without `--own-app`, connect asks which model to use (default: shared app). Off a
+terminal (`--non-interactive`, or redirected/null stdin) there is nobody to ask and
+nobody watching a printed device code, so connect fails unless the model is stated:
+pass `--own-app`, or `--device` to accept a printed code.
+
+There are two shared Apps, chosen by the target, because no single App should hold
+both repository administration and organization runner administration:
+`multirunner-connect` (`organization_self_hosted_runners: write`) for `--org`, and
+`multirunner-connect-personal` (`administration: write` + `metadata: read`) for
+`--repo`. Both live on github.com only, so a config whose `github.url` names
+another host is refused with a pointer to `--own-app`.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--org <login>` | empty | Create/install an organization-scoped GitHub App. |
-| `--repo <owner/repo>` | empty | Create/install a repository-scoped GitHub App. |
-| `--name <name>` | `multirunner` | Requested GitHub App name. |
-| `--port <port>` | `0` | Loopback browser-flow callback port; `0` chooses one automatically. |
-| `--key-out <path>` | config directory + `multirunner-app.private-key.pem` | Private-key output path. |
-| `--dry-run` | false | Print the App permissions, callback, target, and local writes without opening a browser or changing GitHub/files. |
+| `--org <login>` | empty | Connect at organization scope. |
+| `--repo <owner/repo>` | empty | Connect at repository scope. |
+| `--own-app` | false | Use the manifest flow to create a dedicated GitHub App instead of the shared-App device flow. Enables the manifest-only flags below. |
+| `--name <name>` | `multirunner` | Requested GitHub App name. **`--own-app` only.** |
+| `--port <port>` | `0` | Loopback browser-flow callback port; `0` chooses one automatically. **`--own-app` only.** |
+| `--key-out <path>` | config directory + `multirunner-app.private-key.pem` | Private-key output path. The webhook secret, when GitHub returns one, is written alongside it as `multirunner-app.webhook-secret` (mode `0600`). **`--own-app` only.** |
+| `--webhook-url <url>` | empty | Public **https** URL for `workflow_job` delivery. Sets an active webhook and adds `actions:read`. Validated locally before the browser opens; rejected if it is non-https, embeds credentials, or resolves to a non-public host — `localhost`/`.localhost`, a single-label name, loopback, unspecified, RFC1918, CGNAT (`100.64.0.0/10`), link-local, multicast, unique-local, a zoned IPv6 literal, or a `.local`/`.internal`/`.lan`/`.home.arpa` name. **`--own-app` only.** |
+| `--detect` | false | For an `--org` App, also request `contents:read` so `multirunner detect --repo` can read a repo's trees/contents. A `--repo` App already includes `contents:read` (doctor's workflow scan needs it), so `--detect` is a no-op there. **`--own-app` only.** |
+| `--device` | false | Off a terminal, authorize with a printed device code instead of failing. The code must not reach a log: whoever reads it can authorize their own account into this host before the poll gives up. |
+| `--non-interactive` | false | Never prompt; fail instead of asking. Keeps the command deterministic in scripts and CI. Applies to both models. |
+| `--dry-run` | false | Print the plan without contacting GitHub or writing files. For the device flow it describes the flow and the local writes; with `--own-app` it prints the target, callback, and the exact manifest JSON that would be POSTed. |
 
-The command opens a local browser flow, waits for App creation and installation,
-writes the PEM private key with mode `0600`, and rewrites the config's `github`
-and `auth` sections. It removes `auth.pat` and writes App ID, installation ID,
-and private-key path.
+The manifest-only flags are meaningless in the device flow (no App is created);
+passing any of them without `--own-app` is rejected with a message pointing at
+`--own-app`.
+
+**Device flow (default).** connect requests a device code, prints the user code
+and verification URL, and polls until you authorize. The interactive flow is shown
+as numbered steps (Authentication, Authorize on GitHub, Organization). Only enter a
+code you requested yourself: the device flow has no redirect, so an unsolicited code
+is a phishing lever; it is meant for CLIs and headless hosts. The App must be
+installed on the target before the token can manage its runners; a first-time user
+is authorized but not installed (`GET /user/installations` is empty). On a terminal,
+connect prints `https://github.com/apps/multirunner-connect/installations/new` and
+then waits (polling every ~3s, up to 5 minutes) for the installation to appear,
+continuing with the user access token it already holds — so a first run does not
+throw that token away. `--device` (the off-terminal form) deliberately does not
+wait: it prints the install URL and exits non-zero so scripts fail fast. A `--org` naming a personal
+account is refused: only an organization installation carries
+`organization_self_hosted_runners`. `--repo` has no such requirement — its App is
+installed wherever the repository lives. On success it writes
+`auth.client_id` and `auth.token_path`,
+removing `auth.pat` and any installation-App keys. The user access and refresh
+tokens are stored in `multirunner-user-token.json` next to the config (mode
+`0600`); they rotate on refresh and are never inlined into YAML. At `run` time the
+access token is refreshed automatically before expiry (no client secret; a failed
+refresh tells you to re-run `connect`). Device auth drives scale sets: it follows
+the normal `provisioning: scaleset` default (for non-`repos` scopes) as well as
+`pool`, because the access token is kept fresh across the long-lived scale-set
+session. Enterprise scope and `scope: repos` remain unavailable to device auth. Repository
+scope works through `multirunner-connect-personal`, but that App registers runners
+and nothing else: repo autoscale polling (`actions: read`) and doctor's workflow
+scan (`contents: read`) need `--own-app`. connect says so after a repo connect.
+
+The shared Apps are published by the multirunner project, so their publisher can
+mint installation tokens for every account that installs them. `--own-app` avoids
+that trust relationship entirely.
+
+**Own app (`--own-app`).** The command opens a local browser flow, waits for App
+creation and installation, writes the PEM private key with mode `0600`, and
+rewrites the config's `github` and `auth` sections. It removes `auth.pat` and
+writes App ID, installation ID, and private-key path.
 
 Apply is not transactional: the PEM write happens before the YAML update, so a
 YAML failure can leave a new key behind. An `--org` apply updates scope and owner
 but does not clear pre-existing `github.repo` or `github.repos`; back up the YAML
 and deliberately remove stale target fields before relying on it.
 
-Run the same command with `--dry-run` first. It only validates target syntax and
-derives the displayed paths; it does not read or validate the existing config or
-key-output path, reserve the callback port, or prove GitHub authorization or
-App-name availability.
+The manifest is **derived**, not hardcoded: `metadata:read` is always requested;
+the runner-admin permission follows the scope (`organization_self_hosted_runners:write`
+for `--org`, `administration:write` for `--repo`); `actions:read` is added when
+the App polls the job queue (repo-scope autoscale) or subscribes to `workflow_job`;
+and `contents:read` is always requested for a `--repo` App (doctor's workflow scan
+reads `.github/workflows`) and for other scopes only with `--detect`.
+`default_events` is `["workflow_job"]`
+only when a `--webhook-url` is set, otherwise `[]`. The hook block always carries a
+URL because GitHub rejects a manifest whose hook URL is not publicly reachable even
+when inactive: with `--webhook-url` it is that URL and `active:true`, otherwise it
+is a public placeholder with `active:false`.
+
+Values are resolved in precedence order: explicit flags, then the config file at
+`--config`, then interactive prompts (only when stdin is a real terminal — a
+redirected or null stdin counts as non-interactive — and only without
+`--non-interactive`), then a safe default. The config is read leniently: a
+missing file, an unparseable file, or a file with no `provisioning` key is all
+treated as unknown, so a repo-scope App keeps `actions:read` by default rather
+than dropping it and 403-ing once autoscale is turned on later; an explicit
+`provisioning: pool` is what removes it. `webhook.listen` in the config is a
+local bind address, not a public URL: on a TTY the command prompts for the public
+URL regardless, and a non-empty `listen` only adds an informational line to that
+prompt.
+
+Run the same command with `--dry-run` first. It validates target syntax, resolves
+the manifest from the flags and config, and prints the exact manifest JSON that
+would be POSTed; it does not prompt, reserve the callback port, or prove GitHub
+authorization or App-name availability.
 
 Current implementation details worth planning around:
 
-- Supply exactly one target. Supplying both `--org` and `--repo` is rejected.
-- The App manifest requests `workflow_job`, but its webhook is created inactive.
-  The command receives a webhook secret from GitHub but does **not** write
-  `webhook.secret`, `webhook.listen`, or a reachable webhook URL. Configure and
-  enable autoscale webhooks separately.
+- Supply exactly one target, or answer the scope/target prompt on a TTY.
+  Supplying both `--org` and `--repo` is rejected.
+- Without `--webhook-url`, the hook is registered inactive with a public
+  placeholder. To enable webhook mode later, set the real public URL in the App
+  settings and add the `workflow_job` event (which also needs `actions:read`).
+- The webhook secret GitHub returns once is written to
+  `multirunner-app.webhook-secret` next to the private key. It is **not** inlined
+  into the YAML; point `webhook.secret` at an env var (`${VAR}`) holding that
+  file's contents.
 - The browser flow does not use `github.url`; it currently defaults to
   GitHub.com. Do not assume `--config` makes this flow GHES-aware.
 - Back up the target YAML first. If the existing file cannot be parsed as a
@@ -364,7 +454,7 @@ paths.
 
 | Variable | Read by | Effect |
 | --- | --- | --- |
-| Any name referenced as `${NAME}` / `$NAME` in `auth.pat`, `auth.private_key_path`, `webhook.secret`, or `cache.access_token` | Config loader, for every command that loads configuration | Supplies the secret. Unset becomes empty, which usually then fails validation. Also satisfied from `<config-dir>/.env` or `./.env`. |
+| Any name referenced as `${NAME}` / `$NAME` in `auth.pat`, `auth.private_key_path`, `auth.token_path`, `webhook.secret`, or `cache.access_token` | Config loader, for every command that loads configuration | Supplies the secret. Unset becomes empty, which usually then fails validation. Also satisfied from `<config-dir>/.env` or `./.env`. |
 | `MULTIRUNNER_VM_VNC` | `run` / orchestrator, QEMU runtime VMs | When nonempty it is passed to QEMU as `-vnc <value>` and additionally opens QMP on `127.0.0.1:4457`; otherwise the VM runs with `-display none`. Example: `0.0.0.0:2,websocket=5702`. Debug only: it exposes an unauthenticated console. |
 | `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_<n>`, `GIT_CONFIG_VALUE_<n>` | Git mirror subprocesses when `git_cache` is enabled | Inherited indexed git config is stripped and selectively rebuilt. An unparsable or negative count is ignored with a warning, an oversized count is truncated, an inherited `http.*.extraheader` carrying `Authorization:` is dropped, and while a PAT is in use inherited `url.*.insteadOf` / `pushInsteadOf` rewrites are dropped. |
 | `GIT_TERMINAL_PROMPT` | Git mirror subprocesses | Forced to `0` by Multirunner; a value set on the host is overridden. |
@@ -397,7 +487,7 @@ persistent and therefore accepted everywhere; `--help` likewise.
 | `multirunner` (root, = `run`) | `--install-deps` (false), `--dry-run` (false), `--version`/`-v` (prints the fixed string `0.1.0-dev`; not a release identifier) | yes |
 | `run` | `--install-deps` (false), `--dry-run` (false) | yes |
 | `doctor` | none | yes |
-| `connect` | `--org` (empty), `--repo` (empty), `--name` (`multirunner`), `--port` (`0`), `--key-out` (empty => `<config dir>/multirunner-app.private-key.pem`), `--dry-run` (false) | no (rewrites the YAML target sections only) |
+| `connect` | `--org` (empty), `--repo` (empty), `--own-app` (false), `--name` (`multirunner`), `--port` (`0`), `--key-out` (empty => `<config dir>/multirunner-app.private-key.pem`), `--webhook-url` (empty), `--detect` (false), `--device` (false), `--non-interactive` (false), `--dry-run` (false); the `--name`/`--port`/`--key-out`/`--webhook-url`/`--detect` flags apply only with `--own-app` | reads it leniently (device flow, or to shape the manifest with `--own-app`), then rewrites the YAML target sections |
 | `detect` | `--path` (`.`), `--repo` (empty), `--os` (`linux`) | only with `--repo` |
 | `bake` | `--iso`, `--iso-sha256`, `--golden`, `--disk-gb` (`40`), `--mem-mb` (`4096`), `--cpus` (`2`), `--accel` (empty=auto), `--runner-version` (`2.337.0`), `--runner-sha256`, `--tools` (empty), `--licensed` (false), `--vnc` (`127.0.0.1:0`), `--vnc-web` (`127.0.0.1:8090`), `--dry-run` (false), `--prepare-only` (false) | no |
 | `install-windows-daemon` | `--data-root` (empty => `%ProgramData%\multirunner\docker\data`), `--dry-run` (false) | no |
@@ -432,5 +522,6 @@ identically; the same is true of `--install-deps`.
   and the companion binaries as state-changing operations.
 - Keep private keys, PATs, webhook secrets, cache path tokens, JIT blobs, and
   VNC endpoints out of terminal history, logs, and untrusted networks.
-- In autoscale mode, configure a reachable and signed webhook separately after
-  `connect`; polling remains the outbound-only fallback for repository scope.
+- In autoscale mode, pass `connect --webhook-url <public https URL>` to subscribe
+  the App to `workflow_job` up front, or configure the webhook later; polling
+  remains the outbound-only fallback for repository scope.

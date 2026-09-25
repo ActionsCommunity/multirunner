@@ -18,6 +18,7 @@ import (
 
 	"github.com/GerardSmit/multirunner/internal/backend"
 	"github.com/GerardSmit/multirunner/internal/config"
+	"github.com/GerardSmit/multirunner/internal/ghapp"
 	"github.com/GerardSmit/multirunner/internal/winvm"
 )
 
@@ -603,6 +604,105 @@ func TestWarnNoSelfHostedWorkflowsChecksRepoScope(t *testing.T) {
 	}
 }
 
+// forbiddenServer answers 403 on paths matching forbidPath (the answer GitHub
+// gives an App for a permission it was never granted) and serves the repo
+// otherwise.
+func forbiddenServer(t *testing.T, forbidPath string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, forbidPath) {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = io.WriteString(w, `{"message":"Resource not accessible by integration"}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"default_branch":"main"}`)
+	}))
+}
+
+func forbiddenTreeServer(t *testing.T) *httptest.Server { return forbiddenServer(t, "/git/trees/") }
+
+func deviceAuth(t *testing.T) config.Auth {
+	t.Helper()
+	tokenPath := filepath.Join(t.TempDir(), "token.json")
+	if err := ghapp.SaveUserToken(tokenPath, &ghapp.UserToken{
+		AccessToken:  "ghu_x",
+		RefreshToken: "ghr_x",
+		Expiry:       time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return config.Auth{ClientID: ghapp.DefaultPersonalClientID, TokenPath: tokenPath}
+}
+
+// TestWarnNoSelfHostedWorkflowsSkipsScanForDeviceApp pins that the shared repo
+// App's missing contents:read is reported as a note, not a preflight failure:
+// every device-flow repo connect hits this 403, and the runners still register.
+func TestWarnNoSelfHostedWorkflowsSkipsScanForDeviceApp(t *testing.T) {
+	srv := forbiddenTreeServer(t)
+	defer srv.Close()
+
+	cfg := selfHostedConfig(t, srv)
+	cfg.GitHub.Scope = config.ScopeRepo
+	cfg.GitHub.Repo = "a"
+	cfg.GitHub.Repos = nil
+	cfg.Auth = deviceAuth(t)
+
+	var err error
+	out := captureStdout(t, func() { err = warnNoSelfHostedWorkflows(context.Background(), cfg) })
+	if err != nil {
+		t.Fatalf("device-app 403 must not fail doctor: %v (output %q)", err, out)
+	}
+	for _, want := range []string{"NOTE", "skipped", "o/a", "--own-app"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q: %q", want, out)
+		}
+	}
+	if strings.Contains(out, "could not scan") {
+		t.Errorf("403 under device auth still reported as a scan failure: %q", out)
+	}
+}
+
+// The skip is only for the published repo App's known permission set. A PAT,
+// a device flow against some other client_id, or a 403 on the repo itself
+// (which the shared App's metadata:read always allows) stays a failure.
+func TestWarnNoSelfHostedWorkflowsStillFailsOnOtherForbidden(t *testing.T) {
+	cases := []struct {
+		name   string
+		forbid string
+		auth   func(*testing.T) config.Auth
+	}{
+		{"pat", "/git/trees/", func(*testing.T) config.Auth { return config.Auth{PAT: "x"} }},
+		{"custom client id", "/git/trees/", func(t *testing.T) config.Auth {
+			a := deviceAuth(t)
+			a.ClientID = "Iv23liSomeOtherApp"
+			return a
+		}},
+		{"repo get forbidden", "/repos/o/a", deviceAuth},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := forbiddenServer(t, tc.forbid)
+			defer srv.Close()
+
+			cfg := selfHostedConfig(t, srv)
+			cfg.GitHub.Scope = config.ScopeRepo
+			cfg.GitHub.Repo = "a"
+			cfg.GitHub.Repos = nil
+			cfg.Auth = tc.auth(t)
+
+			var err error
+			out := captureStdout(t, func() { err = warnNoSelfHostedWorkflows(context.Background(), cfg) })
+			if err == nil {
+				t.Fatalf("403 must fail doctor; output %q", out)
+			}
+			if !strings.Contains(out, "could not scan workflows") {
+				t.Errorf("output missing scan failure: %q", out)
+			}
+		})
+	}
+}
+
 func TestWarnNoSelfHostedWorkflowsSkipsNonRepoScope(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Errorf("unexpected request to %s", r.URL.Path)
@@ -652,5 +752,129 @@ func TestTCGReasonNamesTheActualCause(t *testing.T) {
 		if got := tcgReason(tc.detected, tc.goos, tc.goarch); got != tc.want {
 			t.Errorf("tcgReason(%v, %s, %s) = %q, want %q", tc.detected, tc.goos, tc.goarch, got, tc.want)
 		}
+	}
+}
+
+// runnerAccessConfig points an org- or enterprise-scoped config at a stub server.
+func runnerAccessConfig(scope config.Scope, srv *httptest.Server) *config.Config {
+	return &config.Config{
+		GitHub:       config.GitHub{Scope: scope, URL: srv.URL, Owner: "acme"},
+		Auth:         config.Auth{PAT: "x"},
+		Provisioning: config.ProvisioningPool,
+		Pools:        []config.Pool{{Name: "linux", OS: "linux", Size: 1}},
+	}
+}
+
+// TestCheckRunnerAccessProvesOrgAndEnterpriseCredentials covers the gap this
+// check exists for: before it, org and enterprise scope made no GitHub call at
+// all, so a bad token or a mistyped slug passed doctor and failed later on a
+// runner host at registration time.
+func TestCheckRunnerAccessProvesOrgAndEnterpriseCredentials(t *testing.T) {
+	cases := []struct {
+		name     string
+		scope    config.Scope
+		status   int
+		wantErr  bool
+		wantPath string
+		wantOut  string
+	}{
+		{
+			name: "org reachable", scope: config.ScopeOrg, status: http.StatusOK,
+			wantPath: "/api/v3/orgs/acme/actions/runners", wantOut: "runner API reachable",
+		},
+		{
+			name: "enterprise reachable", scope: config.ScopeEnterprise, status: http.StatusOK,
+			wantPath: "/api/v3/enterprises/acme/actions/runners", wantOut: "runner API reachable",
+		},
+		{
+			name: "org forbidden", scope: config.ScopeOrg, status: http.StatusForbidden,
+			wantErr: true, wantOut: "cannot manage",
+		},
+		{
+			name: "enterprise slug wrong", scope: config.ScopeEnterprise, status: http.StatusNotFound,
+			wantErr: true, wantOut: "visible to these credentials",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotPath, gotQuery string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotPath, gotQuery = r.URL.Path, r.URL.RawQuery
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				if tc.status == http.StatusOK {
+					fmt.Fprint(w, `{"total_count":0,"runners":[]}`)
+				} else {
+					fmt.Fprint(w, `{"message":"nope"}`)
+				}
+			}))
+			defer srv.Close()
+
+			var err error
+			out := captureStdout(t, func() {
+				err = checkRunnerAccess(context.Background(), runnerAccessConfig(tc.scope, srv))
+			})
+			if tc.wantErr && err == nil {
+				t.Fatal("want doctor failure, got nil")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("want success, got %v", err)
+			}
+			if tc.wantPath != "" && gotPath != tc.wantPath {
+				t.Errorf("path = %q, want %q", gotPath, tc.wantPath)
+			}
+			// A trailing slash would hit a different endpoint than the collection.
+			if strings.HasSuffix(gotPath, "/") {
+				t.Errorf("collection path must not end in a slash: %q", gotPath)
+			}
+			if tc.status == http.StatusOK && gotQuery != "per_page=1" {
+				t.Errorf("query = %q, want per_page=1", gotQuery)
+			}
+			if !strings.Contains(out, tc.wantOut) {
+				t.Errorf("output missing %q: %q", tc.wantOut, out)
+			}
+		})
+	}
+}
+
+// TestCheckRunnerAccessSkipsRepoScopes keeps the check off the scopes the
+// Actions and workflow phases already exercise.
+func TestCheckRunnerAccessSkipsRepoScopes(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected GitHub call to %s", r.URL.Path)
+	}))
+	defer srv.Close()
+
+	for _, scope := range []config.Scope{config.ScopeRepo, config.ScopeRepos} {
+		cfg := runnerAccessConfig(scope, srv)
+		cfg.GitHub.Repo = "app"
+		if err := checkRunnerAccess(context.Background(), cfg); err != nil {
+			t.Errorf("scope %s: want skip, got %v", scope, err)
+		}
+	}
+}
+
+// TestIsTerminalRejectsNullDevice pins the property that made the previous
+// os.ModeCharDevice check wrong: the null device is a character device on both
+// Windows and Unix, so a CI or service job with stdin redirected there would
+// have been treated as interactive and silently taken prompt defaults.
+func TestIsTerminalRejectsNullDevice(t *testing.T) {
+	f, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatalf("open %s: %v", os.DevNull, err)
+	}
+	defer f.Close()
+	if isTerminal(f) {
+		t.Errorf("%s must not count as a terminal", os.DevNull)
+	}
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	defer r.Close()
+	defer w.Close()
+	if isTerminal(r) {
+		t.Error("a pipe must not count as a terminal")
 	}
 }

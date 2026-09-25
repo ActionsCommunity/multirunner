@@ -833,9 +833,12 @@ func splitAddress(address string) (string, int, error) {
 	return host, port, nil
 }
 
-func freePort(host string, excluded ...int) (int, error) {
+// freePort picks an unused port. The probe always binds loopback, never the
+// caller's advertised host: binding a wildcard address just to read back an
+// allocated port number trips host firewalls for no benefit.
+func freePort(excluded ...int) (int, error) {
 	for {
-		listener, err := net.Listen("tcp", net.JoinHostPort(host, "0"))
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
 			return 0, err
 		}
@@ -907,7 +910,7 @@ func prepareVNC(o *BakeOptions) error {
 	}
 	host, port, webPort := cfg.host, cfg.port, cfg.webPort
 	if port == 0 {
-		port, err = freePort(host, webPort)
+		port, err = freePort(webPort)
 		if err != nil {
 			return fmt.Errorf("bake: allocate VNC port on %s: %w", host, err)
 		}
@@ -917,7 +920,7 @@ func prepareVNC(o *BakeOptions) error {
 		o.VNCWebSocket = ""
 		return nil
 	}
-	wsPort, err := freePort(host, port, webPort)
+	wsPort, err := freePort(port, webPort)
 	if err != nil {
 		return fmt.Errorf("bake: allocate VNC WebSocket port on %s: %w", host, err)
 	}

@@ -37,7 +37,7 @@ and command behavior in the [CLI reference](../docs/cli-reference.md).
 2. Run `multirunner doctor --config <path>` and record each failed boundary.
    It is read-only, but cannot prove webhook ingress, cache reachability,
    guest readiness, or org/enterprise workflow routing. For `org`/`enterprise`
-   scope it makes no GitHub call, so credentials are unproven. Its pool pings
+   scope it proves only that the credential reaches the runner-admin API. Its pool pings
    share one 20-second budget, so a hung pool can make later pools look
    unreachable.
 3. Trace the first failing boundary rather than guessing: target/authentication;
