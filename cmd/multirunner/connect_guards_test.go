@@ -34,7 +34,7 @@ func TestRunDeviceConnectRepoTargetTakesPersonalInstall(t *testing.T) {
 	personal := ghapp.Installation{ID: 7, Account: "octocat", AppSlug: ghapp.DefaultPersonalAppSlug}
 	df := fakeDeviceFlow([][]ghapp.Installation{{personal}})
 
-	if err := runDeviceConnect(cfgPath, connectFlags{repo: "octocat/widgets"}, failingReader{}, &out, false, nil, df); err != nil {
+	if err := runDeviceConnect(cfgPath, connectFlags{repo: "octocat/widgets"}, failingReader{t}, &out, false, nil, df); err != nil {
 		t.Fatalf("runDeviceConnect: %v", err)
 	}
 	data, err := os.ReadFile(cfgPath)
@@ -59,7 +59,7 @@ func TestRunDeviceConnectRejectsForeignHost(t *testing.T) {
 	var out bytes.Buffer
 	df := fakeDeviceFlow([][]ghapp.Installation{{orgInstall(1, "acme")}})
 
-	err := runDeviceConnect(cfgPath, connectFlags{org: "acme"}, failingReader{}, &out, true, nil, df)
+	err := runDeviceConnect(cfgPath, connectFlags{org: "acme"}, failingReader{t}, &out, true, nil, df)
 	if err == nil {
 		t.Fatal("expected shared-App login to be refused for a GHES config")
 	}
@@ -87,7 +87,7 @@ func TestRunDeviceConnectAllowsDotComVariants(t *testing.T) {
 			}
 			var out bytes.Buffer
 			df := fakeDeviceFlow([][]ghapp.Installation{{orgInstall(1, "acme")}})
-			if err := runDeviceConnect(cfgPath, connectFlags{org: "acme"}, failingReader{}, &out, false, nil, df); err != nil {
+			if err := runDeviceConnect(cfgPath, connectFlags{org: "acme"}, failingReader{t}, &out, false, nil, df); err != nil {
 				t.Fatalf("runDeviceConnect: %v", err)
 			}
 		})
@@ -100,7 +100,7 @@ func TestRunDeviceConnectAllowsDotComVariants(t *testing.T) {
 func TestSelectInstallationRejectsNamedPersonalAccount(t *testing.T) {
 	personal := ghapp.Installation{ID: 9, Account: "octocat", AppSlug: "multirunner-connect"}
 	var out bytes.Buffer
-	p := newPrompt(failingReader{}, &out)
+	p := newPrompt(failingReader{t}, &out)
 
 	_, err := selectInstallation([]ghapp.Installation{personal}, "octocat", "https://github.com", ghapp.DefaultAppSlug, true, p, false)
 	if err == nil {
