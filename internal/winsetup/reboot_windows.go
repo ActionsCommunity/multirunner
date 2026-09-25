@@ -2,20 +2,16 @@ package winsetup
 
 import "golang.org/x/sys/windows/registry"
 
-// rebootPending checks the standard Windows pending-reboot markers.
+var openRegistryKey = registry.OpenKey
+
+// rebootPending checks the Windows servicing marker used when optional feature
+// changes, including Containers and Hyper-V, require a reboot.
 func rebootPending() bool {
-	if k, err := registry.OpenKey(registry.LOCAL_MACHINE,
+	if k, err := openRegistryKey(registry.LOCAL_MACHINE,
 		`SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending`,
 		registry.READ); err == nil {
 		k.Close()
 		return true
-	}
-	if k, err := registry.OpenKey(registry.LOCAL_MACHINE,
-		`SYSTEM\CurrentControlSet\Control\Session Manager`, registry.QUERY_VALUE); err == nil {
-		defer k.Close()
-		if _, _, err := k.GetStringsValue("PendingFileRenameOperations"); err == nil {
-			return true
-		}
 	}
 	return false
 }

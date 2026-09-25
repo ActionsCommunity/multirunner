@@ -10,14 +10,37 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/GerardSmit/multirunner/internal/backend"
 	"github.com/GerardSmit/multirunner/internal/config"
 	"github.com/GerardSmit/multirunner/internal/winvm"
 )
+
+func TestNormalizedContainerSettings(t *testing.T) {
+	configured := config.ContainerConfig{
+		CPUs:         4,
+		MemoryMB:     4096,
+		MemorySwapMB: 8192,
+		DNS:          []string{"1.1.1.1", "2001:db8::1"},
+	}
+	want := backend.ContainerSettings{
+		CPUCount:        4,
+		MemoryBytes:     4_294_967_296,
+		MemorySwapBytes: 8_589_934_592,
+		DNS:             []string{"1.1.1.1", "2001:db8::1"},
+	}
+	if got := normalizedContainerSettings(configured); !reflect.DeepEqual(got, want) {
+		t.Errorf("normalized settings = %+v, want %+v", got, want)
+	}
+	if got := normalizedContainerSettings(config.ContainerConfig{}); !reflect.DeepEqual(got, backend.ContainerSettings{}) {
+		t.Errorf("omitted settings = %+v, want zero value", got)
+	}
+}
 
 func TestBakeCommandExposesIntegrityFlags(t *testing.T) {
 	cmd := bakeCmd()
