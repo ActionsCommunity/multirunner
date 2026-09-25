@@ -28,6 +28,10 @@ config.qemu-run.yaml
 /cacheserver
 /cacheserver.exe
 
+# Astro site dependencies and local cache
+/node_modules/
+/.astro/
+
 # Logs
 *.log
 
@@ -37,6 +41,8 @@ config.qemu-run.yaml
 
 # Claude / agent state
 .claude/
+/.impeccable/*
+!/.impeccable/design.json
 
 # more binaries
 /cacheserver-linux

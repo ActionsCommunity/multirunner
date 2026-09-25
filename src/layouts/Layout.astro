@@ -1,0 +1,71 @@
+---
+import "@fontsource-variable/archivo";
+import "@fontsource-variable/ibm-plex-sans";
+import "@fontsource/ibm-plex-mono/400.css";
+import "@fontsource/ibm-plex-mono/600.css";
+import "../styles/global.css";
+
+interface Props {
+  title?: string;
+  description?: string;
+}
+
+const {
+  title = "multirunner",
+  description = "Parallel, ephemeral GitHub Actions self-hosted runners on one host.",
+} = Astro.props;
+const base = import.meta.env.BASE_URL;
+const repoUrl = "https://github.com/actionscommunity/multirunner";
+const siteOrigin = Astro.site ?? Astro.url.origin;
+const canonicalUrl = new URL(Astro.url.pathname, siteOrigin).href;
+const socialImageUrl = new URL(`${base}images/og.png`, siteOrigin).href;
+const isCommands = Astro.url.pathname.includes("/commands");
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content={description} />
+    <meta name="theme-color" content="#F3F7FA" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={canonicalUrl} />
+    <meta property="og:image" content={socialImageUrl} />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="canonical" href={canonicalUrl} />
+    <link rel="icon" type="image/png" href={`${base}images/favicon.png`} />
+    <title>{title}</title>
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Skip to main content</a>
+    <header class="site-header">
+      <nav class="nav-shell" aria-label="Primary navigation">
+        <a class="brand" href={base} aria-current={isCommands ? undefined : "page"}>
+          <img src={`${base}images/favicon.png`} alt="" width="40" height="40" />
+          <span>multirunner</span>
+        </a>
+        <div class="nav-links">
+          <a class="nav-wide" href={`${base}#features`}>How it works</a>
+          <a class="nav-mobile-optional" href={`${base}#get-started`}>Get started</a>
+          <a href={`${base}commands/`} aria-current={isCommands ? "page" : undefined}>CLI reference</a>
+          <a class="source-link" href={repoUrl}>GitHub</a>
+        </div>
+      </nav>
+    </header>
+    <main id="main-content">
+      <slot />
+    </main>
+    <footer class="site-footer">
+      <div class="footer-shell">
+        <div class="footer-brand">
+          <span class="footer-lanes" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span>multirunner is available under the MIT License.</span>
+        </div>
+        <a href={repoUrl}>Source and releases</a>
+      </div>
+    </footer>
+  </body>
+</html>
