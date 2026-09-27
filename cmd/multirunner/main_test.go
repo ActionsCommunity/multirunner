@@ -10,11 +10,13 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/GerardSmit/multirunner/internal/backend"
 	"github.com/GerardSmit/multirunner/internal/buildinfo"
 	"github.com/GerardSmit/multirunner/internal/config"
 	"github.com/GerardSmit/multirunner/internal/winvm"
@@ -36,6 +38,27 @@ func TestVersionOutputIncludesVersionAndCommit(t *testing.T) {
 	}
 	if got, want := out.String(), "multirunner version v1.2.3 (commit abc123)\n"; got != want {
 		t.Fatalf("--version output = %q, want %q", got, want)
+	}
+}
+
+func TestNormalizedContainerSettings(t *testing.T) {
+	configured := config.ContainerConfig{
+		CPUs:         4,
+		MemoryMB:     4096,
+		MemorySwapMB: 8192,
+		DNS:          []string{"1.1.1.1", "2001:db8::1"},
+	}
+	want := backend.ContainerSettings{
+		CPUCount:        4,
+		MemoryBytes:     4_294_967_296,
+		MemorySwapBytes: 8_589_934_592,
+		DNS:             []string{"1.1.1.1", "2001:db8::1"},
+	}
+	if got := normalizedContainerSettings(configured); !reflect.DeepEqual(got, want) {
+		t.Errorf("normalized settings = %+v, want %+v", got, want)
+	}
+	if got := normalizedContainerSettings(config.ContainerConfig{}); !reflect.DeepEqual(got, backend.ContainerSettings{}) {
+		t.Errorf("omitted settings = %+v, want zero value", got)
 	}
 }
 
@@ -62,6 +85,27 @@ func TestInstallerDryRunFlagsExist(t *testing.T) {
 	}
 	if found == 0 {
 		t.Fatal("no install-* commands found")
+	}
+}
+
+func TestNewBackendUsesDockerTLSConfiguration(t *testing.T) {
+	pool := config.Pool{
+		OS: "linux",
+		Docker: config.Docker{
+			Host: "tcp://127.0.0.1:2376",
+			TLS: config.DockerTLS{
+				CAFile: "missing-ca.pem", CertFile: "missing-cert.pem", KeyFile: "missing-key.pem",
+			},
+		},
+	}
+	if _, err := newBackend(pool); err == nil {
+		t.Fatal("Linux backend ignored Docker TLS certificate paths")
+	}
+
+	pool.OS = "windows"
+	pool.Docker.Isolation = "process"
+	if _, err := newBackend(pool); err == nil {
+		t.Fatal("Windows backend ignored Docker TLS certificate paths")
 	}
 }
 

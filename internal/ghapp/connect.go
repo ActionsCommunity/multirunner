@@ -142,9 +142,11 @@ func buildManifest(opt Options, callbackBase string) string {
 	switch opt.Scope {
 	case "repo":
 		perms["administration"] = "write"
+		perms["actions"] = "read"
 		perms["contents"] = "read"
 	default: // org / user
 		perms["organization_self_hosted_runners"] = "write"
+		perms["actions"] = "read"
 	}
 	url := strings.TrimRight(opt.BaseURL, "/") + "/"
 	if opt.Org != "" {

@@ -3,6 +3,8 @@ package config
 
 import (
 	"fmt"
+	"math"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -174,21 +176,27 @@ type Cache struct {
 
 // Pool is one per-OS pool of ephemeral runner slots.
 type Pool struct {
-	Name                   string     `yaml:"name"`
-	OS                     string     `yaml:"os"`      // linux | windows
-	Backend                string     `yaml:"backend"` // docker (default) | containerd | qemu
-	Size                   int        `yaml:"size"`
-	ImageTier              string     `yaml:"image_tier"`
-	Image                  string     `yaml:"image"`
-	QEMU                   QEMU       `yaml:"qemu"`
-	Containerd             Containerd `yaml:"containerd"`
-	RunnerGroupID          int64      `yaml:"runner_group_id"`
-	Labels                 []string   `yaml:"labels"`
-	WorkFolder             string     `yaml:"work_folder"`
-	NamePrefix             string     `yaml:"name_prefix"`
-	Docker                 Docker     `yaml:"docker"`
-	ToolCache              ToolCache  `yaml:"tool_cache"`
-	MaxConsecutiveFailures int        `yaml:"max_consecutive_failures"`
+	Name                   string          `yaml:"name"`
+	OS                     string          `yaml:"os"`      // linux | windows
+	Backend                string          `yaml:"backend"` // docker (default) | containerd | qemu
+	Size                   int             `yaml:"size"`
+	ImageTier              string          `yaml:"image_tier"`
+	Image                  string          `yaml:"image"`
+	Container              ContainerConfig `yaml:"container"`
+	QEMU                   QEMU            `yaml:"qemu"`
+	Containerd             Containerd      `yaml:"containerd"`
+	RunnerGroupID          int64           `yaml:"runner_group_id"`
+	Labels                 []string        `yaml:"labels"`
+	Repository             string          `yaml:"repository"`
+	Workflows              []string        `yaml:"workflows"`
+	WorkflowEvent          string          `yaml:"workflow_event"`
+	WorkflowActor          string          `yaml:"workflow_actor"`
+	WorkflowRef            string          `yaml:"workflow_ref"`
+	WorkFolder             string          `yaml:"work_folder"`
+	NamePrefix             string          `yaml:"name_prefix"`
+	Docker                 Docker          `yaml:"docker"`
+	ToolCache              ToolCache       `yaml:"tool_cache"`
+	MaxConsecutiveFailures int             `yaml:"max_consecutive_failures"`
 	// ScaleSet names the runner scale set that feeds this pool when
 	// provisioning is "scaleset". Each pool needs its own, because a scale set
 	// carries one set of labels and therefore one runner OS.
@@ -196,6 +204,95 @@ type Pool struct {
 	// RunnerGroup is the runner group the scale set is created in. Empty means
 	// the default group.
 	RunnerGroup string `yaml:"runner_group"`
+}
+
+// CanServeRepository reports whether this pool may register a runner to target.
+// An empty binding preserves the existing all-configured-repositories behavior.
+func (p Pool) CanServeRepository(target string) bool {
+	return p.Repository == "" || strings.EqualFold(p.Repository, target)
+}
+
+// CanServeJob applies the optional repository and workflow authorization tuple.
+func (p Pool) CanServeJob(target, workflow, event, actor, ref string) bool {
+	if !p.CanServeRepository(target) {
+		return false
+	}
+	if len(p.Workflows) == 0 {
+		return true
+	}
+	if !strings.EqualFold(p.WorkflowEvent, event) ||
+		!strings.EqualFold(p.WorkflowActor, actor) ||
+		!strings.EqualFold(p.WorkflowRef, ref) {
+		return false
+	}
+	for _, allowed := range p.Workflows {
+		if allowed == workflow {
+			return true
+		}
+	}
+	return false
+}
+
+const (
+	bytesPerMiB  int64 = 1024 * 1024
+	nanosPerCPU  int64 = 1_000_000_000
+	maxMemoryMiB       = math.MaxInt64 / bytesPerMiB
+	maxCPUCount        = math.MaxInt64 / nanosPerCPU
+)
+
+// ContainerConfig limits each container runner. MemorySwapMB is the total
+// memory plus swap limit used by Docker, so setting it equal to MemoryMB
+// disables swap. Zero values leave the backend defaults unchanged.
+type ContainerConfig struct {
+	CPUs         CPUCount  `yaml:"cpus"`
+	MemoryMB     Mebibytes `yaml:"memory_mb"`
+	MemorySwapMB Mebibytes `yaml:"memory_swap_mb"`
+	DNS          []string  `yaml:"dns"`
+}
+
+// CPUCount is an integer number of virtual CPUs.
+type CPUCount int64
+
+// UnmarshalYAML rejects fractional and string CPU values.
+func (c *CPUCount) UnmarshalYAML(node *yaml.Node) error {
+	if node.Tag != "!!int" {
+		return fmt.Errorf("CPU count must be an integer")
+	}
+	var value int64
+	if err := node.Decode(&value); err != nil {
+		return fmt.Errorf("decode CPU count: %w", err)
+	}
+	*c = CPUCount(value)
+	return nil
+}
+
+// Mebibytes is an integer memory quantity in 1,048,576-byte units.
+type Mebibytes int64
+
+// UnmarshalYAML rejects fractional and string memory values.
+func (m *Mebibytes) UnmarshalYAML(node *yaml.Node) error {
+	if node.Tag != "!!int" {
+		return fmt.Errorf("memory must be an integer number of MiB")
+	}
+	var value int64
+	if err := node.Decode(&value); err != nil {
+		return fmt.Errorf("decode memory: %w", err)
+	}
+	*m = Mebibytes(value)
+	return nil
+}
+
+// NanoCPUs returns the Linux Docker CPU quota representation.
+func (c ContainerConfig) NanoCPUs() int64 { return int64(c.CPUs) * nanosPerCPU }
+
+// MemoryBytes returns the normalized container memory limit.
+func (c ContainerConfig) MemoryBytes() int64 { return int64(c.MemoryMB) * bytesPerMiB }
+
+// MemorySwapBytes returns the normalized total memory plus swap limit.
+func (c ContainerConfig) MemorySwapBytes() int64 { return int64(c.MemorySwapMB) * bytesPerMiB }
+
+func (c ContainerConfig) configured() bool {
+	return c.CPUs != 0 || c.MemoryMB != 0 || c.MemorySwapMB != 0 || len(c.DNS) != 0
 }
 
 // publishedFlavors lists the per-OS image flavors CI builds and pushes as tags
@@ -304,6 +401,12 @@ func (p Pool) DockerSocketPath() string {
 	return "/var/run/docker.sock"
 }
 
+// SharedWorkspacePath is the runner work directory as seen by both the runner
+// container and its Docker daemon.
+func (p Pool) SharedWorkspacePath() string {
+	return "/home/runner/" + p.WorkFolder
+}
+
 // QEMU configures the x86-64 Windows VM backend.
 type QEMU struct {
 	Golden  string `yaml:"golden"`   // path to the golden qcow2 (built by `multirunner bake`)
@@ -332,10 +435,23 @@ type Containerd struct {
 
 // Docker configures a pool's backend daemon.
 type Docker struct {
-	Host        string `yaml:"host"`
-	EnableDinD  bool   `yaml:"enable_dind"`
-	Isolation   string `yaml:"isolation"`    // process | hyperv | auto (default, windows)
-	WindowsDinD string `yaml:"windows_dind"` // off | host-pipe | hyperv
+	Host           string    `yaml:"host"`
+	TLS            DockerTLS `yaml:"tls"`
+	EnableDinD     bool      `yaml:"enable_dind"`
+	ShareWorkspace bool      `yaml:"share_workspace"`
+	Isolation      string    `yaml:"isolation"`    // process | hyperv | auto (default, windows)
+	WindowsDinD    string    `yaml:"windows_dind"` // off | host-pipe | hyperv
+}
+
+// DockerTLS configures mutual-TLS client authentication for a Docker endpoint.
+type DockerTLS struct {
+	CAFile   string `yaml:"ca"`
+	CertFile string `yaml:"cert"`
+	KeyFile  string `yaml:"key"`
+}
+
+func (t DockerTLS) configured() bool {
+	return t.CAFile != "" || t.CertFile != "" || t.KeyFile != ""
 }
 
 // ToolCache configures hostedtoolcache sharing.
@@ -467,6 +583,11 @@ func (c *Config) applyDefaults() {
 		if p.MaxConsecutiveFailures == 0 {
 			p.MaxConsecutiveFailures = 5
 		}
+		for j, server := range p.Container.DNS {
+			if ip := net.ParseIP(server); ip != nil {
+				p.Container.DNS[j] = ip.String()
+			}
+		}
 		// Windows isolation is intentionally left empty here. The backend
 		// resolves "" / "auto" via autoIsolation() (process on Server, hyperv
 		// on client), matching the containerd backend. Defaulting to "process"
@@ -582,8 +703,93 @@ func (c *Config) Validate() error {
 		} else if p.Docker.Host == "" {
 			return fmt.Errorf("pools[%q].docker.host is required", p.Name)
 		}
+		if p.Docker.TLS.configured() {
+			if p.Backend != "" && p.Backend != "docker" {
+				return fmt.Errorf("pools[%q].docker.tls requires the Docker backend", p.Name)
+			}
+			if p.Docker.TLS.CAFile == "" || p.Docker.TLS.CertFile == "" || p.Docker.TLS.KeyFile == "" {
+				return fmt.Errorf("pools[%q].docker.tls requires ca, cert, and key", p.Name)
+			}
+			if !strings.HasPrefix(strings.ToLower(p.Docker.Host), "tcp://") {
+				return fmt.Errorf("pools[%q].docker.tls requires a tcp:// docker.host", p.Name)
+			}
+		}
+		if p.Docker.ShareWorkspace {
+			if !p.Docker.EnableDinD {
+				return fmt.Errorf("pools[%q].docker.share_workspace requires enable_dind", p.Name)
+			}
+			if p.OS != "linux" || (p.Backend != "" && p.Backend != "docker") {
+				return fmt.Errorf("pools[%q].docker.share_workspace requires the Linux Docker backend", p.Name)
+			}
+			if p.WorkFolder == "." || p.WorkFolder == ".." ||
+				strings.TrimSpace(p.WorkFolder) != p.WorkFolder ||
+				strings.ContainsAny(p.WorkFolder, `/\`) {
+				return fmt.Errorf("pools[%q].work_folder must be one relative directory name when docker.share_workspace is enabled", p.Name)
+			}
+			if p.Size != 1 {
+				return fmt.Errorf("pools[%q].docker.share_workspace requires size: 1", p.Name)
+			}
+		}
 		if p.Size < 1 {
 			return fmt.Errorf("pools[%q].size must be >= 1", p.Name)
+		}
+		if p.Repository != "" {
+			parts := strings.Split(p.Repository, "/")
+			if len(parts) != 2 || parts[0] == "" || parts[1] == "" ||
+				strings.TrimSpace(p.Repository) != p.Repository ||
+				strings.ContainsAny(p.Repository, " \t\r\n") {
+				return fmt.Errorf("pools[%q].repository must be owner/repo without whitespace", p.Name)
+			}
+			if !c.Provisioning.IsAutoscale() {
+				return fmt.Errorf("pools[%q].repository requires provisioning: autoscale", p.Name)
+			}
+			targets := c.GitHub.RepoTargets()
+			if len(targets) > 0 {
+				managed := false
+				for _, ref := range targets {
+					if strings.EqualFold(p.Repository, ref.Owner+"/"+ref.Repo) {
+						managed = true
+						break
+					}
+				}
+				if !managed {
+					return fmt.Errorf("pools[%q].repository %q is not managed by github scope", p.Name, p.Repository)
+				}
+			} else if c.GitHub.Scope == ScopeOrg && !strings.EqualFold(parts[0], c.GitHub.Owner) {
+				return fmt.Errorf("pools[%q].repository %q is outside github organization %q", p.Name, p.Repository, c.GitHub.Owner)
+			}
+		}
+		if len(p.Workflows) != 0 || p.WorkflowEvent != "" || p.WorkflowActor != "" || p.WorkflowRef != "" {
+			if p.Repository == "" {
+				return fmt.Errorf("pools[%q].workflows requires repository", p.Name)
+			}
+			if len(p.Workflows) == 0 || p.WorkflowEvent == "" || p.WorkflowActor == "" || p.WorkflowRef == "" {
+				return fmt.Errorf("pools[%q] workflow authorization requires workflows, workflow_event, workflow_actor, and workflow_ref", p.Name)
+			}
+			seenWorkflows := make(map[string]struct{}, len(p.Workflows))
+			for _, workflow := range p.Workflows {
+				if !strings.HasPrefix(workflow, ".github/workflows/") ||
+					(!strings.HasSuffix(workflow, ".yml") && !strings.HasSuffix(workflow, ".yaml")) ||
+					strings.Contains(workflow, "..") || strings.ContainsAny(workflow, " \t\r\n@") {
+					return fmt.Errorf("pools[%q].workflows contains invalid workflow path %q", p.Name, workflow)
+				}
+				if _, duplicate := seenWorkflows[workflow]; duplicate {
+					return fmt.Errorf("pools[%q].workflows repeats %q", p.Name, workflow)
+				}
+				seenWorkflows[workflow] = struct{}{}
+			}
+			if strings.ContainsAny(p.WorkflowEvent, " \t\r\n") {
+				return fmt.Errorf("pools[%q].workflow_event must not contain whitespace", p.Name)
+			}
+			if strings.ContainsAny(p.WorkflowActor, " \t\r\n/") {
+				return fmt.Errorf("pools[%q].workflow_actor must be one GitHub login", p.Name)
+			}
+			if strings.ContainsAny(p.WorkflowRef, " \t\r\n") {
+				return fmt.Errorf("pools[%q].workflow_ref must not contain whitespace", p.Name)
+			}
+		}
+		if err := validateContainerConfig(p); err != nil {
+			return err
 		}
 		if c.Provisioning.IsScaleset() && p.ScaleSet == "" {
 			// Without this the pool would start, hold a session against nothing,
@@ -595,6 +801,19 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	sharedWorkspaces := make(map[string]string)
+	for _, p := range c.Pools {
+		if !p.Docker.ShareWorkspace {
+			continue
+		}
+		key := strings.ToLower(p.Docker.Host) + "\x00" + strings.ToLower(p.WorkFolder)
+		if previous, duplicate := sharedWorkspaces[key]; duplicate {
+			return fmt.Errorf("pools[%q] and pools[%q] share docker.host %q and work_folder %q with docker.share_workspace enabled",
+				previous, p.Name, p.Docker.Host, p.WorkFolder)
+		}
+		sharedWorkspaces[key] = p.Name
+	}
+
 	if c.Provisioning.IsScaleset() {
 		seen := make(map[string]string, len(c.Pools))
 		for _, p := range c.Pools {
@@ -602,6 +821,40 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("pools[%q] and pools[%q] share scale_set %q; each pool needs its own", prev, p.Name, p.ScaleSet)
 			}
 			seen[p.ScaleSet] = p.Name
+		}
+	}
+	return nil
+}
+
+func validateContainerConfig(p *Pool) error {
+	cfg := p.Container
+	switch {
+	case cfg.CPUs < 0:
+		return fmt.Errorf("pools[%q].container.cpus must be >= 0", p.Name)
+	case int64(cfg.CPUs) > maxCPUCount:
+		return fmt.Errorf("pools[%q].container.cpus overflows the backend CPU representation", p.Name)
+	case cfg.MemoryMB < 0:
+		return fmt.Errorf("pools[%q].container.memory_mb must be >= 0", p.Name)
+	case int64(cfg.MemoryMB) > maxMemoryMiB:
+		return fmt.Errorf("pools[%q].container.memory_mb overflows bytes", p.Name)
+	case cfg.MemorySwapMB < 0:
+		return fmt.Errorf("pools[%q].container.memory_swap_mb must be >= 0", p.Name)
+	case int64(cfg.MemorySwapMB) > maxMemoryMiB:
+		return fmt.Errorf("pools[%q].container.memory_swap_mb overflows bytes", p.Name)
+	case cfg.MemorySwapMB != 0 && cfg.MemoryMB == 0:
+		return fmt.Errorf("pools[%q].container.memory_swap_mb requires memory_mb", p.Name)
+	case cfg.MemorySwapMB != 0 && cfg.MemorySwapMB < cfg.MemoryMB:
+		return fmt.Errorf("pools[%q].container.memory_swap_mb must be >= memory_mb", p.Name)
+	case p.Backend == "qemu" && cfg.configured():
+		return fmt.Errorf("pools[%q].container settings are unsupported for backend=qemu; use qemu.cpus and qemu.mem_mb", p.Name)
+	case p.OS == "windows" && cfg.MemorySwapMB != 0:
+		return fmt.Errorf("pools[%q].container.memory_swap_mb is unsupported for Windows containers", p.Name)
+	case p.Backend == "containerd" && len(cfg.DNS) != 0:
+		return fmt.Errorf("pools[%q].container.dns is unsupported by nerdctl on Windows", p.Name)
+	}
+	for _, server := range cfg.DNS {
+		if net.ParseIP(server) == nil {
+			return fmt.Errorf("pools[%q].container.dns entry %q must be an IP address", p.Name, server)
 		}
 	}
 	return nil

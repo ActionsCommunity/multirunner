@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -26,6 +27,29 @@ func (failImageBackend) Launch(context.Context, backend.LaunchRequest) (backend.
 	return nil, errors.New("not reached")
 }
 func (failImageBackend) Close() error { return nil }
+
+type captureBackend struct {
+	request backend.LaunchRequest
+}
+
+func (*captureBackend) Name() string                              { return "capture" }
+func (*captureBackend) Ping(context.Context) error                { return nil }
+func (*captureBackend) OSType(context.Context) (string, error)    { return "linux", nil }
+func (*captureBackend) EnsureImage(context.Context, string) error { return nil }
+func (b *captureBackend) Launch(_ context.Context, req backend.LaunchRequest) (backend.RunnerHandle, error) {
+	b.request = req
+	return completedHandle{}, nil
+}
+func (*captureBackend) Close() error { return nil }
+
+type completedHandle struct{}
+
+func (completedHandle) ID() string                        { return "completed" }
+func (completedHandle) Wait(context.Context) (int, error) { return 0, nil }
+func (completedHandle) Logs(context.Context) (io.ReadCloser, error) {
+	return io.NopCloser(strings.NewReader("")), nil
+}
+func (completedHandle) Kill(context.Context) error { return nil }
 
 func TestManagerReturnsPoolStartupError(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -86,6 +110,94 @@ func testClient(t *testing.T, url, repo string) *github.Client {
 		t.Fatalf("github.New(%s): %v", repo, err)
 	}
 	return c
+}
+
+func successfulJITServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, `{"encoded_jit_config":"jit","runner":{"id":42,"name":"mr"}}`)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestLauncherCarriesContainerSettingsInFixedAndAutoscaleModes(t *testing.T) {
+	srv := successfulJITServer(t)
+	client := testClient(t, srv.URL, "repo")
+	configured := config.ContainerConfig{
+		CPUs:         2,
+		MemoryMB:     4096,
+		MemorySwapMB: 8192,
+		DNS:          []string{"1.1.1.1", "2001:db8::1"},
+	}
+	wantConfigured := backend.ContainerSettings{
+		CPUCount:        2,
+		MemoryBytes:     4_294_967_296,
+		MemorySwapBytes: 8_589_934_592,
+		DNS:             []string{"1.1.1.1", "2001:db8::1"},
+	}
+
+	for _, tc := range []struct {
+		name      string
+		container config.ContainerConfig
+		want      backend.ContainerSettings
+		launch    func(*Launcher, *github.Client) (int, error)
+	}{
+		{
+			name:      "fixed configured",
+			container: configured,
+			want:      wantConfigured,
+			launch: func(l *Launcher, _ *github.Client) (int, error) {
+				return l.RunOne(context.Background())
+			},
+		},
+		{
+			name: "fixed omitted",
+			launch: func(l *Launcher, _ *github.Client) (int, error) {
+				return l.RunOne(context.Background())
+			},
+		},
+		{
+			name:      "autoscale configured",
+			container: configured,
+			want:      wantConfigured,
+			launch: func(l *Launcher, client *github.Client) (int, error) {
+				return l.RunOneOn(context.Background(), client)
+			},
+		},
+		{
+			name: "autoscale omitted",
+			launch: func(l *Launcher, client *github.Client) (int, error) {
+				return l.RunOneOn(context.Background(), client)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			be := &captureBackend{}
+			cfg := config.Pool{
+				Name:       "linux",
+				OS:         "linux",
+				Size:       1,
+				NamePrefix: "mr",
+				Container:  tc.container,
+			}
+			provider := &countingProvider{next: client}
+			l := NewLauncher(cfg, "img", be, provider, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), Hooks{})
+
+			if _, err := tc.launch(l, client); err != nil {
+				t.Fatalf("launch: %v", err)
+			}
+			if !reflect.DeepEqual(be.request.Container, tc.want) {
+				t.Errorf("container settings = %+v, want %+v", be.request.Container, tc.want)
+			}
+		})
+	}
 }
 
 func testLauncher(gh github.ClientProvider, hooks Hooks) *Launcher {
@@ -151,5 +263,77 @@ func TestRunOneOnWithoutAnyClientFailsCleanly(t *testing.T) {
 	}
 	if starts != 0 || stops != 0 {
 		t.Errorf("hooks fired start=%d stop=%d, want 0/0 for a launch that never began", starts, stops)
+	}
+}
+
+func TestRunOneOnRejectsRepositoryOutsidePoolBinding(t *testing.T) {
+	var starts, stops int
+	l := NewLauncher(
+		config.Pool{
+			Name:       "container-build",
+			OS:         "linux",
+			Size:       1,
+			NamePrefix: "mr",
+			Repository: "o/allowed",
+		},
+		"img",
+		failImageBackend{},
+		&countingProvider{},
+		nil,
+		nil,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Hooks{
+			OnStart: func(string) { starts++ },
+			OnStop:  func(string, int, error) { stops++ },
+		},
+	)
+
+	_, err := l.RunOneOn(context.Background(), testClient(t, "https://api.github.com/", "other"))
+	if err == nil || !strings.Contains(err.Error(), "repository o/other") || !strings.Contains(err.Error(), "is not allowed") {
+		t.Fatalf("RunOneOn error = %v, want repository binding failure", err)
+	}
+	if starts != 0 || stops != 0 {
+		t.Errorf("hooks fired start=%d stop=%d, want 0/0 for a rejected repository", starts, stops)
+	}
+}
+
+func TestRunJobRejectsWorkflowOutsidePoolAuthorization(t *testing.T) {
+	var starts int
+	client := testClient(t, "https://api.github.com/", "allowed")
+	l := NewLauncher(
+		config.Pool{
+			Name:          "container-build",
+			OS:            "linux",
+			Size:          1,
+			NamePrefix:    "mr",
+			Repository:    "o/allowed",
+			Workflows:     []string{".github/workflows/build.yml"},
+			WorkflowEvent: "workflow_dispatch",
+			WorkflowActor: "owner",
+			WorkflowRef:   "main",
+		},
+		"img",
+		failImageBackend{},
+		&countingProvider{},
+		nil,
+		nil,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Hooks{OnStart: func(string) { starts++ }},
+	)
+
+	job := github.QueuedJob{
+		Client:       client,
+		Repository:   "o/allowed",
+		Labels:       []string{"container-build"},
+		WorkflowPath: ".github/workflows/ci.yml",
+		Event:        "pull_request",
+		Actor:        "contributor",
+		Ref:          "feature",
+	}
+	if _, err := l.RunJob(context.Background(), job); err == nil {
+		t.Fatal("unauthorized workflow job was accepted")
+	}
+	if starts != 0 {
+		t.Errorf("start hook fired %d times for an unauthorized workflow", starts)
 	}
 }

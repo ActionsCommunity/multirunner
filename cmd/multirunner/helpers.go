@@ -123,6 +123,10 @@ func poolEnvAndMounts(cfg *config.Config, pc config.Pool, shared map[string]stri
 		sock := pc.DockerSocketPath()
 		mounts = append(mounts, backend.Mount{Source: sock, Target: sock})
 	}
+	if pc.Docker.ShareWorkspace {
+		workspace := pc.SharedWorkspacePath()
+		mounts = append(mounts, backend.Mount{Source: workspace, Target: workspace})
+	}
 
 	if gitMgr != nil && cfg.GitHub.Scope == config.ScopeRepo {
 		slug := cfg.GitHub.Owner + "/" + cfg.GitHub.Repo

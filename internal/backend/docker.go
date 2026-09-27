@@ -12,6 +12,13 @@ import (
 	"github.com/docker/docker/client"
 )
 
+// DockerTLSConfig identifies the mutual-TLS client files for one Docker daemon.
+type DockerTLSConfig struct {
+	CAFile   string
+	CertFile string
+	KeyFile  string
+}
+
 // dockerBackend drives a single Docker daemon (Linux or Windows). The OS-specific
 // constructors set host, name, and isolation.
 type dockerBackend struct {
@@ -21,15 +28,33 @@ type dockerBackend struct {
 	autoPull  bool
 }
 
-func newDockerBackend(name, host string, isolation container.Isolation) (*dockerBackend, error) {
-	cli, err := client.NewClientWithOpts(
+func newDockerBackend(name, host string, isolation container.Isolation, tls DockerTLSConfig) (*dockerBackend, error) {
+	opts := []client.Opt{
 		client.WithHost(host),
 		client.WithAPIVersionNegotiation(),
-	)
+	}
+	tlsOpt, err := dockerTLSClientOption(tls)
+	if err != nil {
+		return nil, fmt.Errorf("docker client (%s): %w", host, err)
+	}
+	if tlsOpt != nil {
+		opts = append(opts, tlsOpt)
+	}
+	cli, err := client.NewClientWithOpts(opts...)
 	if err != nil {
 		return nil, fmt.Errorf("docker client (%s): %w", host, err)
 	}
 	return &dockerBackend{cli: cli, name: name, isolation: isolation, autoPull: true}, nil
+}
+
+func dockerTLSClientOption(tls DockerTLSConfig) (client.Opt, error) {
+	if tls == (DockerTLSConfig{}) {
+		return nil, nil
+	}
+	if tls.CAFile == "" || tls.CertFile == "" || tls.KeyFile == "" {
+		return nil, fmt.Errorf("CA, certificate, and key files are all required")
+	}
+	return client.WithTLSClientConfig(tls.CAFile, tls.CertFile, tls.KeyFile), nil
 }
 
 func (b *dockerBackend) Name() string { return b.name }
@@ -69,6 +94,37 @@ func (b *dockerBackend) EnsureImage(ctx context.Context, imageRef string) error 
 }
 
 func (b *dockerBackend) Launch(ctx context.Context, req LaunchRequest) (RunnerHandle, error) {
+	cfg, host, err := b.launchConfigs(req)
+	if err != nil {
+		return nil, err
+	}
+
+	created, err := b.cli.ContainerCreate(ctx, cfg, host, nil, nil, req.Name)
+	if err != nil {
+		// A lost create response can still leave a container behind. Docker APIs
+		// accept the deterministic name anywhere an ID is accepted, so return a
+		// cleanup handle even when the daemon did not return the created ID.
+		return &dockerHandle{cli: b.cli, id: req.Name}, fmt.Errorf("create container %s: %w", req.Name, err)
+	}
+	handle := &dockerHandle{cli: b.cli, id: created.ID}
+	if err := b.cli.ContainerStart(ctx, created.ID, container.StartOptions{}); err != nil {
+		// The daemon may have started the container before the response was lost.
+		// Return its handle so the lifecycle owner can terminate it with a
+		// detached cleanup context before deleting the GitHub registration.
+		return handle, fmt.Errorf("start container %s: %w", req.Name, err)
+	}
+	return handle, nil
+}
+
+func (b *dockerBackend) launchConfigs(req LaunchRequest) (*container.Config, *container.HostConfig, error) {
+	if err := req.validateContainerSettings(); err != nil {
+		return nil, nil, fmt.Errorf("container %s settings: %w", req.Name, err)
+	}
+	isWindows := b.name == "docker-windows"
+	if isWindows && req.Container.MemorySwapBytes != 0 {
+		return nil, nil, fmt.Errorf("container %s settings: memory swap is unsupported by Docker on Windows", req.Name)
+	}
+
 	env := make([]string, 0, len(req.Env)+1)
 	env = append(env, "JIT_CONFIG="+req.EncodedJITConfig)
 	keys := make([]string, 0, len(req.Env))
@@ -93,6 +149,14 @@ func (b *dockerBackend) Launch(ctx context.Context, req LaunchRequest) (RunnerHa
 	host := &container.HostConfig{
 		AutoRemove: true,
 		Mounts:     toDockerMounts(req.Mounts),
+		DNS:        append([]string(nil), req.Container.DNS...),
+	}
+	host.Memory = req.Container.MemoryBytes
+	host.MemorySwap = req.Container.MemorySwapBytes
+	if isWindows {
+		host.CPUCount = req.Container.CPUCount
+	} else {
+		host.NanoCPUs = req.Container.CPUCount * nanoCPUsPerCPU
 	}
 	if b.isolation != "" {
 		host.Isolation = b.isolation
@@ -102,22 +166,7 @@ func (b *dockerBackend) Launch(ctx context.Context, req LaunchRequest) (RunnerHa
 	if ch := CacheHost(req.Env); ch != "" {
 		host.ExtraHosts = append(host.ExtraHosts, ch+":host-gateway")
 	}
-
-	created, err := b.cli.ContainerCreate(ctx, cfg, host, nil, nil, req.Name)
-	if err != nil {
-		// A lost create response can still leave a container behind. Docker APIs
-		// accept the deterministic name anywhere an ID is accepted, so return a
-		// cleanup handle even when the daemon did not return the created ID.
-		return &dockerHandle{cli: b.cli, id: req.Name}, fmt.Errorf("create container %s: %w", req.Name, err)
-	}
-	handle := &dockerHandle{cli: b.cli, id: created.ID}
-	if err := b.cli.ContainerStart(ctx, created.ID, container.StartOptions{}); err != nil {
-		// The daemon may have started the container before the response was lost.
-		// Return its handle so the lifecycle owner can terminate it with a
-		// detached cleanup context before deleting the GitHub registration.
-		return handle, fmt.Errorf("start container %s: %w", req.Name, err)
-	}
-	return handle, nil
+	return cfg, host, nil
 }
 
 func (b *dockerBackend) Close() error { return b.cli.Close() }

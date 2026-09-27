@@ -51,6 +51,8 @@ type Options struct {
 	Env map[string]string
 	// Mounts are tool-cache volumes, git mirror, and similar.
 	Mounts []backend.Mount
+	// Container contains normalized resource and network controls.
+	Container backend.ContainerSettings
 	// MaxRunners caps concurrent runners regardless of what GitHub asks for.
 	// Zero means the host will honour any requested count.
 	MaxRunners int
@@ -170,6 +172,7 @@ func (l *Launcher) launchLocked(ctx context.Context) (err error) {
 		Labels:           l.opts.Labels,
 		Env:              l.opts.Env,
 		Mounts:           l.opts.Mounts,
+		Container:        l.opts.Container,
 		Index:            l.seq,
 	})
 	if err != nil {

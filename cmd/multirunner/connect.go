@@ -78,9 +78,9 @@ func connectPlan(w io.Writer, cfgPath, org, repo, name string, port int, keyOut 
 	if port != 0 {
 		callback = fmt.Sprintf("local port %d", port)
 	}
-	permissions := "organization_self_hosted_runners=write"
+	permissions := "organization_self_hosted_runners=write, actions=read"
 	if scope == config.ScopeRepo {
-		permissions = "administration=write, contents=read"
+		permissions = "administration=write, actions=read, contents=read"
 	}
 	_, err = fmt.Fprintf(w, `Dry run: no changes will be made.
 Target:       %s (%s)
