@@ -98,7 +98,15 @@ func (b *containerdBackend) Launch(ctx context.Context, req LaunchRequest) (Runn
 	if !req.Ownership.IsZero() && req.Ownership.RunnerID == 0 {
 		return nil, fmt.Errorf("containerd: runner ID is required for owned launches")
 	}
-	args := []string{"run", "-d", "--name", req.Name, "--isolation", b.isolation}
+	if err := req.validateContainerSettings(); err != nil {
+		return nil, fmt.Errorf("container %s settings: %w", req.Name, err)
+	}
+	if req.Container.MemorySwapBytes != 0 {
+		return nil, fmt.Errorf("container %s settings: memory swap is unsupported by nerdctl on Windows", req.Name)
+	}
+	if len(req.Container.DNS) != 0 {
+		return nil, fmt.Errorf("container %s settings: DNS is unsupported by nerdctl on Windows", req.Name)
+	}
 
 	// nerdctl can't --add-host on Windows, and host.docker.internal doesn't
 	// resolve on the nat network — so point the cache URL at the container
@@ -108,6 +116,44 @@ func (b *containerdBackend) Launch(ctx context.Context, req LaunchRequest) (Runn
 		if gw := b.hostGatewayIP(ctx); gw != "" {
 			env = RewriteCacheHost(req.Env, gw)
 		}
+	}
+
+	args := b.launchArgs(req, env)
+	out, err := b.run(ctx, args...)
+	if err != nil {
+		// `nerdctl run -d` can create or start the container before its process
+		// is cancelled or its response is lost. The deterministic name remains
+		// a valid cleanup handle even when no container ID was printed.
+		expected := ownershipLabels(req.Ownership)
+		if expected == nil {
+			expected = make(map[string]string)
+		}
+		expected[labelManaged] = "true"
+		expected[labelName] = req.Name
+		return &containerdHandle{
+				b: b, name: req.Name, id: req.Name,
+				preserve:           !req.Ownership.IsZero(),
+				failedLaunchLabels: expected,
+			},
+			fmt.Errorf("run container %s: %w", req.Name, err)
+	}
+	id := strings.TrimSpace(out)
+	if id == "" {
+		id = req.Name
+	}
+	return &containerdHandle{
+		b: b, name: req.Name, id: id,
+		preserve: !req.Ownership.IsZero(),
+	}, nil
+}
+
+func (b *containerdBackend) launchArgs(req LaunchRequest, env map[string]string) []string {
+	args := []string{"run", "-d", "--name", req.Name, "--isolation", b.isolation}
+	if req.Container.CPUCount != 0 {
+		args = append(args, "--cpus", strconv.FormatInt(req.Container.CPUCount, 10))
+	}
+	if req.Container.MemoryBytes != 0 {
+		args = append(args, "--memory", strconv.FormatInt(req.Container.MemoryBytes, 10))
 	}
 
 	args = append(args, "-e", "JIT_CONFIG="+req.EncodedJITConfig)
@@ -145,33 +191,7 @@ func (b *containerdBackend) Launch(ctx context.Context, req LaunchRequest) (Runn
 		}
 		args = append(args[:imageIndex], append(ownershipArgs, args[imageIndex:]...)...)
 	}
-
-	out, err := b.run(ctx, args...)
-	if err != nil {
-		// `nerdctl run -d` can create/start the container before its process is
-		// cancelled or its response is lost. The deterministic name remains a
-		// valid cleanup handle even when no container ID was printed.
-		expected := ownershipLabels(req.Ownership)
-		if expected == nil {
-			expected = make(map[string]string)
-		}
-		expected[labelManaged] = "true"
-		expected[labelName] = req.Name
-		return &containerdHandle{
-				b: b, name: req.Name, id: req.Name,
-				preserve:           !req.Ownership.IsZero(),
-				failedLaunchLabels: expected,
-			},
-			fmt.Errorf("run container %s: %w", req.Name, err)
-	}
-	id := strings.TrimSpace(out)
-	if id == "" {
-		id = req.Name
-	}
-	return &containerdHandle{
-		b: b, name: req.Name, id: id,
-		preserve: !req.Ownership.IsZero(),
-	}, nil
+	return args
 }
 
 // hostGatewayIP returns the host's IPv4 on the "vEthernet (nat)" interface — the

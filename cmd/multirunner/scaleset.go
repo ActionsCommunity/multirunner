@@ -16,14 +16,24 @@ import (
 // pool. It deliberately skips pool.Launcher, because in this mode the JIT
 // config comes from the scale-set session rather than generate-jitconfig.
 type scaleSetPool struct {
-	cfg    config.Pool
-	be     backend.Backend
-	image  string
-	env    map[string]string
-	mounts []backend.Mount
+	cfg       config.Pool
+	be        backend.Backend
+	image     string
+	env       map[string]string
+	mounts    []backend.Mount
+	container backend.ContainerSettings
 }
 
 type scaleSetStateReporter func(string, scalesetmode.SessionAvailability)
+
+func normalizedContainerSettings(cfg config.ContainerConfig) backend.ContainerSettings {
+	return backend.ContainerSettings{
+		CPUCount:        int64(cfg.CPUs),
+		MemoryBytes:     cfg.MemoryBytes(),
+		MemorySwapBytes: cfg.MemorySwapBytes(),
+		DNS:             append([]string(nil), cfg.DNS...),
+	}
+}
 
 func newScaleSetHealthReporter(m *metrics.Metrics, pools []config.Pool) scaleSetStateReporter {
 	for _, p := range pools {

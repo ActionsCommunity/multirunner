@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -295,10 +296,17 @@ func waitFor(t *testing.T, cond func() bool) {
 func TestDesiredCountLaunchesRunnersCarryingTheJITConfig(t *testing.T) {
 	jit := &fakeJIT{}
 	be := &fakeBackend{}
+	settings := backend.ContainerSettings{
+		CPUCount:        4,
+		MemoryBytes:     4_294_967_296,
+		MemorySwapBytes: 8_589_934_592,
+		DNS:             []string{"1.1.1.1"},
+	}
 	l := New(t.Context(), jit, be, Options{
 		ScaleSetID: 7,
 		Image:      "runner:latest",
 		WorkFolder: "_work",
+		Container:  settings,
 		Ownership: backend.RunnerOwnership{
 			Instance: "host-a",
 			Target:   "https://github.com/o/r",
@@ -322,6 +330,9 @@ func TestDesiredCountLaunchesRunnersCarryingTheJITConfig(t *testing.T) {
 		if want := "jit-for-" + r.Name; r.EncodedJITConfig != want {
 			t.Errorf("runner %s carried JIT %q, want %q", r.Name, r.EncodedJITConfig, want)
 		}
+		if !reflect.DeepEqual(r.Container, settings) {
+			t.Errorf("runner %s container settings = %+v, want %+v", r.Name, r.Container, settings)
+		}
 		if len(jit.settings) != 3 {
 			t.Fatalf("generated %d JIT settings, want 3", len(jit.settings))
 		}
@@ -330,6 +341,7 @@ func TestDesiredCountLaunchesRunnersCarryingTheJITConfig(t *testing.T) {
 				t.Errorf("runner %s got JIT work folder %q, want _work", setting.Name, setting.WorkFolder)
 			}
 		}
+
 		if r.Image != "runner:latest" {
 			t.Errorf("runner %s got image %q, want runner:latest", r.Name, r.Image)
 		}
@@ -339,6 +351,22 @@ func TestDesiredCountLaunchesRunnersCarryingTheJITConfig(t *testing.T) {
 		if r.Ownership.Instance != "host-a" || r.Ownership.ScaleSetID != 7 || r.Ownership.RunnerID == 0 {
 			t.Errorf("runner %s ownership = %+v", r.Name, r.Ownership)
 		}
+	}
+}
+
+func TestDesiredCountPreservesOmittedContainerSettings(t *testing.T) {
+	be := &fakeBackend{}
+	l := New(t.Context(), &fakeJIT{}, be, Options{ScaleSetID: 7})
+
+	if _, err := l.HandleDesiredRunnerCount(context.Background(), 1); err != nil {
+		t.Fatalf("HandleDesiredRunnerCount: %v", err)
+	}
+	reqs := be.requests()
+	if len(reqs) != 1 {
+		t.Fatalf("launched %d runners, want 1", len(reqs))
+	}
+	if !reflect.DeepEqual(reqs[0].Container, backend.ContainerSettings{}) {
+		t.Errorf("omitted container settings = %+v, want zero value", reqs[0].Container)
 	}
 }
 
