@@ -5,7 +5,9 @@ package backend
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/url"
 )
@@ -16,6 +18,20 @@ type Mount struct {
 	Target   string // path inside the container
 	ReadOnly bool
 	Volume   bool // true => named volume, false => host bind mount
+}
+
+// ContainerSettings contains normalized resource and network controls for one
+// container. Zero values preserve the backend's defaults.
+type ContainerSettings struct {
+	// CPUCount limits the runner to this many CPUs.
+	CPUCount int64
+	// MemoryBytes is the hard memory limit.
+	MemoryBytes int64
+	// MemorySwapBytes is the total memory plus swap limit. It is supported only
+	// by Linux Docker.
+	MemorySwapBytes int64
+	// DNS contains validated IP addresses used as the container's resolvers.
+	DNS []string
 }
 
 // LaunchRequest carries everything needed to start one ephemeral runner slot.
@@ -34,8 +50,36 @@ type LaunchRequest struct {
 	Env map[string]string
 	// Mounts are tool-cache volumes, docker socket (DinD), git mirror, etc.
 	Mounts []Mount
+	// Container contains normalized resource and network controls. Zero values
+	// preserve the backend's defaults.
+	Container ContainerSettings
 	// Index is the slot number within the pool (0-based), for naming/logging.
 	Index int
+}
+
+const nanoCPUsPerCPU int64 = 1_000_000_000
+
+func (r LaunchRequest) validateContainerSettings() error {
+	switch {
+	case r.Container.CPUCount < 0:
+		return fmt.Errorf("cpu count must be >= 0")
+	case r.Container.CPUCount > math.MaxInt64/nanoCPUsPerCPU:
+		return fmt.Errorf("cpu count overflows Docker NanoCPUs")
+	case r.Container.MemoryBytes < 0:
+		return fmt.Errorf("memory must be >= 0 bytes")
+	case r.Container.MemorySwapBytes < 0:
+		return fmt.Errorf("memory swap must be >= 0 bytes")
+	case r.Container.MemorySwapBytes != 0 && r.Container.MemoryBytes == 0:
+		return fmt.Errorf("memory swap requires a memory limit")
+	case r.Container.MemorySwapBytes != 0 && r.Container.MemorySwapBytes < r.Container.MemoryBytes:
+		return fmt.Errorf("memory swap must be greater than or equal to memory")
+	}
+	for _, server := range r.Container.DNS {
+		if net.ParseIP(server) == nil {
+			return fmt.Errorf("DNS server %q must be an IP address", server)
+		}
+	}
+	return nil
 }
 
 // CacheHost returns the hostname in the cache URL (ACTIONS_RESULTS_URL) that must

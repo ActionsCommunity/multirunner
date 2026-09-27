@@ -27,6 +27,7 @@ type Spec struct {
 	WorkFolder    string
 	Env           map[string]string
 	Mounts        []backend.Mount
+	Container     backend.ContainerSettings
 	Index         int
 }
 
@@ -52,6 +53,7 @@ func RunOnce(ctx context.Context, gh *github.Client, be backend.Backend, spec Sp
 		Labels:           spec.Labels,
 		Env:              spec.Env,
 		Mounts:           spec.Mounts,
+		Container:        spec.Container,
 		Index:            spec.Index,
 	})
 	if err != nil {
