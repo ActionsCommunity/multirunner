@@ -117,7 +117,7 @@ try {
         $stagedDockerd = Join-Path $staging 'docker\dockerd.exe'
         $stagedVersion = & $stagedDockerd --version
         if ($stagedVersion -notmatch "version\s+$([regex]::Escape($DockerVersion)),") {
-            throw "Downloaded dockerd version did not match requested $DockerVersion: $stagedVersion"
+            throw "Downloaded dockerd version did not match requested ${DockerVersion}: $stagedVersion"
         }
         if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) {
             Stop-Service $ServiceName -ErrorAction Stop
