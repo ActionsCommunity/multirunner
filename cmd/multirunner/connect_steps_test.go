@@ -32,6 +32,7 @@ func fakeDeviceFlow(installsSeq [][]ghapp.Installation) deviceFlow {
 			}
 			return out, nil
 		},
+		checkRepo:    func(context.Context, string, int64, string, string) error { return nil },
 		clientID:     "test-client",
 		baseURL:      "https://github.com",
 		pollInterval: time.Millisecond,

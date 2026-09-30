@@ -412,7 +412,7 @@ func TestExitedRunnerIsReplacedImmediately(t *testing.T) {
 	jit := &fakeJIT{}
 	l := New(t.Context(), jit, be, Options{ScaleSetID: 1, MaxRunners: 2})
 
-	if _, err := l.HandleDesiredRunnerCount(t.Context(), 2); err != nil {
+	if _, err := l.HandleDesiredRunnerCount(t.Context(), 6); err != nil {
 		t.Fatalf("launch: %v", err)
 	}
 	be.finish(0)

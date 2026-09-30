@@ -50,16 +50,25 @@ func TestDeviceConnectKeepsSeparateConfigCredentials(t *testing.T) {
 }
 
 func TestStarterPoolUsesSelectedDaemonArchitecture(t *testing.T) {
+	testStarterPoolDaemon(t, "linux", "aarch64", "arm64")
+}
+
+func TestStarterPoolUsesWindowsDaemon(t *testing.T) {
+	testStarterPoolDaemon(t, "windows", "amd64", "x64")
+}
+
+func testStarterPoolDaemon(t *testing.T, osType, architecture, label string) {
+	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/_ping") {
 			w.Header().Set("API-Version", "1.47")
-			w.Header().Set("OSType", "linux")
+			w.Header().Set("OSType", osType)
 			_, _ = w.Write([]byte("OK"))
 			return
 		}
 		if strings.HasSuffix(r.URL.Path, "/info") {
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"OSType":"linux","Architecture":"aarch64"}`))
+			_, _ = w.Write([]byte(`{"OSType":"` + osType + `","Architecture":"` + architecture + `"}`))
 			return
 		}
 		http.NotFound(w, r)
@@ -72,13 +81,15 @@ func TestStarterPoolUsesSelectedDaemonArchitecture(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	addStarterPool(context.Background(), path, &out)
+	if err := addStarterPool(context.Background(), path, &out); err != nil {
+		t.Fatal(err)
+	}
 	cfg, err := config.Load(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	p := cfg.Pools[0]
-	if p.Docker.Host != host || strings.Join(p.Labels, ",") != "self-hosted,linux,arm64" {
+	if p.Docker.Host != host || p.OS != osType || strings.Join(p.Labels, ",") != "self-hosted,"+osType+","+label {
 		t.Fatalf("selected daemon metadata lost: host=%q labels=%v output=%s", p.Docker.Host, p.Labels, out.String())
 	}
 }

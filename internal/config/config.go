@@ -722,6 +722,9 @@ func (c *Config) Validate() error {
 			"GitHub does not accept App installation or device-flow user tokens for enterprise runner endpoints. " +
 			"Use auth.pat with a classic PAT carrying the manage_runners:enterprise scope")
 	}
+	if c.GitHub.Scope == ScopeRepos && c.Auth.IsDeviceApp() {
+		return fmt.Errorf("device authentication supports a single repo or org target; scope=repos requires a PAT or installation App credentials")
+	}
 
 	if c.Provisioning != ProvisioningPool && !c.Provisioning.IsAutoscale() && !c.Provisioning.IsScaleset() {
 		return fmt.Errorf("provisioning must be pool|autoscale|webhook|scaleset, got %q", c.Provisioning)

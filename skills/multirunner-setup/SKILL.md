@@ -60,8 +60,7 @@ installs, elevates, or registers anything without a separate approval.
    `multirunner connect --repo <owner/repo> --own-app --config <path> --dry-run
    --non-interactive` or the `--org` form, review the manifest it prints, then
    run it after approval. Off a terminal, connect requires the model to be
-   stated: `--own-app` creates a dedicated App (and is the only option for a
-   repository target), `--device` prints a device code and must not be used
+   stated: `--own-app` creates a dedicated App, `--device` prints a device code and must not be used
    where the output is logged. Write the config (step 5) first so connect can derive
    the permissions from the chosen provisioning mode. It creates and installs a
    GitHub App, writes the PEM, and rewrites the config at mode 0600 (check the

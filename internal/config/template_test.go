@@ -7,6 +7,24 @@ import (
 	"testing"
 )
 
+func TestWindowsStarterPool(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := WriteDeviceAuth(path, ScopeOrg, "acme", "", "cid", "tok.json"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := EnsureStarterPool(path, "npipe:////./pipe/docker_engine_windows", "amd64", "windows"); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := cfg.Pools[0]
+	if p.OS != "windows" || p.Name != "windows-pool" || strings.Join(p.Labels, ",") != "self-hosted,windows,x64" {
+		t.Fatalf("wrong Windows pool: %+v", p)
+	}
+}
+
 func TestStarterPoolReplacesEmptyPools(t *testing.T) {
 	for _, empty := range []string{"[]", "null", ""} {
 		t.Run(empty, func(t *testing.T) {

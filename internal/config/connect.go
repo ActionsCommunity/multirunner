@@ -121,7 +121,7 @@ func renderConfig(path string, file *yaml.Node) error {
 //
 // dockerHost is the endpoint the caller discovered on this machine. It is passed
 // in rather than probed here so this package keeps no opinion about daemons.
-func EnsureStarterPool(path, dockerHost, architecture string) (bool, error) {
+func EnsureStarterPool(path, dockerHost, architecture string, osType ...string) (bool, error) {
 	file, doc, err := loadOrNewDocument(path)
 	if err != nil {
 		return false, err
@@ -135,7 +135,7 @@ func EnsureStarterPool(path, dockerHost, architecture string) (bool, error) {
 	// whose root is written in flow style ({github: {...}}) would otherwise get a
 	// block `pools:` glued underneath, which parses as a second document root and
 	// leaves Load still reporting no pools.
-	key, value, err := starterPoolNodes(dockerHost, architecture)
+	key, value, err := starterPoolNodes(dockerHost, architecture, osType...)
 	if err != nil {
 		return false, err
 	}
@@ -155,9 +155,9 @@ func EnsureStarterPool(path, dockerHost, architecture string) (bool, error) {
 
 // starterPoolNodes parses the rendered starter pool into the key and value nodes
 // to graft onto a config, keeping the comments that name each option.
-func starterPoolNodes(dockerHost, architecture string) (key, value *yaml.Node, err error) {
+func starterPoolNodes(dockerHost, architecture string, osType ...string) (key, value *yaml.Node, err error) {
 	var parsed yaml.Node
-	if err := yaml.Unmarshal([]byte(PoolsYAML(dockerHost, architecture)), &parsed); err != nil {
+	if err := yaml.Unmarshal([]byte(PoolsYAML(dockerHost, architecture, osType...)), &parsed); err != nil {
 		return nil, nil, fmt.Errorf("parse the starter pool template: %w", err)
 	}
 	if len(parsed.Content) != 1 || parsed.Content[0].Kind != yaml.MappingNode {

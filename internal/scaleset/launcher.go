@@ -86,7 +86,11 @@ type Launcher struct {
 	removeMu             sync.Mutex
 	running              map[string]*runnerState
 	pendingRegistrations map[int64]string
-	seq                  int
+	// Successful exits remain in the previous broker count until the matching
+	// completion event and statistics are applied. Subtract them for refill.
+	pendingExits map[string]int64
+	completions  map[string]struct{}
+	seq          int
 	// desired is the count GitHub last asked for. A runner that exits frees a
 	// slot straight away, but the listener only re-asks on its next message, so
 	// without this the freed slot idles until then.
@@ -101,6 +105,7 @@ type runnerState struct {
 	handle              backend.RunnerHandle
 	runnerID            int64
 	busy                bool
+	completionAccounted bool
 	occupiesCapacity    bool
 	cleanupStarted      bool
 	needsDeregistration bool
@@ -131,12 +136,15 @@ func New(ctx context.Context, jit jitGenerator, be backend.Backend, opts Options
 		opts:                 opts,
 		running:              make(map[string]*runnerState),
 		pendingRegistrations: make(map[int64]string),
+		pendingExits:         make(map[string]int64),
+		completions:          make(map[string]struct{}),
 	}
 }
 
 // allowedLocked reports how many runners may be started to reach want, given
 // how many are already running and the configured cap. Callers hold l.mu.
 func (l *Launcher) allowedLocked(want int) int {
+	want -= len(l.pendingExits)
 	have := l.runningLocked()
 	if want <= have {
 		return 0
@@ -166,6 +174,18 @@ func (l *Launcher) HandleDesiredRunnerCount(ctx context.Context, count int) (int
 		running := l.runningLocked()
 		l.mu.Unlock()
 		return running, nil
+	}
+	// The listener invokes completion callbacks before this statistics callback.
+	// Only now is it safe to stop subtracting those local exits from demand.
+	for name := range l.completions {
+		delete(l.pendingExits, name)
+		if state := l.running[name]; state != nil {
+			state.completionAccounted = true
+		}
+	}
+	clear(l.completions)
+	if count == 0 {
+		clear(l.pendingExits)
 	}
 	l.desired = count
 	l.mu.Unlock()
@@ -345,6 +365,13 @@ func (l *Launcher) awaitExit(name string, state *runnerState) {
 		l.opts.Logger.Info("runner finished", slog.String("runner", name), slog.Duration("lived", lived))
 	}
 
+	if err == nil && code == 0 {
+		l.mu.Lock()
+		if !state.completionAccounted && l.desired > 0 {
+			l.pendingExits[name] = state.runnerID
+		}
+		l.mu.Unlock()
+	}
 	if cleanupErr := l.finishRunner(name, state, code, err, err != nil); cleanupErr != nil {
 		l.opts.Logger.Error("runner cleanup failed", slog.String("runner", name), slog.Any("error", cleanupErr))
 	}
@@ -398,9 +425,26 @@ func (l *Launcher) HandleJobStarted(_ context.Context, job *scaleset.JobStarted)
 	return nil
 }
 
-// HandleJobCompleted is a no-op. The runner's own exit frees its slot, which
-// covers the job-failed and runner-crashed cases too.
-func (l *Launcher) HandleJobCompleted(_ context.Context, _ *scaleset.JobCompleted) error {
+// HandleJobCompleted records which exits the next broker statistics account
+// for. It must not refill before those statistics arrive.
+func (l *Launcher) HandleJobCompleted(_ context.Context, job *scaleset.JobCompleted) error {
+	if job == nil {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for name, state := range l.running {
+		if (job.RunnerID != 0 && state.runnerID == int64(job.RunnerID)) || (job.RunnerName != "" && name == job.RunnerName) {
+			l.completions[name] = struct{}{}
+			return nil
+		}
+	}
+	for name, id := range l.pendingExits {
+		if (job.RunnerID != 0 && id == int64(job.RunnerID)) || (job.RunnerName != "" && name == job.RunnerName) {
+			l.completions[name] = struct{}{}
+			return nil
+		}
+	}
 	return nil
 }
 

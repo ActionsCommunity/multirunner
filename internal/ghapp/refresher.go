@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -69,7 +71,11 @@ var (
 // empty. Callers that share a token path share the returned refresher.
 func NewTokenRefresher(clientID, baseURL, tokenPath string) (*TokenRefresher, error) {
 	clientID = orDefault(clientID, DefaultClientID)
-	baseURL = strings.TrimRight(orDefault(baseURL, DefaultBaseURL), "/")
+	var err error
+	baseURL, err = DeviceBaseURL(baseURL)
+	if err != nil {
+		return nil, err
+	}
 	canonical, err := canonicalTokenPath(tokenPath)
 	if err != nil {
 		return nil, fmt.Errorf("resolve token store %s: %w", tokenPath, err)
@@ -95,6 +101,24 @@ func NewTokenRefresher(clientID, baseURL, tokenPath string) (*TokenRefresher, er
 	}
 	refreshers[key] = r
 	return r, nil
+}
+
+// DeviceBaseURL normalizes GitHub.com aliases and requires encrypted OAuth
+// endpoints. Literal loopback HTTP endpoints are allowed for local test servers;
+// no hostname or remote address may receive a refresh token over HTTP.
+func DeviceBaseURL(raw string) (string, error) {
+	u, err := url.Parse(strings.TrimRight(orDefault(raw, DefaultBaseURL), "/"))
+	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return "", fmt.Errorf("invalid device authentication base URL %q", raw)
+	}
+	if strings.EqualFold(u.Host, "github.com") || strings.EqualFold(u.Host, "www.github.com") {
+		return DefaultBaseURL, nil
+	}
+	ip := net.ParseIP(u.Hostname())
+	if u.Scheme != "https" && !(u.Scheme == "http" && ip != nil && ip.IsLoopback()) {
+		return "", fmt.Errorf("device authentication requires an HTTPS base URL, got %q", raw)
+	}
+	return u.String(), nil
 }
 
 // canonicalTokenPath is used for both the cache key and every file operation,

@@ -337,7 +337,9 @@ func runOwnAppConnect(cfgPath string, f connectFlags, in io.Reader, out io.Write
 	if err := config.WriteAppAuth(cfgPath, scope, owner, repoName, creds.AppID, creds.InstallationID, keyOut); err != nil {
 		return postConnectErr("write config", err)
 	}
-	addStarterPool(ctx, cfgPath, out)
+	if err := addStarterPool(ctx, cfgPath, out); err != nil {
+		return postConnectErr("write starter pool (credentials saved; add pools to the config manually)", err)
+	}
 
 	return writeConnectSuccess(out, cfgPath, keyOut, webhookSecretPath, webhookSecretWarning, needs.WebhookURL, creds)
 }
@@ -403,6 +405,7 @@ type deviceFlow struct {
 	requestCode  func(context.Context) (*ghapp.DeviceCode, error)
 	pollToken    func(context.Context, *ghapp.DeviceCode) (*ghapp.UserToken, error)
 	listInstalls func(context.Context, string) ([]ghapp.Installation, error)
+	checkRepo    func(context.Context, string, int64, string, string) error
 	clientID     string
 	appSlug      string
 	baseURL      string
@@ -449,6 +452,9 @@ func connectDeviceCmd(cfgPath string, f connectFlags, misused []string, in io.Re
 		},
 		listInstalls: func(ctx context.Context, accessToken string) ([]ghapp.Installation, error) {
 			return ghapp.UserInstallations(ctx, apiBase, accessToken)
+		},
+		checkRepo: func(ctx context.Context, accessToken string, installationID int64, owner, repo string) error {
+			return ghapp.CheckInstallationRepository(ctx, apiBase, accessToken, installationID, owner, repo)
 		},
 		clientID:     clientID,
 		appSlug:      app.slug,
@@ -520,6 +526,14 @@ func runDeviceConnect(cfgPath string, f connectFlags, in io.Reader, out io.Write
 	if !named {
 		scope, owner = config.ScopeOrg, inst.Account
 	}
+	if scope == config.ScopeRepo {
+		if df.checkRepo == nil {
+			return fmt.Errorf("repository access verification is unavailable")
+		}
+		if err := df.checkRepo(ctx, tok.AccessToken, inst.ID, owner, repoName); err != nil {
+			return fmt.Errorf("verify repository access: %w", err)
+		}
+	}
 	// Report the resolved account, except when selectInstallation already had the
 	// user pick it from a list (several org installations, interactively).
 	switch {
@@ -537,7 +551,9 @@ func runDeviceConnect(cfgPath string, f connectFlags, in io.Reader, out io.Write
 		return fmt.Errorf("write config: %w\n"+
 			"The user token was saved to %s; set auth.client_id and auth.token_path by hand to finish.", err, tokenPath)
 	}
-	addStarterPool(ctx, cfgPath, out)
+	if err := addStarterPool(ctx, cfgPath, out); err != nil {
+		return fmt.Errorf("credentials saved to %s and %s, but starter pool setup failed: %w; add pools to the config manually before running", cfgPath, tokenPath, err)
+	}
 	return writeDeviceConnectSuccess(out, cfgPath, tokenPath, scope, owner, repoName, inst)
 }
 
@@ -853,21 +869,29 @@ func writeNextSteps(b *strings.Builder, cfgPath string) {
 // anything, and the endpoint is the one value that cannot be guessed from the
 // GitHub side - so it is probed rather than assumed.
 //
-// A failure here is reported and then dropped: the credentials are already
-// written, and connect must not fail after the part that cannot be repeated.
-func addStarterPool(ctx context.Context, cfgPath string, out io.Writer) {
+// A failure is returned as partial setup: credentials are kept, but callers
+// must not report a runnable configuration or tell operators to reauthorize.
+func addStarterPool(ctx context.Context, cfgPath string, out io.Writer) error {
 	if hints, ok := config.ReadConnectHints(cfgPath); ok && hints.Pools > 0 {
-		return
+		return nil
 	}
-	endpoint := backend.PickDockerEndpoint(ctx, "linux")
+	endpoints := backend.DiscoverDockerHosts(ctx)
+	var endpoint backend.DockerEndpoint
+	for _, candidate := range endpoints {
+		if candidate.OSType == "linux" || candidate.OSType == "windows" {
+			endpoint = candidate
+			break
+		}
+	}
 	host := endpoint.Host
-	added, err := config.EnsureStarterPool(cfgPath, host, endpoint.Architecture)
+	added, err := config.EnsureStarterPool(cfgPath, host, endpoint.Architecture, endpoint.OSType)
 	switch {
 	case err != nil:
-		fmt.Fprintf(out, "\nCould not add a starter pool to %s: %v\n", cfgPath, err)
+		return fmt.Errorf("could not add a starter pool to %s: %w", cfgPath, err)
 	case added && host == "":
 		fmt.Fprintf(out, "\nNo container daemon answered on this host, so the starter pool was written with\n"+
 			"docker.host: %s as a placeholder. Start Docker or Podman, then set the real endpoint.\n",
 			config.FallbackDockerHost())
 	}
+	return nil
 }

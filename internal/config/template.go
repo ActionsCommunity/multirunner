@@ -33,7 +33,11 @@ func FallbackDockerHost() string {
 // better starting point than one the reader has to assemble. dockerHost is the
 // endpoint discovery actually found on this machine; an empty value falls back
 // to the platform default for the reader to correct.
-func PoolsYAML(dockerHost, architecture string) string {
+func PoolsYAML(dockerHost, architecture string, daemonOS ...string) string {
+	osType := "linux"
+	if len(daemonOS) > 0 && daemonOS[0] != "" {
+		osType = daemonOS[0]
+	}
 	if dockerHost == "" {
 		dockerHost = FallbackDockerHost()
 	}
@@ -56,13 +60,13 @@ pools:
   # defaults to scaleset for repo and org scopes and pool for scope=repos;
   # backend defaults to docker, and qemu needs no docker.host at all. Cache,
   # git cache, metrics and webhook tuning are covered in config.example.yaml.
-  - name: linux-pool
+  - name: %s-pool
     # linux | windows
-    os: linux
+    os: %s
     # Idle runners, or the cap on concurrent runners when autoscaling.
     size: 2
     # What a workflow's runs-on has to match.
-    labels: [self-hosted, linux, %q]
+    labels: [self-hosted, %s, %q]
     # linux: minimal, native-build, node, dotnet, rust, go
     # windows: minimal, node, dotnet, buildtools
     # Or set image: instead, to pin one of your own.
@@ -78,5 +82,5 @@ pools:
     tool_cache:
       # shared-volume persists hostedtoolcache between runners; off disables it.
       mode: shared-volume
-`, architecture, dockerHost)
+`, osType, osType, osType, architecture, dockerHost)
 }

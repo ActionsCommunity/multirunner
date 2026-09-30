@@ -210,6 +210,48 @@ func RefreshUserToken(ctx context.Context, clientID, baseURL, refreshToken strin
 	return tokenFromResponse(out, time.Now()), nil
 }
 
+// CheckInstallationRepository verifies the requested repository is included in
+// the selected installation and visible to the authorizing user.
+func CheckInstallationRepository(ctx context.Context, apiBase, accessToken string, installationID int64, owner, repo string) error {
+	apiBase = strings.TrimRight(orDefault(apiBase, DefaultAPIBase), "/")
+	for page := 1; ; page++ {
+		endpoint := fmt.Sprintf("%s/user/installations/%d/repositories?per_page=100&page=%d", apiBase, installationID, page)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Accept", "application/vnd.github+json")
+		req.Header.Set("Authorization", "Bearer "+accessToken)
+		resp, err := oauthClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("list installation repositories: %w", err)
+		}
+		var body struct {
+			Repositories []struct {
+				FullName string `json:"full_name"`
+			} `json:"repositories"`
+		}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			return fmt.Errorf("list installation repositories: status %d", resp.StatusCode)
+		}
+		err = json.NewDecoder(resp.Body).Decode(&body)
+		resp.Body.Close()
+		if err != nil {
+			return fmt.Errorf("decode installation repositories: %w", err)
+		}
+		for _, candidate := range body.Repositories {
+			if strings.EqualFold(candidate.FullName, owner+"/"+repo) {
+				return nil
+			}
+		}
+		if len(body.Repositories) < 100 {
+			break
+		}
+	}
+	return fmt.Errorf("%s/%s is not accessible through installation %d; include the repository in the App installation and authorize a user with repository admin access", owner, repo, installationID)
+}
+
 // UserInstallations lists the App installations the user access token can see,
 // so connect can confirm the App is installed on the target account.
 func UserInstallations(ctx context.Context, apiBase, accessToken string) ([]Installation, error) {
@@ -320,7 +362,18 @@ func postForm(ctx context.Context, endpoint string, form url.Values, out any) er
 // oauthClient talks to the device/oauth and installation endpoints. It has an
 // explicit timeout because http.DefaultClient has none: a hung proxy would
 // otherwise stall a connect, an installation poll, or a token refresh forever.
-var oauthClient = &http.Client{Timeout: 30 * time.Second}
+var oauthClient = &http.Client{
+	Timeout: 30 * time.Second,
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return fmt.Errorf("too many OAuth redirects")
+		}
+		if len(via) > 0 && (req.URL.Scheme != via[0].URL.Scheme || !strings.EqualFold(req.URL.Host, via[0].URL.Host)) {
+			return fmt.Errorf("refusing OAuth redirect outside the configured origin")
+		}
+		return nil
+	},
+}
 
 // maxOAuthResponse caps how much of a response is decoded, so a misdirected
 // request answering with a large page cannot be read into memory.

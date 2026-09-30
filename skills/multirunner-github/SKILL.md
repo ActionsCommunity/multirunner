@@ -32,7 +32,7 @@ Read "GitHub target and authentication" in
 - Establish the exact scope, owner, repositories, App installation, labels,
   runner group, provisioning mode, and receiver boundary before changing
   anything. Do not infer any of them.
-- `connect` supports one GitHub.com `--repo owner/repo` or `--org` target
+- `connect --own-app` supports one GitHub.com `--repo owner/repo` or `--org` target
   (plus `--name`, `--port`, `--key-out`, `--dry-run`, `--webhook-url`,
   `--detect`, `--non-interactive`). Always pass
   `--non-interactive` from a non-terminal context; otherwise it prompts for
@@ -41,7 +41,7 @@ Read "GitHub target and authentication" in
   reliable way to review the requested permissions before approval. It writes
   the PEM (mode 0600) before the YAML, then rewrites the whole config file at
   mode 0600, so it is not transactional and a service account may lose read
-  access. It replaces an unparsable config with a fresh document, pins
+  access. It refuses an unparsable config, pins
   `github.url` to GitHub.com when absent, and leaves stale `repo`/`repos`
   fields on an org target (nothing ever warns about them). Each browser step
   times out after 5 minutes; a timeout can leave the App created on GitHub
