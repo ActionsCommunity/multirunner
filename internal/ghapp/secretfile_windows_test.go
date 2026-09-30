@@ -13,7 +13,7 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-var systemTokenPath = flag.String("credential-system-path", "", "credential path for the LocalSystem test worker")
+var systemTokenPath = flag.String("system-token", "", "credential path for the LocalSystem test worker")
 
 // Exercise actual file reads and replacements as the default SCM identity.
 // A scheduled task gives the worker LocalSystem's token without installing a
@@ -30,7 +30,17 @@ func TestCredentialsWorkAcrossLocalSystemRefresh(t *testing.T) {
 	if user.User.Sid.Equals(system) {
 		t.Skip("requires an interactive account distinct from LocalSystem")
 	}
-	dir := t.TempDir()
+	// Keep /TR below schtasks' command-length limit, including long Go build
+	// paths. t.TempDir embeds the full test name in the directory name.
+	dir, err := os.MkdirTemp("", "mr-system-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(dir); err != nil {
+			t.Error(err)
+		}
+	})
 	path := filepath.Join(dir, "token.json")
 	if err := SaveUserToken(path, &UserToken{AccessToken: "operator-token"}); err != nil {
 		t.Fatal(err)
@@ -65,7 +75,7 @@ func TestCredentialsWorkAcrossLocalSystemRefresh(t *testing.T) {
 		t.Fatal(err)
 	}
 	name := fmt.Sprintf("multirunner-credential-test-%d-%d", os.Getpid(), time.Now().UnixNano())
-	command := fmt.Sprintf(`"%s" -test.run=^TestCredentialSystemWorker$ -credential-system-path="%s"`, exe, path)
+	command := fmt.Sprintf(`"%s" -test.run=^TestSystemCredentialWorker$ -system-token="%s"`, exe, path)
 	output, err := exec.Command("schtasks.exe", "/Create", "/TN", name, "/TR", command, "/SC", "ONCE", "/ST", "23:59", "/RU", "SYSTEM", "/RL", "HIGHEST", "/F").CombinedOutput()
 	if err != nil {
 		// Ordinary user machines may not grant task administration. The ACL
@@ -102,7 +112,7 @@ func TestCredentialsWorkAcrossLocalSystemRefresh(t *testing.T) {
 	}
 }
 
-func TestCredentialSystemWorker(t *testing.T) {
+func TestSystemCredentialWorker(t *testing.T) {
 	if *systemTokenPath == "" {
 		t.Skip("only run by the LocalSystem task")
 	}
