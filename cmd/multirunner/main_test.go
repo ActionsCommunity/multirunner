@@ -17,10 +17,30 @@ import (
 	"time"
 
 	"github.com/GerardSmit/multirunner/internal/backend"
+	"github.com/GerardSmit/multirunner/internal/buildinfo"
 	"github.com/GerardSmit/multirunner/internal/config"
 	"github.com/GerardSmit/multirunner/internal/ghapp"
 	"github.com/GerardSmit/multirunner/internal/winvm"
 )
+
+func TestVersionOutputIncludesVersionAndCommit(t *testing.T) {
+	originalVersion, originalCommit := buildinfo.Version, buildinfo.Commit
+	buildinfo.Version, buildinfo.Commit = "v1.2.3", "abc123"
+	t.Cleanup(func() {
+		buildinfo.Version, buildinfo.Commit = originalVersion, originalCommit
+	})
+
+	var out strings.Builder
+	cmd := rootCmd()
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"--version"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute --version: %v", err)
+	}
+	if got, want := out.String(), "multirunner version v1.2.3 (commit abc123)\n"; got != want {
+		t.Fatalf("--version output = %q, want %q", got, want)
+	}
+}
 
 func TestNormalizedContainerSettings(t *testing.T) {
 	configured := config.ContainerConfig{
@@ -161,7 +181,7 @@ func TestQEMUHousekeepingRejectsUnexpectedISO(t *testing.T) {
 	}}}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	if err := runQEMUHousekeeping(t.Context(), cfg, logger); err == nil ||
-		!strings.Contains(err.Error(), "Windows ISO SHA256 mismatch") {
+		!strings.Contains(err.Error(), "windows ISO SHA256 mismatch") {
 		t.Fatalf("housekeeping error = %v", err)
 	}
 }
