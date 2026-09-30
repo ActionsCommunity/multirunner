@@ -496,7 +496,13 @@ func TestBusyRunnerExitDoesNotDeregister(t *testing.T) {
 		t.Fatal(err)
 	}
 	be.finish(0)
-	waitFor(t, func() bool { return l.Running() == 0 })
+	// Capacity is freed after termination, before registration and backend
+	// cleanup. Wait for the tracked record to disappear before asserting cleanup.
+	waitFor(t, func() bool {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		return len(l.running) == 0
+	})
 	if removed := jit.removedIDs(); len(removed) != 0 {
 		t.Fatalf("removed busy runner registrations %v, want none", removed)
 	}
@@ -556,7 +562,13 @@ func TestPartialLaunchHandleStaysCountedUntilCleanupConverges(t *testing.T) {
 		t.Fatalf("reported %d runners, want uncertain launch counted until cleanup", got)
 	}
 
-	waitFor(t, func() bool { return l.Running() == 0 })
+	// Capacity is freed after termination, before registration and backend
+	// cleanup. Wait for the tracked record to disappear before asserting cleanup.
+	waitFor(t, func() bool {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		return len(l.running) == 0
+	})
 	if removed := jit.removedIDs(); len(removed) != 1 {
 		t.Fatalf("removed registrations = %v, want one", removed)
 	}
