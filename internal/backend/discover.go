@@ -13,8 +13,9 @@ import (
 // OS it runs. OSType is what decides whether a pool can use it: a Windows daemon
 // cannot run a linux pool however reachable it is.
 type DockerEndpoint struct {
-	Host   string
-	OSType string
+	Host         string
+	OSType       string
+	Architecture string
 }
 
 // discoverTimeout bounds each candidate probe. Discovery runs on a path that is
@@ -74,17 +75,17 @@ func probeDockerHost(ctx context.Context, host string) (DockerEndpoint, bool) {
 	if err != nil {
 		return DockerEndpoint{}, false
 	}
-	// Ping carries OSType on daemons that report it; Info is the fallback and
-	// costs an extra round trip only when needed.
+	// Info supplies the daemon's architecture, which can differ from this host
+	// for remote endpoints. Ping alone cannot label a runnable pool correctly.
+	info, err := cli.Info(ctx)
+	if err != nil {
+		return DockerEndpoint{}, false
+	}
 	osType := ping.OSType
 	if osType == "" {
-		info, err := cli.Info(ctx)
-		if err != nil {
-			return DockerEndpoint{}, false
-		}
 		osType = info.OSType
 	}
-	return DockerEndpoint{Host: host, OSType: osType}, true
+	return DockerEndpoint{Host: host, OSType: osType, Architecture: info.Architecture}, true
 }
 
 // dedupe keeps the first occurrence of each host, so an endpoint named both by
@@ -105,10 +106,16 @@ func dedupe(hosts []string) []string {
 // PickDockerHost returns the reachable endpoint that runs osType containers, or
 // "" when none does. It is what turns discovery into a value a config can hold.
 func PickDockerHost(ctx context.Context, osType string) string {
+	return PickDockerEndpoint(ctx, osType).Host
+}
+
+// PickDockerEndpoint retains the selected daemon's OS and architecture for the
+// starter pool, rather than assuming it runs the local machine's architecture.
+func PickDockerEndpoint(ctx context.Context, osType string) DockerEndpoint {
 	for _, ep := range DiscoverDockerHosts(ctx) {
 		if ep.OSType == osType {
-			return ep.Host
+			return ep
 		}
 	}
-	return ""
+	return DockerEndpoint{}
 }

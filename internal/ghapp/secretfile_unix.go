@@ -17,6 +17,10 @@ func restrictToOwner(path string) error {
 	return nil
 }
 
+func restrictToOwnerFrom(path, previousPath string) error {
+	return restrictToOwner(path)
+}
+
 // CheckOwnerOnly reports whether path is reachable only by its owner: no group
 // or world permission bits.
 func CheckOwnerOnly(path string) error {

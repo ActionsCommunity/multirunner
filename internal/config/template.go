@@ -33,9 +33,20 @@ func FallbackDockerHost() string {
 // better starting point than one the reader has to assemble. dockerHost is the
 // endpoint discovery actually found on this machine; an empty value falls back
 // to the platform default for the reader to correct.
-func PoolsYAML(dockerHost string) string {
+func PoolsYAML(dockerHost, architecture string) string {
 	if dockerHost == "" {
 		dockerHost = FallbackDockerHost()
+	}
+	if architecture == "" {
+		architecture = runtime.GOARCH
+	}
+	switch architecture {
+	case "amd64", "x86_64":
+		architecture = "x64"
+	case "aarch64":
+		architecture = "arm64"
+	case "armv7l", "armv6l":
+		architecture = "arm"
 	}
 	return fmt.Sprintf(`
 pools:
@@ -51,7 +62,7 @@ pools:
     # Idle runners, or the cap on concurrent runners when autoscaling.
     size: 2
     # What a workflow's runs-on has to match.
-    labels: [self-hosted, linux, x64]
+    labels: [self-hosted, linux, %q]
     # linux: minimal, native-build, node, dotnet, rust, go
     # windows: minimal, node, dotnet, buildtools
     # Or set image: instead, to pin one of your own.
@@ -67,5 +78,5 @@ pools:
     tool_cache:
       # shared-volume persists hostedtoolcache between runners; off disables it.
       mode: shared-volume
-`, dockerHost)
+`, architecture, dockerHost)
 }

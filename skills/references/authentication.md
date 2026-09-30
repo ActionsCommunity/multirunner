@@ -55,9 +55,10 @@ organization installation carries `organization_self_hosted_runners`. A `--repo`
 target has no such requirement: its App is installed wherever the repo lives. On success connect writes `auth.client_id` and
 `auth.token_path`, removing `auth.pat` and any installation-App keys. The user
 access and refresh tokens live in a JSON sidecar next to the config
-(`multirunner-user-token.json`), restricted to the account that ran connect: mode
-0600 on Unix, and an explicit owner-only DACL on Windows, where the mode is
-ignored. They rotate on refresh and are never inlined into the YAML. Loading a
+(`<config-path>.user-token.json`), with a separate file per config. Access is
+restricted to the account that ran connect: mode 0600 on Unix, and a protected
+DACL granting only that account and LocalSystem on Windows, where the mode is
+ignored. LocalSystem token refresh preserves the operator’s access. They rotate on refresh and are never inlined into the YAML. Loading a
 sidecar other accounts can read logs a warning rather than failing, since the
 token is already exposed by then. multirunner refreshes the access token
 automatically before it expires; refreshes are serialised across pools and

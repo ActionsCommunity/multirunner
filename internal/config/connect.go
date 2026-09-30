@@ -121,12 +121,13 @@ func renderConfig(path string, file *yaml.Node) error {
 //
 // dockerHost is the endpoint the caller discovered on this machine. It is passed
 // in rather than probed here so this package keeps no opinion about daemons.
-func EnsureStarterPool(path, dockerHost string) (bool, error) {
+func EnsureStarterPool(path, dockerHost, architecture string) (bool, error) {
 	file, doc, err := loadOrNewDocument(path)
 	if err != nil {
 		return false, err
 	}
-	if v, _ := findKey(doc, "pools"); v != nil {
+	v, index := findKey(doc, "pools")
+	if v != nil && !(v.Tag == "!!null" || (v.Kind == yaml.SequenceNode && len(v.Content) == 0)) {
 		return false, nil
 	}
 
@@ -134,12 +135,17 @@ func EnsureStarterPool(path, dockerHost string) (bool, error) {
 	// whose root is written in flow style ({github: {...}}) would otherwise get a
 	// block `pools:` glued underneath, which parses as a second document root and
 	// leaves Load still reporting no pools.
-	key, value, err := starterPoolNodes(dockerHost)
+	key, value, err := starterPoolNodes(dockerHost, architecture)
 	if err != nil {
 		return false, err
 	}
 	doc.Style = 0
-	doc.Content = append(doc.Content, key, value)
+	if v == nil {
+		doc.Content = append(doc.Content, key, value)
+	} else {
+		value.HeadComment = v.HeadComment
+		doc.Content[index+1] = value
+	}
 
 	if err := renderConfig(path, file); err != nil {
 		return false, err
@@ -149,9 +155,9 @@ func EnsureStarterPool(path, dockerHost string) (bool, error) {
 
 // starterPoolNodes parses the rendered starter pool into the key and value nodes
 // to graft onto a config, keeping the comments that name each option.
-func starterPoolNodes(dockerHost string) (key, value *yaml.Node, err error) {
+func starterPoolNodes(dockerHost, architecture string) (key, value *yaml.Node, err error) {
 	var parsed yaml.Node
-	if err := yaml.Unmarshal([]byte(PoolsYAML(dockerHost)), &parsed); err != nil {
+	if err := yaml.Unmarshal([]byte(PoolsYAML(dockerHost, architecture)), &parsed); err != nil {
 		return nil, nil, fmt.Errorf("parse the starter pool template: %w", err)
 	}
 	if len(parsed.Content) != 1 || parsed.Content[0].Kind != yaml.MappingNode {

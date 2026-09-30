@@ -322,7 +322,7 @@ func TestConnectDevicePlanDescribesDeviceFlow(t *testing.T) {
 		"device flow",
 		"Iv23liZGKUct4sAKjq2m",
 		"octo (org)",
-		"multirunner-user-token.json",
+		".user-token.json",
 		"auth.client_id + auth.token_path",
 		"remove auth.pat",
 		"No App is created",

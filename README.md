@@ -616,12 +616,10 @@ multirunner service start
 
 `service uninstall` removes it.
 
-Run `connect` as the account the service will run as. Credentials are written
-owner-only, so a service running as a different account cannot read them: on
-Windows the service runs as LocalSystem unless you set another account, and a
-sidecar restricted to your login is not readable from there. If the service
-account differs, re-run `connect` as that account (or copy the credentials and
-grant it access) rather than loosening the file.
+On Windows, `connect` restricts credentials to your account and LocalSystem,
+the default service identity. Service token refresh preserves your access.
+For a custom service account, grant that account access to the credentials.
+On Unix, run `connect` as the service account or arrange ownership accordingly.
 
 ---
 

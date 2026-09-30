@@ -7,6 +7,39 @@ import (
 	"testing"
 )
 
+func TestStarterPoolReplacesEmptyPools(t *testing.T) {
+	for _, empty := range []string{"[]", "null", ""} {
+		t.Run(empty, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			body := "github:\n  scope: org\n  owner: acme\nauth:\n  pat: fake\n# Keep this comment.\npools: " + empty + "\n"
+			if err := os.WriteFile(path, []byte(body), 0600); err != nil {
+				t.Fatal(err)
+			}
+			added, err := EnsureStarterPool(path, "unix:///test.sock", "arm64")
+			if err != nil || !added {
+				t.Fatalf("added=%v err=%v", added, err)
+			}
+			cfg, err := Load(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(cfg.Pools) != 1 || strings.Join(cfg.Pools[0].Labels, ",") != "self-hosted,linux,arm64" {
+				t.Fatalf("invalid pool: %+v", cfg.Pools)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(data), "# Keep this comment.") {
+				t.Fatal("pool comment dropped")
+			}
+			if added, err := EnsureStarterPool(path, "another-host", "amd64"); err != nil || added {
+				t.Fatalf("second connect added=%v err=%v", added, err)
+			}
+		})
+	}
+}
+
 // TestWriteAuthProducesRunnableConfig is the guarantee that matters: what
 // connect writes into an empty directory loads and validates, so the next
 // command the user runs does something instead of reporting a missing pool.
@@ -16,7 +49,7 @@ func TestWriteAuthProducesRunnableConfig(t *testing.T) {
 	if err := WriteDeviceAuth(path, ScopeOrg, "acme", "", "cid", "tok.json"); err != nil {
 		t.Fatal(err)
 	}
-	added, err := EnsureStarterPool(path, "unix:///probed.sock")
+	added, err := EnsureStarterPool(path, "unix:///probed.sock", "amd64")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,7 +76,7 @@ func TestStarterPoolFallsBackWhenNothingFound(t *testing.T) {
 	if err := WriteDeviceAuth(path, ScopeOrg, "acme", "", "cid", "tok.json"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := EnsureStarterPool(path, ""); err != nil {
+	if _, err := EnsureStarterPool(path, "", "amd64"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -65,7 +98,7 @@ func TestWriteAuthAddsThePoolOnce(t *testing.T) {
 		if err := WriteDeviceAuth(path, ScopeOrg, "acme", "", "cid", "tok.json"); err != nil {
 			t.Fatalf("write %d: %v", i, err)
 		}
-		if _, err := EnsureStarterPool(path, "unix:///probed.sock"); err != nil {
+		if _, err := EnsureStarterPool(path, "unix:///probed.sock", "amd64"); err != nil {
 			t.Fatalf("pool %d: %v", i, err)
 		}
 	}
@@ -91,7 +124,7 @@ func TestWriteAuthLeavesExistingPoolsAlone(t *testing.T) {
 	if err := WriteDeviceAuth(path, ScopeOrg, "acme", "", "cid", "tok.json"); err != nil {
 		t.Fatal(err)
 	}
-	if added, err := EnsureStarterPool(path, "unix:///probed.sock"); err != nil || added {
+	if added, err := EnsureStarterPool(path, "unix:///probed.sock", "amd64"); err != nil || added {
 		t.Fatalf("EnsureStarterPool added=%v err=%v, want it to leave existing pools alone", added, err)
 	}
 
@@ -134,7 +167,7 @@ func TestWritersKeepTheFileHeader(t *testing.T) {
 	if err := WriteDeviceAuth(path, ScopeOrg, "acme", "", "cid", "tok.json"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := EnsureStarterPool(path, "unix:///probed.sock"); err != nil {
+	if _, err := EnsureStarterPool(path, "unix:///probed.sock", "amd64"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -161,7 +194,7 @@ func TestStarterPoolSurvivesAFlowStyleRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	added, err := EnsureStarterPool(path, "unix:///probed.sock")
+	added, err := EnsureStarterPool(path, "unix:///probed.sock", "amd64")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +211,7 @@ func TestStarterPoolSurvivesAFlowStyleRoot(t *testing.T) {
 	}
 
 	// A second connect must see the pool it wrote, not append another.
-	if added, err := EnsureStarterPool(path, "unix:///probed.sock"); err != nil || added {
+	if added, err := EnsureStarterPool(path, "unix:///probed.sock", "amd64"); err != nil || added {
 		t.Errorf("second call added=%v err=%v, want it to leave the pool alone", added, err)
 	}
 }

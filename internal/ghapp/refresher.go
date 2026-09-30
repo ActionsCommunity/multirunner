@@ -70,6 +70,11 @@ var (
 func NewTokenRefresher(clientID, baseURL, tokenPath string) (*TokenRefresher, error) {
 	clientID = orDefault(clientID, DefaultClientID)
 	baseURL = strings.TrimRight(orDefault(baseURL, DefaultBaseURL), "/")
+	canonical, err := canonicalTokenPath(tokenPath)
+	if err != nil {
+		return nil, fmt.Errorf("resolve token store %s: %w", tokenPath, err)
+	}
+	tokenPath = canonical
 
 	key := refresherKey(clientID, baseURL, tokenPath)
 	refreshersMu.Lock()
@@ -92,18 +97,19 @@ func NewTokenRefresher(clientID, baseURL, tokenPath string) (*TokenRefresher, er
 	return r, nil
 }
 
-// refresherKey canonicalises the token path so two configs naming the same file
-// differently still share a refresher. An unresolvable path is used as given
-// rather than failing: worst case the two callers do not share.
+// canonicalTokenPath is used for both the cache key and every file operation,
+// so aliases lock and replace the same sidecar rather than replacing a symlink.
+func canonicalTokenPath(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	return filepath.EvalSymlinks(abs)
+}
+
+// Path case is preserved: case-distinct files on Unix can hold different tokens.
 func refresherKey(clientID, baseURL, tokenPath string) string {
-	path := tokenPath
-	if abs, err := filepath.Abs(path); err == nil {
-		path = abs
-	}
-	if resolved, err := filepath.EvalSymlinks(path); err == nil {
-		path = resolved
-	}
-	return clientID + "\x00" + baseURL + "\x00" + strings.ToLower(filepath.Clean(path))
+	return clientID + "\x00" + baseURL + "\x00" + filepath.Clean(tokenPath)
 }
 
 // loadValidToken reads the sidecar and rejects one with no access token, which

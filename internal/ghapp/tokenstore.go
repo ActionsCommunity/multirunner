@@ -71,7 +71,7 @@ func SaveUserToken(path string, tok *UserToken) error {
 	}
 	// Restrict before the token is written, so the bytes never sit in a
 	// world-readable file even briefly.
-	if err := restrictToOwner(tmpName); err != nil {
+	if err := restrictToOwnerFrom(tmpName, path); err != nil {
 		tmp.Close()
 		return err
 	}
@@ -88,8 +88,9 @@ func SaveUserToken(path string, tok *UserToken) error {
 	return nil
 }
 
-// WriteSecretFile writes a credential to path with owner-only access, replacing
-// any existing file. Use it for every credential connect persists: os.WriteFile's
+// WriteSecretFile writes a credential with access restricted to the owner
+// (and LocalSystem on Windows), replacing any existing file. Use it for every
+// credential connect persists: os.WriteFile's
 // mode argument is ignored on Windows, so a plain 0600 write leaves the file
 // readable by other local accounts.
 func WriteSecretFile(path string, data []byte) error {

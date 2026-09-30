@@ -164,8 +164,8 @@ account is refused: only an organization installation carries
 installed wherever the repository lives. On success it writes
 `auth.client_id` and `auth.token_path`,
 removing `auth.pat` and any installation-App keys. The user access and refresh
-tokens are stored in `multirunner-user-token.json` next to the config (mode
-`0600`); they rotate on refresh and are never inlined into YAML. At `run` time the
+tokens are stored in `<config-path>.user-token.json`, separately for each config
+(mode `0600` on Unix; operator and LocalSystem only on Windows); they rotate on refresh and are never inlined into YAML. At `run` time the
 access token is refreshed automatically before expiry (no client secret; a failed
 refresh tells you to re-run `connect`). Device auth drives scale sets: it follows
 the normal `provisioning: scaleset` default (for non-`repos` scopes) as well as

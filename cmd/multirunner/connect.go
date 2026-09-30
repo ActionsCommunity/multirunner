@@ -392,7 +392,7 @@ Apply: rerun this command without --dry-run.
 // deviceTokenPath is where the device flow stores the rotating user token: a
 // JSON sidecar next to the config, mirroring the private key's placement.
 func deviceTokenPath(cfgPath string) string {
-	return filepath.Join(filepath.Dir(cfgPath), "multirunner-user-token.json")
+	return cfgPath + ".user-token.json"
 }
 
 // deviceFlow holds the network-touching steps of the device connect, injected so
@@ -859,8 +859,9 @@ func addStarterPool(ctx context.Context, cfgPath string, out io.Writer) {
 	if hints, ok := config.ReadConnectHints(cfgPath); ok && hints.Pools > 0 {
 		return
 	}
-	host := backend.PickDockerHost(ctx, "linux")
-	added, err := config.EnsureStarterPool(cfgPath, host)
+	endpoint := backend.PickDockerEndpoint(ctx, "linux")
+	host := endpoint.Host
+	added, err := config.EnsureStarterPool(cfgPath, host, endpoint.Architecture)
 	switch {
 	case err != nil:
 		fmt.Fprintf(out, "\nCould not add a starter pool to %s: %v\n", cfgPath, err)
