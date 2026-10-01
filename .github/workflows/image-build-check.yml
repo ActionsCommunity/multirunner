@@ -26,7 +26,7 @@ jobs:
       windows-changed: ${{ steps.inputs.outputs.windows }}
       buildtools-changed: ${{ steps.inputs.outputs.buildtools }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Windows image jobs cost a hosted runner ten to twenty minutes each,
       # most of it Windows layer extraction that nothing can cache. Only build
@@ -85,7 +85,7 @@ jobs:
     if: needs.version-policy.outputs.linux-changed == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Build flavor chain (no push, host arch)
         run: |
@@ -219,8 +219,8 @@ jobs:
     if: needs.version-policy.outputs.linux-changed == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-qemu-action@v3
+      - uses: actions/checkout@v7
+      - uses: docker/setup-qemu-action@v4
       - name: Build and run arm64 node flavor
         run: |
           set -euo pipefail
@@ -242,7 +242,7 @@ jobs:
     if: needs.version-policy.outputs.windows-changed == 'true'
     runs-on: windows-2025
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/wait-for-docker
 
       # Windows images are large, so keep this job to the Node/.NET branch.
@@ -390,7 +390,7 @@ jobs:
         line: ${{ fromJSON(needs.version-policy.outputs.buildtools-lines) }}
     runs-on: windows-2025
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Reclaim host Visual Studio disk
         shell: pwsh
