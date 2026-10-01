@@ -1,0 +1,126 @@
+{
+  "version": 1,
+  "intent": {
+    "audience": "Developers and platform engineers running GitHub Actions on hardware they control.",
+    "surface": "Public GitHub Pages landing page and CLI reference.",
+    "outcome": "Visitors understand the one-host, many-disposable-runners model and can choose a setup path within the first viewport.",
+    "success": "The site is distinctive, technically credible, accessible, responsive, and grounded in repository evidence."
+  },
+  "mode": "Redesign",
+  "existingSystem": {
+    "framework": "Astro 7 static site",
+    "routes": [
+      "/",
+      "/commands/"
+    ],
+    "content": "Hero, capabilities, scale sets, quick start, agent plugin, backends, call to action, and command reference.",
+    "visualState": "Dark navy, cyan, lime, system typography, hard-edged layout, and placeholder artwork."
+  },
+  "direction": {
+    "name": "Runner Yard",
+    "thesis": "One physical host coordinates many clean, parallel jobs.",
+    "signature": "Parallel cobalt runner lanes moving through a single hard-edged host chassis.",
+    "palette": {
+      "coolWhite": "#F3F7FA",
+      "deepInk": "#101C2A",
+      "cobalt": "#174FC4",
+      "signalOrange": "#C6400C",
+      "steel": "#596978"
+    },
+    "type": {
+      "display": "Archivo",
+      "body": "IBM Plex Sans",
+      "mono": "IBM Plex Mono"
+    },
+    "texture": "Flat spot colors, hard rules, sharp corners, and restrained halftone only inside large illustrations."
+  },
+  "interaction": {
+    "states": [
+      "default",
+      "hover",
+      "focus-visible",
+      "active"
+    ],
+    "breakpoints": [
+      375,
+      768,
+      1280
+    ],
+    "behavior": "Static navigation, anchor links, horizontal code overflow, and stacked mobile composition.",
+    "motion": "No required motion. Reduced-motion users receive no smooth scrolling."
+  },
+  "constraints": {
+    "accessibility": "WCAG 2.1 AA, keyboard skip link, visible focus, one h1 per route, semantic landmarks, and 200 percent zoom support.",
+    "performance": "Static output, no client JavaScript, responsive optimized hero, locally served fonts, and bounded image weight.",
+    "content": "Preserve all verified product claims, commands, links, skills, and examples. Do not fabricate customers, metrics, or screenshots.",
+    "security": "No third-party runtime scripts, no secrets, and no model-generated text embedded in technical diagrams.",
+    "brand": "No GitHub, operating-system, hardware-vendor, or third-party marks in generated artwork."
+  },
+  "implementationHandoff": {
+    "files": [
+      "src/layouts/Layout.astro",
+      "src/pages/index.astro",
+      "src/pages/commands.astro",
+      "src/components/AgentPluginSection.astro",
+      "src/components/ScaleSetSection.astro",
+      "src/assets/hero.png",
+      "public/images/logo.png",
+      "public/images/favicon.png",
+      "public/images/og.png"
+    ],
+    "reuse": [
+      "Existing semantic HTML and product copy",
+      "Astro project base-path handling",
+      "Existing responsive and accessibility tests"
+    ],
+    "nonGoals": [
+      "Application interactivity",
+      "A client-side framework",
+      "Theme switching",
+      "Model-generated terminal text",
+      "Changing CLI behavior"
+    ]
+  },
+  "verificationPlan": {
+    "states": {
+      "default": "Desktop and mobile screenshots plus route smoke tests.",
+      "hover": "Computed contrast and visible style change.",
+      "focus-visible": "Keyboard tab order and focus-ring inspection.",
+      "active": "Link and button active-state CSS inspection."
+    },
+    "breakpoints": {
+      "375": "Mobile layout, navigation, code overflow, and image crop.",
+      "768": "Tablet composition and section transitions.",
+      "1280": "Desktop hierarchy, copy-safe hero, and full navigation."
+    },
+    "gates": [
+      "npm test",
+      "Astro build",
+      "Impeccable detector",
+      "Accessibility audit",
+      "Design review",
+      "Performance measurement",
+      "Playwright browser smoke"
+    ]
+  },
+  "provenance": [
+    {
+      "sourceId": "user-confirmed-runner-yard",
+      "commit": "8c223dc753bcc53fa07a56297b4dc34a9c60de7d",
+      "adapterPath": "PRODUCT.md",
+      "excerptPath": "Conversation choice: Runner Yard with cool white steel-blue background."
+    },
+    {
+      "sourceId": "azure-jongdevdiv-gpt-image-2",
+      "commit": "model-version-2026-04-21",
+      "adapterPath": "jong-image-westus3/gpt-image-2",
+      "excerptPath": "Session design-assets request and response artifacts."
+    },
+    {
+      "sourceId": "rubber-duck-agreement",
+      "commit": "021533b3e268d5f5180f4932855484474f2c73239df758d6000cb99480b7a302",
+      "adapterPath": "rubber-duck",
+      "excerptPath": "Cool-white Runner Yard agreement and final prompts."
+    }
+  ]
+}

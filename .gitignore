@@ -35,6 +35,10 @@ multirunner-app.webhook-secret
 /cacheserver
 /cacheserver.exe
 
+# Astro site dependencies and local cache
+/node_modules/
+/.astro/
+
 # Logs
 *.log
 
@@ -44,6 +48,8 @@ multirunner-app.webhook-secret
 
 # Claude / agent state
 .claude/
+/.impeccable/*
+!/.impeccable/design.json
 
 # more binaries
 /cacheserver-linux

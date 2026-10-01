@@ -1,0 +1,330 @@
+---
+import Layout from "../layouts/Layout.astro";
+
+const base = import.meta.env.BASE_URL;
+const fullReferenceUrl =
+  "https://github.com/actionscommunity/multirunner/blob/main/skills/docs/cli-reference.md";
+
+const commands = [
+  {
+    name: "run",
+    summary: "Run the orchestrator and keep every configured runner slot filled.",
+    usage: "multirunner [run] [--config <path>] [--install-deps] [--dry-run]",
+    flags: [
+      ["--config <path>", "YAML configuration path. Default: config.yaml"],
+      ["--install-deps", "Permit installation of a missing Windows Docker daemon. This may elevate."],
+      ["--dry-run", "Validate inputs and print the operation plan without changing runtimes, files, or GitHub."],
+    ],
+  },
+  {
+    name: "doctor",
+    summary: "Check every configured daemon and container mode without starting runners.",
+    usage: "multirunner doctor [--config config.yaml]",
+    flags: [["--config <path>", "YAML configuration path. Default: config.yaml"]],
+  },
+  {
+    name: "connect",
+    summary: "Create and install a GitHub App, then write its credentials to the configuration.",
+    usage: "multirunner connect (--org <org> | --repo <owner/name>) [flags]",
+    flags: [
+      ["--org <org>", "Create an organization-scoped GitHub App."],
+      ["--repo <owner/name>", "Create a repository-scoped GitHub App."],
+      ["--name <name>", "GitHub App name. Default: multirunner"],
+      ["--port <number>", "Local callback port. Use 0 for automatic selection."],
+      ["--key-out <path>", "Path for the generated App private key."],
+      ["--config <path>", "YAML configuration path. Default: config.yaml"],
+      ["--dry-run", "Print App permissions, callback, target, and local writes without making changes."],
+    ],
+  },
+  {
+    name: "detect",
+    summary: "Scan a repository and print recommended runner image flavors plus a ready-to-paste pools block.",
+    usage: "multirunner detect [--path <dir> | --repo <owner/name>] [flags]",
+    flags: [
+      ["--path <dir>", "Local checkout to scan. Default: current directory"],
+      ["--repo <owner/name>", "Remote repository to scan through the GitHub API."],
+      ["--os <linux|windows>", "Operating system for the recommended pools. Default: linux"],
+      ["--config <path>", "Configuration used for GitHub authentication during a remote scan."],
+    ],
+  },
+  {
+    name: "bake",
+    summary: "Build a golden Windows Server Core disk for QEMU runner pools.",
+    usage: "multirunner bake --iso <path> --golden <path> [flags]",
+    flags: [
+      ["--iso <path>", "Windows Server installation ISO. Required."],
+      ["--iso-sha256 <hex>", "Expected ISO SHA-256 digest. Empty by default."],
+      ["--golden <path>", "Output qcow2 golden disk path. Required."],
+      ["--disk-gb <number>", "Golden disk size. Default: 40"],
+      ["--mem-mb <number>", "Installer memory in MB. Default: 4096"],
+      ["--cpus <number>", "Installer virtual CPUs. Default: 2"],
+      ["--accel <mode>", "QEMU acceleration: kvm, whpx, hvf, or tcg. Empty selects automatically."],
+      ["--runner-version <version>", "GitHub Actions runner version to install. Current default: 2.337.0"],
+      ["--runner-sha256 <hex>", "Runner archive SHA-256. Required for a non-default runner version."],
+      ["--tools <list>", "Toolchains: dotnet[:major], node[:major], go, and buildtools[:line]."],
+      ["--licensed", "Skip Windows evaluation housekeeping when a key or KMS is configured."],
+      ["--vnc <address>", "Raw VNC listener. Default: 127.0.0.1:0"],
+      ["--vnc-web <address>", "Browser VNC viewer address. Default: 127.0.0.1:8090"],
+      ["--dry-run", "Validate and hash inputs, then print the plan without creating files or starting QEMU."],
+      ["--prepare-only", "Create the disk and unattended ISO, then print the QEMU command without running it."],
+    ],
+  },
+  {
+    name: "install-containerd",
+    summary: "Install containerd, runhcs, nerdctl, and Windows CNI plugins for Windows container runners.",
+    usage: "multirunner install-containerd [--dry-run]",
+    flags: [["--dry-run", "Inspect current state and print planned changes without elevation or mutation."]],
+  },
+  {
+    name: "install-windows-daemon",
+    summary: "Install a standalone Windows-container Moby daemon as a service.",
+    usage: "multirunner install-windows-daemon [--data-root <path>] [--dry-run]",
+    flags: [
+      ["--data-root <path>", "Image and container storage path. Default: %ProgramData%\\multirunner\\docker\\data"],
+      ["--dry-run", "Inspect feature, service, and reboot state without elevation or mutation."],
+    ],
+  },
+  {
+    name: "service",
+    summary: "Manage multirunner through Windows SCM, Linux systemd, or macOS launchd.",
+    usage: "multirunner service [--dry-run] <install|uninstall|start|stop|restart> [--config <path>]",
+    flags: [
+      ["--config <path>", "Configuration path stored by service install. Default: config.yaml"],
+      ["--dry-run", "Report service state, action, path, and effect without changing the service."],
+    ],
+  },
+  {
+    name: "completion",
+    summary: "Generate a shell completion script.",
+    usage: "multirunner completion <bash|zsh|fish|powershell> [--no-descriptions]",
+    flags: [["--no-descriptions", "Disable completion descriptions."]],
+  },
+  {
+    name: "help",
+    summary: "Print built-in help for the root command or a subcommand.",
+    usage: "multirunner help [command]",
+    flags: [],
+  },
+];
+---
+
+<Layout
+  title="CLI reference | multirunner"
+  description="Command and flag reference for the multirunner self-hosted GitHub Actions runner orchestrator."
+>
+  <header class="reference-header page-shell">
+    <h1>Commands for every runner lifecycle.</h1>
+    <p class="lead">
+      Start pools, verify backends, connect GitHub authentication, inspect project
+      needs, bake Windows images, and install multirunner as a host service.
+    </p>
+    <pre><code>multirunner &lt;command&gt; --help
+multirunner --config config.yaml &lt;command&gt;</code></pre>
+    <p class="operator-reference">
+      Configuration resolution, side effects, exit codes, and operational caveats
+      live in the <a href={fullReferenceUrl}>full operator reference</a>.
+    </p>
+    <section class="global-options" id="global-options">
+      <h2>Global options</h2>
+      <div class="flag-list">
+        <div class="flag">
+          <code>--config &lt;path&gt;</code>
+          <span>YAML configuration path. Default: config.yaml</span>
+        </div>
+        <div class="flag">
+          <code>-h, --help</code>
+          <span>Show help for multirunner or a command.</span>
+        </div>
+        <div class="flag">
+          <code>-v, --version</code>
+          <span>Print the multirunner version. Root command only.</span>
+        </div>
+        <div class="flag">
+          <code>--install-deps</code>
+          <span>Permit Windows Docker daemon installation. Root invocation and run only.</span>
+        </div>
+        <div class="flag">
+          <code>--dry-run</code>
+          <span>Preview supported state-changing commands without applying them.</span>
+        </div>
+      </div>
+    </section>
+  </header>
+
+  <div class="reference-layout page-shell">
+    <aside>
+      <p>Commands</p>
+      <nav aria-label="Command index">
+        <a href="#global-options">global options</a>
+        {commands.map((command) => <a href={`#${command.name}`}>{command.name}</a>)}
+      </nav>
+      <a class="back-link" href={base}>Back to overview</a>
+    </aside>
+
+    <div class="command-list">
+      {commands.map((command) => (
+        <section id={command.name} class="command">
+          <h2>{command.name}</h2>
+          <p>{command.summary}</p>
+          <pre><code>{command.usage}</code></pre>
+          {command.flags.length > 0 && (
+            <div class="flag-list">
+              {command.flags.map(([flag, description]) => (
+                <div class="flag">
+                  <code>{flag}</code>
+                  <span>{description}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+      ))}
+    </div>
+  </div>
+</Layout>
+
+<style>
+  .reference-header {
+    padding-top: clamp(4rem, 9vw, 7rem);
+    padding-bottom: clamp(3rem, 7vw, 5rem);
+    border-bottom: 2px solid var(--ink);
+  }
+
+  .reference-header h1 {
+    max-width: 13ch;
+    font-size: clamp(2.8rem, 7vw, 5.5rem);
+  }
+
+  .reference-header .lead {
+    margin: 1.5rem 0 2rem;
+  }
+
+  .reference-header pre {
+    max-width: 720px;
+  }
+
+  .operator-reference {
+    max-width: 720px;
+    color: var(--steel);
+  }
+
+  .global-options {
+    max-width: 720px;
+    margin-top: var(--space-5);
+    padding: var(--space-4);
+    background: var(--cobalt-soft);
+    border: 2px solid var(--ink);
+    scroll-margin-top: 90px;
+  }
+
+  .global-options h2 {
+    margin-bottom: 1rem;
+    font-size: 1.5rem;
+  }
+
+  .reference-layout {
+    display: grid;
+    grid-template-columns: 200px minmax(0, 1fr);
+    gap: clamp(2rem, 7vw, 7rem);
+    padding-top: var(--space-6);
+    padding-bottom: 7rem;
+  }
+
+  aside {
+    position: sticky;
+    top: 96px;
+    align-self: start;
+  }
+
+  aside > p {
+    margin: 0 0 0.75rem;
+    color: var(--steel);
+    font: 600 0.72rem/1.2 var(--font-mono);
+  }
+
+  aside nav {
+    display: grid;
+  }
+
+  aside nav a {
+    padding: 0.35rem 0;
+    color: var(--ink);
+    overflow-wrap: anywhere;
+    text-decoration: none;
+  }
+
+  aside nav a:hover {
+    color: var(--cobalt);
+    text-decoration: underline;
+  }
+
+  .back-link {
+    display: inline-block;
+    margin-top: 1.5rem;
+    font-size: 0.88rem;
+  }
+
+  .command-list {
+    min-width: 0;
+  }
+
+  .command {
+    padding: 0 0 4rem;
+    scroll-margin-top: 90px;
+  }
+
+  .command + .command {
+    padding-top: 4rem;
+    border-top: 2px solid var(--ink);
+  }
+
+  .command h2 {
+    font-family: var(--font-mono);
+    font-size: clamp(2rem, 5vw, 3.5rem);
+  }
+
+  .command > p {
+    max-width: 64ch;
+    color: var(--steel);
+  }
+
+  .command pre {
+    margin: 1.5rem 0;
+  }
+
+  .flag-list {
+    display: grid;
+    border-top: 2px solid var(--ink);
+  }
+
+  .flag {
+    display: grid;
+    grid-template-columns: minmax(190px, 0.75fr) 1.25fr;
+    gap: 1.5rem;
+    padding: 0.8rem 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .flag span {
+    color: var(--steel);
+  }
+
+  @media (max-width: 720px) {
+    .reference-layout {
+      grid-template-columns: 1fr;
+    }
+
+    aside {
+      position: static;
+    }
+
+    aside nav {
+      grid-template-columns: repeat(2, 1fr);
+    }
+
+    .flag {
+      grid-template-columns: 1fr;
+      gap: 0.25rem;
+    }
+  }
+</style>
