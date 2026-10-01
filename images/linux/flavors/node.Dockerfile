@@ -32,7 +32,7 @@ COPY --from=docker-cli /usr/local/libexec/docker/cli-plugins/docker-buildx \
 # marker is only written once the extract has succeeded.
 RUN apt-get update -y && apt-get install -y --no-install-recommends ca-certificates curl xz-utils \
     && docker --version | grep -F "Docker version 29.8.1" \
-    && docker buildx version | grep -F "v0.37.0" \
+    && docker buildx version | grep -F "v0.37.1" \
     && rm -rf /var/lib/apt/lists/* \
     && arch="$(dpkg --print-architecture)" \
     && case "$arch" in \
