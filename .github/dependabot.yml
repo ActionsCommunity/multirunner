@@ -1,0 +1,75 @@
+version: 2
+
+# Runner image toolchains, vendor checksums, and base-image digests are owned
+# by cmd/update-image-versions (images/versions.json). Docker updates here only
+# cover the Dockerfiles that tool does not manage.
+
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 3
+    groups:
+      go-modules:
+        patterns: ["*"]
+    commit-message:
+      prefix: "chore(deps)"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 3
+    groups:
+      github-actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "chore(ci)"
+
+  - package-ecosystem: docker
+    directories:
+      - /images/cacheserver
+      - /images/linux/flavors
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      docker:
+        patterns: ["*"]
+    commit-message:
+      prefix: "chore(images)"
+
+  - package-ecosystem: npm
+    directory: /testdata/conformance/node
+    schedule:
+      interval: monthly
+    groups:
+      conformance-node:
+        patterns: ["*"]
+    commit-message:
+      prefix: "chore(conformance)"
+
+  - package-ecosystem: uv
+    directory: /testdata/conformance/python
+    schedule:
+      interval: monthly
+    groups:
+      conformance-python:
+        patterns: ["*"]
+    commit-message:
+      prefix: "chore(conformance)"
+
+  - package-ecosystem: nuget
+    directory: /testdata/conformance/dotnet
+    schedule:
+      interval: monthly
+    groups:
+      conformance-dotnet:
+        patterns: ["*"]
+    commit-message:
+      prefix: "chore(conformance)"
