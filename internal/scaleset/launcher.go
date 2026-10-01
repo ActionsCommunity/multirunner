@@ -62,7 +62,7 @@ type Options struct {
 	// OnStart and OnStop report runner lifecycle events.
 	OnStart func()
 	OnStop  func(exitCode int, err error)
-	// Logger reports recoverable launch and cleanup failures.
+	// Logger records runner lifecycle and recoverable launch and cleanup failures.
 	Logger *slog.Logger
 	// cleanupTimeout bounds each kill and deregistration operation.
 	cleanupTimeout time.Duration
@@ -86,13 +86,26 @@ type Launcher struct {
 	removeMu             sync.Mutex
 	running              map[string]*runnerState
 	pendingRegistrations map[int64]string
-	seq                  int
+	// Successful exits remain in the previous broker count until the matching
+	// completion event and statistics are applied. Subtract them for refill.
+	pendingExits map[string]int64
+	completions  map[string]struct{}
+	seq          int
+	// desired is the count GitHub last asked for. A runner that exits frees a
+	// slot straight away, but the listener only re-asks on its next message, so
+	// without this the freed slot idles until then.
+	desired int
+	// stopped marks that Shutdown has begun. Refilling past that point would
+	// start runners the shutdown is trying to tear down, and they would outlive
+	// it.
+	stopped bool
 }
 
 type runnerState struct {
 	handle              backend.RunnerHandle
 	runnerID            int64
 	busy                bool
+	completionAccounted bool
 	occupiesCapacity    bool
 	cleanupStarted      bool
 	needsDeregistration bool
@@ -123,12 +136,15 @@ func New(ctx context.Context, jit jitGenerator, be backend.Backend, opts Options
 		opts:                 opts,
 		running:              make(map[string]*runnerState),
 		pendingRegistrations: make(map[int64]string),
+		pendingExits:         make(map[string]int64),
+		completions:          make(map[string]struct{}),
 	}
 }
 
 // allowedLocked reports how many runners may be started to reach want, given
 // how many are already running and the configured cap. Callers hold l.mu.
 func (l *Launcher) allowedLocked(want int) int {
+	want -= len(l.pendingExits)
 	have := l.runningLocked()
 	if want <= have {
 		return 0
@@ -153,6 +169,27 @@ func (l *Launcher) allowedLocked(want int) int {
 // Runners are ephemeral: each exits after one job, then convergent cleanup
 // removes its registration and backend record. A runner still up may be mid-job.
 func (l *Launcher) HandleDesiredRunnerCount(ctx context.Context, count int) (int, error) {
+	l.mu.Lock()
+	if l.stopped {
+		running := l.runningLocked()
+		l.mu.Unlock()
+		return running, nil
+	}
+	// The listener invokes completion callbacks before this statistics callback.
+	// Only now is it safe to stop subtracting those local exits from demand.
+	for name := range l.completions {
+		delete(l.pendingExits, name)
+		if state := l.running[name]; state != nil {
+			state.completionAccounted = true
+		}
+	}
+	clear(l.completions)
+	if count == 0 {
+		clear(l.pendingExits)
+	}
+	l.desired = count
+	l.mu.Unlock()
+
 	if err := l.retryPendingRegistrations(ctx); err != nil {
 		if isPermanentSessionError(err) {
 			return l.Running(), err
@@ -175,6 +212,14 @@ func (l *Launcher) HandleDesiredRunnerCount(ctx context.Context, count int) (int
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
+	if l.stopped {
+		return l.runningLocked(), nil
+	}
+	l.opts.Logger.Info("github asked for runners",
+		slog.Int("desired", count),
+		slog.Int("running", len(l.running)),
+		slog.Int("max", l.opts.MaxRunners),
+	)
 	for n := l.allowedLocked(count); n > 0; n-- {
 		if err := l.launchLocked(); err != nil {
 			if isPermanentSessionError(err) {
@@ -235,6 +280,12 @@ func (l *Launcher) launchLocked() (err error) {
 	// This is the whole integration point. The scale set listener hands back
 	// the same base64 blob generate-jitconfig returns, which is exactly what
 	// LaunchRequest already carries, so no backend needs to change.
+	l.opts.Logger.Info("starting runner",
+		slog.String("runner", name),
+		slog.String("image", l.opts.Image),
+		slog.Int("running", len(l.running)),
+	)
+
 	handle, err := l.be.Launch(launchCtx, backend.LaunchRequest{
 		Name:             name,
 		Image:            l.opts.Image,
@@ -273,6 +324,7 @@ func (l *Launcher) launchLocked() (err error) {
 			l.pendingRegistrations[int64(jit.Runner.ID)] = name
 			return errors.Join(launchErr, fmt.Errorf("scaleset: remove unused runner %s: %w", name, removeErr))
 		}
+		l.opts.Logger.Error("start runner failed", slog.String("runner", name), slog.Any("error", launchErr))
 		return launchErr
 	}
 
@@ -292,8 +344,66 @@ func (l *Launcher) launchDuration() time.Duration {
 // awaitExit frees the slot once the runner finishes. Each runner is ephemeral,
 // so exactly one exit is expected per launch.
 func (l *Launcher) awaitExit(name string, state *runnerState) {
+	started := time.Now()
 	code, err := state.handle.Wait(context.Background())
-	l.finishRunner(name, state, code, err, err != nil)
+	lived := time.Since(started)
+
+	// A runner that fails to start is the failure mode that reads as "nothing
+	// happens": GitHub holds the job, the listener re-launches on the next poll,
+	// and the loop repeats. The runner's exit code is the signal - entrypoint.sh
+	// waits on run.sh and propagates it - because elapsed time is not: an
+	// ephemeral runner can legitimately finish a small job in seconds.
+	switch {
+	case err != nil:
+		l.opts.Logger.Error("runner exited with an error",
+			slog.String("runner", name), slog.Duration("lived", lived), slog.Any("error", err))
+	case code != 0:
+		l.opts.Logger.Error("runner exited without completing a job",
+			slog.String("runner", name), slog.Int("exitCode", code), slog.Duration("lived", lived),
+			slog.String("hint", "the job stays queued and another runner starts on the next poll; inspect the container logs for "+name+" - a runner that dies in seconds usually means the image's runner build was rejected by GitHub"))
+	default:
+		l.opts.Logger.Info("runner finished", slog.String("runner", name), slog.Duration("lived", lived))
+	}
+
+	if err == nil && code == 0 {
+		l.mu.Lock()
+		if !state.completionAccounted && l.desired > 0 {
+			l.pendingExits[name] = state.runnerID
+		}
+		l.mu.Unlock()
+	}
+	if cleanupErr := l.finishRunner(name, state, code, err, err != nil); cleanupErr != nil {
+		l.opts.Logger.Error("runner cleanup failed", slog.String("runner", name), slog.Any("error", cleanupErr))
+	}
+	// Only a runner that completed its job earns an immediate replacement. A
+	// runner that died - rejected image, deprecated runner build, unusable JIT
+	// config - would be replaced by another that dies the same way, as fast as
+	// containers can start, each one registering a runner with GitHub first.
+	// Those cases wait for the listener's next message, which paces the retry.
+	if err == nil && code == 0 {
+		l.refill()
+	}
+}
+
+// refill starts runners for work GitHub has already asked for but that this host
+// had no free slot to serve. Two runners finishing moments apart otherwise leave
+// one slot filled and one idle until the listener's next message, which halves
+// throughput for the rest of a queue.
+//
+// It never exceeds the count GitHub last asked for, so a drained queue starts
+// nothing: desired is refreshed on every message, including job completions.
+func (l *Launcher) refill() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.stopped || l.ctx.Err() != nil {
+		return
+	}
+	for n := l.allowedLocked(l.desired); n > 0; n-- {
+		if err := l.launchLocked(); err != nil {
+			l.opts.Logger.Error("refill after a runner exit failed", slog.Any("error", err))
+			return
+		}
+	}
 }
 
 // HandleJobStarted records that an assignment became a running job. The runner
@@ -315,9 +425,26 @@ func (l *Launcher) HandleJobStarted(_ context.Context, job *scaleset.JobStarted)
 	return nil
 }
 
-// HandleJobCompleted is a no-op. The runner's own exit frees its slot, which
-// covers the job-failed and runner-crashed cases too.
-func (l *Launcher) HandleJobCompleted(_ context.Context, _ *scaleset.JobCompleted) error {
+// HandleJobCompleted records which exits the next broker statistics account
+// for. It must not refill before those statistics arrive.
+func (l *Launcher) HandleJobCompleted(_ context.Context, job *scaleset.JobCompleted) error {
+	if job == nil {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for name, state := range l.running {
+		if (job.RunnerID != 0 && state.runnerID == int64(job.RunnerID)) || (job.RunnerName != "" && name == job.RunnerName) {
+			l.completions[name] = struct{}{}
+			return nil
+		}
+	}
+	for name, id := range l.pendingExits {
+		if (job.RunnerID != 0 && id == int64(job.RunnerID)) || (job.RunnerName != "" && name == job.RunnerName) {
+			l.completions[name] = struct{}{}
+			return nil
+		}
+	}
 	return nil
 }
 
@@ -343,6 +470,7 @@ func (l *Launcher) runningLocked() int {
 // deregistration receives its own bounded context.
 func (l *Launcher) Shutdown(ctx context.Context) error {
 	l.mu.Lock()
+	l.stopped = true
 	runners := make(map[string]*runnerState, len(l.running))
 	for name, state := range l.running {
 		runners[name] = state

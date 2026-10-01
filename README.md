@@ -365,6 +365,8 @@ heuristic scan finds `self-hosted` in a workflow. The workflow scan is advisory
 because custom-label and matrix expressions may not contain that literal;
 authentication, permission, timeout, and truncated-tree failures still make
 doctor exit non-zero instead of reporting an incomplete preflight as ready.
+The one exception is the shared device-flow App on a `--repo` connect: it has
+no `contents: read` by design, so doctor skips the scan with a note.
 
 ### Windows runners with QEMU
 
@@ -512,10 +514,20 @@ git_cache:
 ## Autoscaling
 
 ```yaml
-provisioning: pool       # pool | autoscale | scaleset
+provisioning: scaleset   # pool | autoscale | scaleset
 ```
 
-- **`pool`** (default) — keep N runners warm per pool. Zero inbound; works behind
+Leaving `provisioning` unset selects `scaleset`, except for `scope: repos`,
+which a single scale set cannot cover and which therefore falls back to `pool`.
+An explicit value is always honored, so existing configs keep the mode they
+name.
+
+This default changed: it used to be `pool` for every scope. A config that never
+set `provisioning` will create a scale set in the target on the next start and
+needs a credential that can manage one. Add `provisioning: pool` to keep the old
+behaviour.
+
+- **`pool`** — keep N runners warm per pool. Zero inbound; works behind
   NAT with no extra setup.
 - **`autoscale`** — launch runners on demand up to each pool's `size`:
   - **Polling** (outbound, NAT-safe) — multirunner polls GitHub for queued work
@@ -524,7 +536,7 @@ provisioning: pool       # pool | autoscale | scaleset
     events (needs a reachable URL; use a tunnel like smee.io / cloudflared).
     A nonempty `webhook.secret` verifies signatures; an empty one accepts
     unsigned events and is unsafe on a public listener.
-- **`scaleset`** — let GitHub decide. A [runner scale set][scaleset] holds a
+- **`scaleset`** (default) — let GitHub decide. A [runner scale set][scaleset] holds a
   long-poll session open and reports the desired runner count, which is the same
   mechanism actions-runner-controller uses.
 
@@ -603,6 +615,11 @@ multirunner service start
 ```
 
 `service uninstall` removes it.
+
+On Windows, `connect` restricts credentials to your account and LocalSystem,
+the default service identity. Service token refresh preserves your access.
+For a custom service account, grant that account access to the credentials.
+On Unix, run `connect` as the service account or arrange ownership accordingly.
 
 ---
 

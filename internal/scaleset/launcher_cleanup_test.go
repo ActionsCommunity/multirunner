@@ -25,8 +25,8 @@ func TestShutdownKillsAndDeregistersRunners(t *testing.T) {
 		t.Fatalf("shutdown: %v", err)
 	}
 	waitFor(t, func() bool { return l.Running() == 0 })
-	if len(jit.removed) != 2 {
-		t.Fatalf("removed %d registrations, want 2", len(jit.removed))
+	if len(jit.removedIDs()) != 2 {
+		t.Fatalf("removed %d registrations, want 2", len(jit.removedIDs()))
 	}
 	for _, handle := range be.handles {
 		if handle.kills() != 1 {
@@ -95,14 +95,14 @@ func TestShutdownStartsRemovalTimeoutAfterClientLockIsAvailable(t *testing.T) {
 	if attempts := jit.removalAttempts(); len(attempts) < 3 {
 		t.Fatalf("attempted %d removals, want at least 3", len(attempts))
 	}
-	if len(jit.removed) < 2 {
-		t.Fatalf("completed %d removals, want unaffected runners to converge", len(jit.removed))
+	if len(jit.removedIDs()) < 2 {
+		t.Fatalf("completed %d removals, want unaffected runners to converge", len(jit.removedIDs()))
 	}
 	if err := l.Shutdown(t.Context()); err != nil {
 		t.Fatalf("retry shutdown: %v", err)
 	}
-	if len(jit.removed) != 3 {
-		t.Fatalf("completed %d removals after retry, want 3", len(jit.removed))
+	if len(jit.removedIDs()) != 3 {
+		t.Fatalf("completed %d removals after retry, want 3", len(jit.removedIDs()))
 	}
 }
 
@@ -117,6 +117,9 @@ func TestAlreadyRemovedRegistrationIsSuccessfulCleanup(t *testing.T) {
 
 		if _, err := l.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
 			t.Fatalf("launch: %v", err)
+		}
+		if _, err := l.HandleDesiredRunnerCount(t.Context(), 0); err != nil {
+			t.Fatal(err)
 		}
 		be.finish(0)
 		waitFor(t, func() bool { return l.Running() == 0 })
@@ -133,6 +136,9 @@ func TestIdleExitAndShutdownCleanupAreNotDuplicated(t *testing.T) {
 
 	if _, err := l.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
 		t.Fatalf("launch: %v", err)
+	}
+	if _, err := l.HandleDesiredRunnerCount(t.Context(), 0); err != nil {
+		t.Fatal(err)
 	}
 	be.finish(0)
 	waitFor(t, func() bool { return len(jit.removedIDs()) == 1 })
@@ -158,6 +164,9 @@ func TestIdleExitReportsStopWhileCleanupRemainsRetryable(t *testing.T) {
 
 	if _, err := l.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
 		t.Fatalf("launch: %v", err)
+	}
+	if _, err := l.HandleDesiredRunnerCount(t.Context(), 0); err != nil {
+		t.Fatal(err)
 	}
 	be.finish(0)
 	waitFor(t, func() bool {
@@ -282,6 +291,9 @@ func TestIdleExitPreservesBackendRecordUntilDeregistrationConverges(t *testing.T
 	if _, err := l.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
 		t.Fatalf("launch: %v", err)
 	}
+	if _, err := l.HandleDesiredRunnerCount(t.Context(), 0); err != nil {
+		t.Fatal(err)
+	}
 	be.finish(0)
 	waitFor(t, func() bool {
 		return len(jit.removalAttempts()) == 1
@@ -312,6 +324,9 @@ func TestBusyExitCleanupRetryDoesNotDeregisterCompletedRunner(t *testing.T) {
 		RunnerID: 1, RunnerName: req.Name,
 	}); err != nil {
 		t.Fatalf("HandleJobStarted: %v", err)
+	}
+	if _, err := l.HandleDesiredRunnerCount(t.Context(), 0); err != nil {
+		t.Fatal(err)
 	}
 	be.finish(0)
 	waitFor(t, func() bool { return len(be.ownedRemovalAttempts()) == 1 })
@@ -371,6 +386,9 @@ func TestLifecycleCallbacksTrackRunner(t *testing.T) {
 	if got := starts.Load(); got != 1 {
 		t.Fatalf("start callbacks = %d, want 1", got)
 	}
+	if _, err := l.HandleDesiredRunnerCount(t.Context(), 0); err != nil {
+		t.Fatal(err)
+	}
 	be.finish(0)
 	waitFor(t, func() bool { return stops.Load() == 1 })
 }
@@ -413,6 +431,9 @@ func TestRunnerIdentityRemainsRaceSafeDuringExitCleanup(t *testing.T) {
 				}
 			}
 		}()
+	}
+	if _, err := l.HandleDesiredRunnerCount(t.Context(), 0); err != nil {
+		t.Fatal(err)
 	}
 	be.finish(0)
 	wg.Wait()

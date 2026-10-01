@@ -68,6 +68,8 @@ func runScaleset(
 		AppID:          cfg.Auth.AppID,
 		InstallationID: cfg.Auth.InstallationID,
 		PrivateKeyPath: cfg.Auth.PrivateKeyPath,
+		ClientID:       cfg.Auth.ClientID,
+		TokenPath:      cfg.Auth.TokenPath,
 	}
 
 	sessions := make([]scalesetmode.SupervisedSession, 0, len(pools))
@@ -90,6 +92,7 @@ func runScaleset(
 				Labels:     p.cfg.Labels,
 				Env:        p.env,
 				Mounts:     p.mounts,
+				Container:  p.container,
 				MaxRunners: p.cfg.Size,
 				OnStart: func() {
 					if hooks.OnStart != nil {

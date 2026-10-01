@@ -50,13 +50,22 @@ type ClientOptions struct {
 	AppID          int64
 	InstallationID int64
 	PrivateKeyPath string
+	// ClientID and TokenPath describe GitHub App device-flow (user token) auth,
+	// mirroring config.Auth.ClientID / config.Auth.TokenPath. TokenPath being set
+	// with no PAT and no AppID selects the device branch.
+	ClientID  string
+	TokenPath string
 }
 
-// NewClient builds a scale set client, using a PAT when supplied and otherwise
-// using the configured GitHub App.
+// NewClient builds a scale set client, using a PAT when supplied, a device-flow
+// user token when a token store is configured, and otherwise the configured
+// GitHub App.
 func NewClient(opts ClientOptions) (*scaleset.Client, error) {
+	if opts.PAT == "" && opts.AppID == 0 && opts.TokenPath == "" {
+		return nil, fmt.Errorf("provisioning: scaleset needs auth.pat, GitHub App credentials, or a device-flow token_path")
+	}
 	if opts.PAT == "" && opts.AppID == 0 {
-		return nil, fmt.Errorf("provisioning: scaleset needs auth.pat or GitHub App credentials")
+		return newDeviceClient(opts)
 	}
 	if opts.PAT == "" {
 		if opts.PrivateKeyPath == "" {

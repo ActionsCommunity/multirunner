@@ -833,6 +833,9 @@ func splitAddress(address string) (string, int, error) {
 	return host, port, nil
 }
 
+// freePort probes the address QEMU will bind: a port free on loopback can
+// already be occupied on another specific interface. QEMU binds after this
+// probe closes, so a subsequent competing allocation is still possible.
 func freePort(host string, excluded ...int) (int, error) {
 	for {
 		listener, err := net.Listen("tcp", net.JoinHostPort(host, "0"))
