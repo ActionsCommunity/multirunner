@@ -221,11 +221,13 @@ func TestConformanceMatrixCoversIssueRequirements(t *testing.T) {
 		}
 	}
 	requiredTarget := []string{
-		"actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
-		"actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
-		"actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
-		"pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86",
-		"astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d",
+		// TestConformanceActionsArePinned checks the full commit pins separately,
+		// so dependency updates can change commits without changing this matrix.
+		"actions/checkout@",
+		"actions/cache@",
+		"actions/upload-artifact@",
+		"pnpm/action-setup@",
+		"astral-sh/setup-uv@",
 		"dotnet restore",
 		"dotnet build",
 		"dotnet test",
