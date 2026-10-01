@@ -127,7 +127,7 @@ jobs:
             test "$(stat -c %U "$cache_dir")" = runner
             "$cache_dir/bin/node" --version
             test "$(corepack --version)" = "$COREPACK_VERSION"
-            docker --version | grep -F "Docker version 29.8.0"
+            docker --version | grep -F "Docker version 29.8.1"
             docker buildx version | grep -F "v0.37.0"
           '
           docker run --rm --entrypoint bash $B:dotnet        -lc 'dotnet --list-sdks && node --version'
