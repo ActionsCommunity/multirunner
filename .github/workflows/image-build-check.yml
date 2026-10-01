@@ -26,7 +26,7 @@ jobs:
       windows-changed: ${{ steps.inputs.outputs.windows }}
       buildtools-changed: ${{ steps.inputs.outputs.buildtools }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Windows image jobs cost a hosted runner ten to twenty minutes each,
       # most of it Windows layer extraction that nothing can cache. Only build
@@ -85,7 +85,7 @@ jobs:
     if: needs.version-policy.outputs.linux-changed == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Build flavor chain (no push, host arch)
         run: |
@@ -127,8 +127,8 @@ jobs:
             test "$(stat -c %U "$cache_dir")" = runner
             "$cache_dir/bin/node" --version
             test "$(corepack --version)" = "$COREPACK_VERSION"
-            docker --version | grep -F "Docker version 29.8.0"
-            docker buildx version | grep -F "v0.37.0"
+            docker --version
+            docker buildx version
           '
           docker run --rm --entrypoint bash $B:dotnet        -lc 'dotnet --list-sdks && node --version'
           docker run --rm --entrypoint bash $B:rust          -lc 'rustc --version && cargo --version'
@@ -146,7 +146,7 @@ jobs:
           socket_gid=$(stat -c '%g' /var/run/docker.sock)
           id -G | tr ' ' '\n' | grep -Fx "$socket_gid"
           docker version --format '{{.Server.Version}}'
-          docker buildx version | grep -F "v0.37.0"
+          docker buildx version
           EOF
           chmod +x runner-probe.sh
 
@@ -219,8 +219,8 @@ jobs:
     if: needs.version-policy.outputs.linux-changed == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-qemu-action@v3
+      - uses: actions/checkout@v7
+      - uses: docker/setup-qemu-action@v4
       - name: Build and run arm64 node flavor
         run: |
           set -euo pipefail
@@ -242,7 +242,7 @@ jobs:
     if: needs.version-policy.outputs.windows-changed == 'true'
     runs-on: windows-2025
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/wait-for-docker
 
       # Windows images are large, so keep this job to the Node/.NET branch.
@@ -390,7 +390,7 @@ jobs:
         line: ${{ fromJSON(needs.version-policy.outputs.buildtools-lines) }}
     runs-on: windows-2025
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Reclaim host Visual Studio disk
         shell: pwsh

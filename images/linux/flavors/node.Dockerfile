@@ -30,9 +30,11 @@ COPY --from=docker-cli /usr/local/libexec/docker/cli-plugins/docker-buildx \
 # actions/setup-node looks for <tool-cache>/node/<version>/<arch> and treats the
 # sibling `<arch>.complete` marker as proof the entry is fully written, so the
 # marker is only written once the extract has succeeded.
+# The digest-pinned docker-cli stage determines Docker and Buildx versions.
+# Check that the copied binaries run without duplicating those versions here.
 RUN apt-get update -y && apt-get install -y --no-install-recommends ca-certificates curl xz-utils \
-    && docker --version | grep -F "Docker version 29.8.0" \
-    && docker buildx version | grep -F "v0.37.0" \
+    && docker --version \
+    && docker buildx version \
     && rm -rf /var/lib/apt/lists/* \
     && arch="$(dpkg --print-architecture)" \
     && case "$arch" in \
