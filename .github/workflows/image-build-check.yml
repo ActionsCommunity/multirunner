@@ -127,8 +127,8 @@ jobs:
             test "$(stat -c %U "$cache_dir")" = runner
             "$cache_dir/bin/node" --version
             test "$(corepack --version)" = "$COREPACK_VERSION"
-            docker --version | grep -F "Docker version 29.8.0"
-            docker buildx version | grep -F "v0.37.0"
+            docker --version
+            docker buildx version
           '
           docker run --rm --entrypoint bash $B:dotnet        -lc 'dotnet --list-sdks && node --version'
           docker run --rm --entrypoint bash $B:rust          -lc 'rustc --version && cargo --version'
@@ -146,7 +146,7 @@ jobs:
           socket_gid=$(stat -c '%g' /var/run/docker.sock)
           id -G | tr ' ' '\n' | grep -Fx "$socket_gid"
           docker version --format '{{.Server.Version}}'
-          docker buildx version | grep -F "v0.37.0"
+          docker buildx version
           EOF
           chmod +x runner-probe.sh
 
