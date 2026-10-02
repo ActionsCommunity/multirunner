@@ -437,8 +437,8 @@ orchestrator, for example on a shared cache host.
 | `--path <path>` | `/data` | Directory for `cache.db` and blobs. |
 | `--advertise <URL>` | empty | Advertised base URL; informational to this standalone process. |
 | `--access-token <token>` | generated | URL-path-safe private cache token. |
-| `--upstream <URL>` | `https://results-receiver.actions.githubusercontent.com` | Catch-all proxy upstream. |
-| `--skip-token-validation` | `true` | Accept opaque/missing Actions bearer tokens. It does not remove the private path-token check. |
+| `--upstream <URL>` | `https://results-receiver.actions.githubusercontent.com` | Catch-all proxy upstream. The proxy rewrites the destination Host for artifact compatibility. |
+| `--skip-token-validation` | `true` | Accept opaque/missing Actions bearer tokens only on private path-token requests. Root Twirp cache routes always require a valid bearer. |
 
 This process writes its storage path. For an external Multirunner cache, choose
 a persistent explicit `--access-token` and set `cache.external_url` to the

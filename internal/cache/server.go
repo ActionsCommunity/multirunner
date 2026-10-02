@@ -100,7 +100,12 @@ func New(ctx context.Context, cfg config.Cache, logger *slog.Logger) (*Server, e
 			st.Close()
 			return nil, fmt.Errorf("cache upstream url: %w", err)
 		}
-		s.proxy = httputil.NewSingleHostReverseProxy(up)
+		s.proxy = &httputil.ReverseProxy{
+			Rewrite: func(pr *httputil.ProxyRequest) {
+				pr.SetURL(up)
+				pr.Out.Host = up.Host
+			},
+		}
 	}
 
 	s.httpSrv = &http.Server{Addr: cfg.Listen, Handler: s.routes()}
@@ -134,20 +139,49 @@ func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
 	const svc = "/twirp/github.actions.results.api.v1.CacheService/"
 	protected := "/_mr/{token}"
+
+	// Modern Actions clients normalize ACTIONS_RESULTS_URL to its origin for
+	// Twirp control-plane calls. Root cache routes therefore require a valid
+	// Actions bearer token, while signed data-plane URLs retain the private
+	// path token.
+	mux.HandleFunc("POST "+svc+"CreateCacheEntry", s.requireCacheBearer(s.handleCreateCacheEntry))
+	mux.HandleFunc("POST "+svc+"GetCacheEntryDownloadURL", s.requireCacheBearer(s.handleGetDownloadURL))
+	mux.HandleFunc("POST "+svc+"FinalizeCacheEntryUpload", s.requireCacheBearer(s.handleFinalize))
+	mux.HandleFunc(svc, s.requireCacheBearer(s.handleUnsupportedCacheService))
+
 	mux.HandleFunc("POST "+protected+svc+"CreateCacheEntry", s.protect(s.handleCreateCacheEntry))
 	mux.HandleFunc("POST "+protected+svc+"GetCacheEntryDownloadURL", s.protect(s.handleGetDownloadURL))
 	mux.HandleFunc("POST "+protected+svc+"FinalizeCacheEntryUpload", s.protect(s.handleFinalize))
+	mux.HandleFunc(protected+svc, s.protect(s.handleUnsupportedCacheService))
 	mux.HandleFunc("PUT "+protected+"/devstoreaccount1/upload/{id}", s.protect(s.handleUploadPut))
 	mux.HandleFunc("PUT "+protected+"/upload/{id}", s.protect(s.handleUploadPut))
 	mux.HandleFunc("GET "+protected+"/download/{id}", s.protect(s.handleDownload))
 	mux.HandleFunc("GET "+protected+"/gitmirror/{owner}/{repo}", s.protect(s.handleGitBundle))
 	mux.HandleFunc(protected+"/", s.protect(s.handleCatchAll))
+	mux.HandleFunc("/twirp/", s.handleCatchAll)
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, "ok")
 	})
 	mux.HandleFunc("/", http.NotFound)
 	return s.logRequests(mux)
+}
+
+func (s *Server) requireCacheBearer(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		token := strings.TrimPrefix(auth, "Bearer ")
+		info := parseScopes(token)
+		if token == "" || token == auth || len(info.scopes) == 0 || info.repoID == "" {
+			httpError(w, http.StatusUnauthorized, "missing or invalid cache token")
+			return
+		}
+		next(w, r)
+	}
+}
+
+func (s *Server) handleUnsupportedCacheService(w http.ResponseWriter, _ *http.Request) {
+	httpError(w, http.StatusNotFound, "unsupported cache operation")
 }
 
 func (s *Server) protect(next http.HandlerFunc) http.HandlerFunc {
@@ -446,9 +480,9 @@ type scopeEntry struct {
 	Permission int    `json:"Permission"`
 }
 
-// scopeOrError extracts cache scopes from the bearer token. The private URL
-// prefix gates access to this service; skipValidation controls whether an
-// Actions bearer token with cache scopes is also required.
+// scopeOrError extracts cache scopes from the bearer token. Token-prefixed
+// routes may skip bearer validation because the private path gates them; root
+// control-plane routes always validate the bearer before reaching a handler.
 func (s *Server) scopeOrError(w http.ResponseWriter, r *http.Request) (scopeInfo, bool) {
 	auth := r.Header.Get("Authorization")
 	token := strings.TrimPrefix(auth, "Bearer ")

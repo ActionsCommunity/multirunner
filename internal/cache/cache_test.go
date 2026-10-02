@@ -19,6 +19,11 @@ import (
 
 func newTestServer(t *testing.T) (*Server, *httptest.Server) {
 	t.Helper()
+	return newTestServerWithUpstream(t, "")
+}
+
+func newTestServerWithUpstream(t *testing.T, upstream string) (*Server, *httptest.Server) {
+	t.Helper()
 	cfg := config.Cache{
 		Enabled:             true,
 		Mode:                "local-server",
@@ -26,6 +31,7 @@ func newTestServer(t *testing.T) (*Server, *httptest.Server) {
 		Path:                t.TempDir(),
 		Listen:              "127.0.0.1:0",
 		SkipTokenValidation: true,
+		Upstream:            upstream,
 	}
 	s, err := New(context.Background(), cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
@@ -73,6 +79,19 @@ func postJSONRaw(t *testing.T, url string, body any, bearer string) *http.Respon
 		t.Fatalf("POST %s: %v", url, err)
 	}
 	return resp
+}
+
+func testBearerToken(t *testing.T) string {
+	t.Helper()
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none"}`))
+	acJSON := `[{"Scope":"refs/heads/main","Permission":3}]`
+	payloadObj := map[string]any{"ac": acJSON, "repository_id": "12345"}
+	pb, err := json.Marshal(payloadObj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := base64.RawURLEncoding.EncodeToString(pb)
+	return header + "." + payload + ".sig"
 }
 
 // blockID48 builds a 48-byte standard block id encoding the given chunk index.
@@ -182,6 +201,69 @@ func TestStrictTokenValidationRejectsMissingBearer(t *testing.T) {
 		t.Fatalf("status = %d, want 401", resp.StatusCode)
 	}
 	_ = ts
+}
+
+func TestRootCacheServiceUsesLocalStore(t *testing.T) {
+	_, ts := newTestServer(t)
+	const svc = "/twirp/github.actions.results.api.v1.CacheService/"
+	resp := postJSONRaw(t, ts.URL+svc+"CreateCacheEntry",
+		map[string]any{"key": "root-route", "version": "v1"}, testBearerToken(t))
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200: %s", resp.StatusCode, raw)
+	}
+	var out map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	uploadURL, _ := out["signed_upload_url"].(string)
+	if !strings.Contains(uploadURL, "/_mr/") {
+		t.Fatalf("signed_upload_url = %q, want protected data-plane URL", uploadURL)
+	}
+}
+
+func TestRootCacheServiceRejectsMissingBearer(t *testing.T) {
+	_, ts := newTestServer(t)
+	const svc = "/twirp/github.actions.results.api.v1.CacheService/"
+	resp := postJSONRaw(t, ts.URL+svc+"CreateCacheEntry",
+		map[string]any{"key": "root-route", "version": "v1"}, "")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", resp.StatusCode)
+	}
+}
+
+func TestRootArtifactServiceProxiesUpstream(t *testing.T) {
+	const path = "/twirp/github.actions.results.api.v1.ArtifactService/CreateArtifact"
+	var gotPath, gotHost, gotAuthorization string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotHost = r.Host
+		gotAuthorization = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	}))
+	defer upstream.Close()
+
+	_, ts := newTestServerWithUpstream(t, upstream.URL)
+
+	resp := postJSONRaw(t, ts.URL+path, map[string]any{"name": "artifact"}, "runtime-token")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200: %s", resp.StatusCode, raw)
+	}
+	if gotPath != path {
+		t.Fatalf("upstream path = %q, want %q", gotPath, path)
+	}
+	wantHost := strings.TrimPrefix(upstream.URL, "http://")
+	if gotHost != wantHost {
+		t.Fatalf("upstream Host = %q, want %q", gotHost, wantHost)
+	}
+	if gotAuthorization != "Bearer runtime-token" {
+		t.Fatalf("upstream Authorization = %q", gotAuthorization)
+	}
 }
 
 func TestSignedDataPlaneRejectsBareID(t *testing.T) {

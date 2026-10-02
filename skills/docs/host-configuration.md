@@ -347,8 +347,8 @@ cache:
 | `advertise_url` | Required for runner redirection; must be reachable from inside every runner. For the embedded server, use its untokenized base URL: Multirunner appends `/_mr/<token>`. Empty leaves runners on the upstream cache. |
 | `external_url` | Uses an existing reachable cache instead of starting the embedded server. It still requires `enabled: true` and a mode other than `off`. For `cacheserver`, use the runner-reachable URL including `/_mr/<token>`. Current startup logging records it verbatim, including that path token; restrict service logs and rotate it if exposed. |
 | `access_token` | Optional URL-path-safe token (no `/`, `?`, `#`, or escaping); the embedded server generates one on each start if omitted. It is not applied to `external_url`; set the matching token on the external service and include it in that URL. |
-| `skip_token_validation` | `false` by default. `true` accepts missing/opaque Actions bearer tokens, while the path token still gates access. |
-| `upstream` | Catch-all upstream; defaults to GitHub's results receiver. |
+| `skip_token_validation` | `false` by default. Root Twirp control-plane routes always require a valid Actions bearer because current clients normalize `ACTIONS_RESULTS_URL` to its origin. `true` relaxes validation only for requests that retain the private path token. |
+| `upstream` | Catch-all upstream; defaults to GitHub's results receiver. The proxy rewrites the upstream URL and Host so artifact operations remain on GitHub while cache operations stay local. |
 | `max_age_days`, `max_size_gb`, `gc_interval_sec` | Defaults: 7 days, unlimited size (`0` or lower), and 3600 seconds. Negative age disables age expiry; negative interval disables GC. |
 
 Container Docker backends map the advertised hostname to their host gateway;
@@ -640,7 +640,7 @@ default is applied only while the owning feature is switched on.
 | `cache.advertise_url` | string | Empty, which leaves runners on the upstream cache. Trailing `/` is trimmed and `/_mr/<token>` is appended. |
 | `cache.external_url` | string | Empty. Nonempty uses an existing cache instead of starting the embedded server; it still needs `enabled: true` and a `mode` other than `off`. |
 | `cache.access_token` | string | Empty generates one per start. `${VAR}` expanded. Must be URL-path-safe (no `/`, `?`, `#`, and no character needing percent-escaping) or cache startup fails. Not applied to `external_url`. |
-| `cache.skip_token_validation` | bool | `false`. `true` accepts opaque or missing Actions bearer tokens; the path token still gates access. |
+| `cache.skip_token_validation` | bool | `false`. Root Twirp control-plane routes always validate the Actions bearer. `true` accepts opaque or missing bearer claims only on requests that retain the private path token. |
 | `cache.upstream` | string | `https://results-receiver.actions.githubusercontent.com` when enabled. Must parse as a URL. Empty disables the catch-all proxy. |
 | `cache.max_age_days` | integer | `7` when enabled. `0` or lower after defaulting disables age expiry. |
 | `cache.max_size_gb` | integer | `0` = unlimited. |

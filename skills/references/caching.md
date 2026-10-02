@@ -22,12 +22,13 @@ service should be used. The embedded server exposes an unauthenticated
 Keep `access_token` in an environment reference or omit it so the embedded
 server generates one. It must be URL-path-safe (no `/`, `?`, `#`, or escaping).
 For the embedded server, `advertise_url` is the untokenized base URL: Multirunner
-appends `/_mr/<token>`. The private path token is the cache's access gate. Set
-`skip_token_validation: true` when runner requests can carry
-opaque or missing Actions bearer claims, as in `config.example.yaml`. Set it to
-`false` only after proving every runner sends parsable cache scopes and a
-repository ID. This setting parses claims but does not verify a JWT signature,
-so it is not a replacement for the private path token or network restrictions.
+appends `/_mr/<token>`. Current Actions clients normalize Twirp control-plane
+requests to the URL origin, so those root cache routes always require parsable
+cache scopes and a repository ID from the Actions bearer. The private path token
+continues to protect signed upload/download URLs and other requests that retain
+the prefix. `skip_token_validation: true` relaxes validation only on those
+token-prefixed requests. Claim parsing does not verify a JWT signature, so it is
+not a replacement for the path token or network restrictions.
 Bind only to the required interface, restrict network access, and approve
 firewall or service changes separately. Set `max_age_days`, `max_size_gb`, and
 `gc_interval_sec` from the storage budget. Don't delete cache data during
