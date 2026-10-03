@@ -5,6 +5,7 @@
 package cache
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -16,6 +17,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -27,6 +30,7 @@ import (
 	"time"
 
 	"github.com/GerardSmit/multirunner/internal/config"
+	"google.golang.org/protobuf/encoding/protowire"
 )
 
 // Server is the running cache HTTP server.
@@ -34,7 +38,8 @@ type Server struct {
 	store          *store
 	advertiseURL   string
 	accessToken    string
-	skipValidation bool
+	upstream       *url.URL
+	upstreamClient *http.Client
 	proxy          *httputil.ReverseProxy
 	httpSrv        *http.Server
 	logger         *slog.Logger
@@ -44,6 +49,8 @@ type Server struct {
 	gcMaxAge       time.Duration // 0 disables age-based eviction
 	gcMaxBytes     int64         // 0 disables size-based eviction
 }
+
+type scopeContextKey struct{}
 
 // SetGitBundler enables the dotgit-cache endpoint for one configured repository:
 // GET /gitmirror/{owner}/{repo} streams a git bundle of that repo's host mirror.
@@ -78,11 +85,16 @@ func New(ctx context.Context, cfg config.Cache, logger *slog.Logger) (*Server, e
 	}
 
 	s := &Server{
-		store:          st,
-		advertiseURL:   strings.TrimRight(cfg.AdvertiseURL, "/"),
-		accessToken:    accessToken,
-		skipValidation: cfg.SkipTokenValidation,
-		logger:         logger.With("component", "cache"),
+		store:        st,
+		advertiseURL: strings.TrimRight(cfg.AdvertiseURL, "/"),
+		accessToken:  accessToken,
+		upstreamClient: &http.Client{
+			Timeout: 10 * time.Second,
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
+		logger: logger.With("component", "cache"),
 	}
 	if cfg.GCIntervalSec > 0 {
 		s.gcInterval = time.Duration(cfg.GCIntervalSec) * time.Second
@@ -100,6 +112,12 @@ func New(ctx context.Context, cfg config.Cache, logger *slog.Logger) (*Server, e
 			st.Close()
 			return nil, fmt.Errorf("cache upstream url: %w", err)
 		}
+		if up.Host == "" ||
+			(up.Scheme != "https" && !(up.Scheme == "http" && isLoopbackHost(up.Hostname()))) {
+			st.Close()
+			return nil, fmt.Errorf("cache upstream must use https, except for loopback test endpoints")
+		}
+		s.upstream = up
 		s.proxy = &httputil.ReverseProxy{
 			Rewrite: func(pr *httputil.ProxyRequest) {
 				pr.SetURL(up)
@@ -110,6 +128,14 @@ func New(ctx context.Context, cfg config.Cache, logger *slog.Logger) (*Server, e
 
 	s.httpSrv = &http.Server{Addr: cfg.Listen, Handler: s.routes()}
 	return s, nil
+}
+
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // AdvertiseURL is the base URL runners should use to reach this cache.
@@ -149,10 +175,10 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST "+svc+"FinalizeCacheEntryUpload", s.requireCacheBearer(s.handleFinalize))
 	mux.HandleFunc(svc, s.requireCacheBearer(s.handleUnsupportedCacheService))
 
-	mux.HandleFunc("POST "+protected+svc+"CreateCacheEntry", s.protect(s.handleCreateCacheEntry))
-	mux.HandleFunc("POST "+protected+svc+"GetCacheEntryDownloadURL", s.protect(s.handleGetDownloadURL))
-	mux.HandleFunc("POST "+protected+svc+"FinalizeCacheEntryUpload", s.protect(s.handleFinalize))
-	mux.HandleFunc(protected+svc, s.protect(s.handleUnsupportedCacheService))
+	mux.HandleFunc("POST "+protected+svc+"CreateCacheEntry", s.protect(s.requireCacheBearer(s.handleCreateCacheEntry)))
+	mux.HandleFunc("POST "+protected+svc+"GetCacheEntryDownloadURL", s.protect(s.requireCacheBearer(s.handleGetDownloadURL)))
+	mux.HandleFunc("POST "+protected+svc+"FinalizeCacheEntryUpload", s.protect(s.requireCacheBearer(s.handleFinalize)))
+	mux.HandleFunc(protected+svc, s.protect(s.requireCacheBearer(s.handleUnsupportedCacheService)))
 	mux.HandleFunc("PUT "+protected+"/devstoreaccount1/upload/{id}", s.protect(s.handleUploadPut))
 	mux.HandleFunc("PUT "+protected+"/upload/{id}", s.protect(s.handleUploadPut))
 	mux.HandleFunc("GET "+protected+"/download/{id}", s.protect(s.handleDownload))
@@ -176,8 +202,67 @@ func (s *Server) requireCacheBearer(next http.HandlerFunc) http.HandlerFunc {
 			httpError(w, http.StatusUnauthorized, "missing or invalid cache token")
 			return
 		}
-		next(w, r)
+		if !s.validateRuntimeToken(r.Context(), token) {
+			httpError(w, http.StatusUnauthorized, "cache token authentication failed")
+			return
+		}
+		ctx := context.WithValue(r.Context(), scopeContextKey{}, info)
+		next(w, r.WithContext(ctx))
 	}
+}
+
+func (s *Server) validateRuntimeToken(ctx context.Context, token string) bool {
+	if s.upstream == nil {
+		s.logger.Warn("cache token validation unavailable: upstream is not configured")
+		return false
+	}
+	runID, jobID, ok := parseResultsBackendIDs(token)
+	if !ok {
+		s.logger.Warn("cache token validation rejected: missing Actions.Results scope")
+		return false
+	}
+	target := s.upstream.JoinPath(
+		"twirp",
+		"github.actions.results.api.v1.ArtifactService",
+		"ListArtifacts",
+	)
+	target.RawQuery = ""
+	target.ForceQuery = false
+	target.Fragment = ""
+
+	var body []byte
+	body = protowire.AppendTag(body, 1, protowire.BytesType)
+	body = protowire.AppendString(body, runID)
+	body = protowire.AppendTag(body, 2, protowire.BytesType)
+	body = protowire.AppendString(body, jobID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target.String(), bytes.NewReader(body))
+	if err != nil {
+		s.logger.Warn("build cache token validation request", "err", err)
+		return false
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/protobuf")
+	req.Header.Set("Accept", "application/protobuf")
+
+	resp, err := s.upstreamClient.Do(req)
+	if err != nil {
+		s.logger.Warn("cache token validation request failed", "err", err)
+		return false
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+
+	if resp.StatusCode != http.StatusOK {
+		s.logger.Warn("cache token validation rejected", "status", resp.StatusCode)
+		return false
+	}
+	mediaType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/protobuf" {
+		s.logger.Warn("cache token validation rejected: unexpected content type",
+			"content_type", resp.Header.Get("Content-Type"))
+		return false
+	}
+	return true
 }
 
 func (s *Server) handleUnsupportedCacheService(w http.ResponseWriter, _ *http.Request) {
@@ -480,34 +565,19 @@ type scopeEntry struct {
 	Permission int    `json:"Permission"`
 }
 
-// scopeOrError extracts cache scopes from the bearer token. Token-prefixed
-// routes may skip bearer validation because the private path gates them; root
-// control-plane routes always validate the bearer before reaching a handler.
+// scopeOrError returns scopes authenticated by requireCacheBearer.
 func (s *Server) scopeOrError(w http.ResponseWriter, r *http.Request) (scopeInfo, bool) {
-	auth := r.Header.Get("Authorization")
-	token := strings.TrimPrefix(auth, "Bearer ")
-	if token == auth { // no Bearer prefix
-		token = ""
-	}
-	info := parseScopes(token)
-	if !s.skipValidation {
-		if token == "" || len(info.scopes) == 0 || info.repoID == "" {
-			httpError(w, http.StatusUnauthorized, "missing or invalid cache token")
-			return scopeInfo{}, false
-		}
-		return info, true
-	}
-	if len(info.scopes) == 0 {
-		info.scopes = []scopeEntry{{Scope: "default", Permission: 3}}
-	}
-	if info.repoID == "" {
-		info.repoID = "default"
+	info, ok := r.Context().Value(scopeContextKey{}).(scopeInfo)
+	if !ok {
+		httpError(w, http.StatusUnauthorized, "cache token was not authenticated")
+		return scopeInfo{}, false
 	}
 	return info, true
 }
 
-// parseScopes decodes the JWT payload (no signature verification) and reads the
-// `ac` (cache scopes) and `repository_id` claims.
+// parseScopes decodes the JWT payload and reads the `ac` (cache scopes) and
+// `repository_id` claims. requireCacheBearer authenticates the token before
+// these unverified decoded values are trusted.
 func parseScopes(token string) scopeInfo {
 	var info scopeInfo
 	if token == "" {
@@ -533,6 +603,31 @@ func parseScopes(token string) scopeInfo {
 		_ = json.Unmarshal([]byte(claims.AC), &info.scopes)
 	}
 	return info
+}
+
+func parseResultsBackendIDs(token string) (runID, jobID string, ok bool) {
+	parts := strings.Split(token, ".")
+	if len(parts) < 2 {
+		return "", "", false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return "", "", false
+	}
+	var claims struct {
+		Scope string `json:"scp"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return "", "", false
+	}
+	for _, scope := range strings.Fields(claims.Scope) {
+		segments := strings.Split(scope, ":")
+		if len(segments) == 3 && segments[0] == "Actions.Results" &&
+			segments[1] != "" && segments[2] != "" {
+			return segments[1], segments[2], true
+		}
+	}
+	return "", "", false
 }
 
 func writeScope(scopes []scopeEntry) string {

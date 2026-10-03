@@ -15,11 +15,40 @@ import (
 	"testing"
 
 	"github.com/GerardSmit/multirunner/internal/config"
+	"google.golang.org/protobuf/encoding/protowire"
 )
 
 func newTestServer(t *testing.T) (*Server, *httptest.Server) {
 	t.Helper()
-	return newTestServerWithUpstream(t, "")
+	token := testBearerToken(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/twirp/github.actions.results.api.v1.ArtifactService/ListArtifacts" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer "+token {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if r.Header.Get("Content-Type") != "application/protobuf" {
+			http.Error(w, "unsupported content type", http.StatusUnsupportedMediaType)
+			return
+		}
+		var want []byte
+		want = protowire.AppendTag(want, 1, protowire.BytesType)
+		want = protowire.AppendString(want, "run-backend-id")
+		want = protowire.AppendTag(want, 2, protowire.BytesType)
+		want = protowire.AppendString(want, "job-backend-id")
+		got, err := io.ReadAll(r.Body)
+		if err != nil || !bytes.Equal(got, want) {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/protobuf")
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(upstream.Close)
+	return newTestServerWithUpstream(t, upstream.URL)
 }
 
 func newTestServerWithUpstream(t *testing.T, upstream string) (*Server, *httptest.Server) {
@@ -46,11 +75,25 @@ func newTestServerWithUpstream(t *testing.T, upstream string) (*Server, *httptes
 	return s, ts
 }
 
+func TestCacheRejectsInsecureUpstream(t *testing.T) {
+	cfg := config.Cache{
+		Enabled:  true,
+		Mode:     "local-server",
+		Storage:  "filesystem",
+		Path:     t.TempDir(),
+		Listen:   "127.0.0.1:0",
+		Upstream: "http://example.com",
+	}
+	if _, err := New(context.Background(), cfg, slog.New(slog.NewTextHandler(io.Discard, nil))); err == nil {
+		t.Fatal("New accepted a non-loopback http upstream")
+	}
+}
+
 func cacheBase(s *Server) string { return s.AdvertiseURL() }
 
 func postJSON(t *testing.T, url string, body any) map[string]any {
 	t.Helper()
-	resp := postJSONRaw(t, url, body, "")
+	resp := postJSONRaw(t, url, body, testBearerToken(t))
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(resp.Body)
@@ -85,7 +128,11 @@ func testBearerToken(t *testing.T) string {
 	t.Helper()
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none"}`))
 	acJSON := `[{"Scope":"refs/heads/main","Permission":3}]`
-	payloadObj := map[string]any{"ac": acJSON, "repository_id": "12345"}
+	payloadObj := map[string]any{
+		"ac":            acJSON,
+		"repository_id": "12345",
+		"scp":           "Actions.Results:run-backend-id:job-backend-id",
+	}
 	pb, err := json.Marshal(payloadObj)
 	if err != nil {
 		t.Fatal(err)
@@ -191,16 +238,122 @@ func TestCacheRejectsWrongAccessToken(t *testing.T) {
 	}
 }
 
-func TestStrictTokenValidationRejectsMissingBearer(t *testing.T) {
-	s, ts := newTestServer(t)
-	s.skipValidation = false
+func TestTokenPrefixedCacheServiceRejectsMissingBearer(t *testing.T) {
+	s, _ := newTestServer(t)
 	const svc = "/twirp/github.actions.results.api.v1.CacheService/"
 	resp := postJSONRaw(t, cacheBase(s)+svc+"CreateCacheEntry", map[string]any{"key": "k", "version": "v"}, "")
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", resp.StatusCode)
 	}
-	_ = ts
+}
+
+func TestCacheServiceRejectsForgedBearer(t *testing.T) {
+	_, ts := newTestServer(t)
+	const svc = "/twirp/github.actions.results.api.v1.CacheService/"
+	resp := postJSONRaw(t, ts.URL+svc+"CreateCacheEntry",
+		map[string]any{"key": "root-route", "version": "v1"}, testBearerToken(t)+"forged")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", resp.StatusCode)
+	}
+}
+
+func TestParseResultsBackendIDs(t *testing.T) {
+	runID, jobID, ok := parseResultsBackendIDs(testBearerToken(t))
+	if !ok || runID != "run-backend-id" || jobID != "job-backend-id" {
+		t.Fatalf("parseResultsBackendIDs = %q, %q, %t", runID, jobID, ok)
+	}
+}
+
+func TestTokenPrefixedCacheServiceRejectsForgedBearer(t *testing.T) {
+	s, _ := newTestServer(t)
+	const svc = "/twirp/github.actions.results.api.v1.CacheService/"
+	resp := postJSONRaw(t, cacheBase(s)+svc+"CreateCacheEntry",
+		map[string]any{"key": "protected-route", "version": "v1"}, testBearerToken(t)+"forged")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", resp.StatusCode)
+	}
+}
+
+func TestCacheServiceFailsClosedWhenValidationUnavailable(t *testing.T) {
+	_, ts := newTestServerWithUpstream(t, "http://127.0.0.1:1")
+	const svc = "/twirp/github.actions.results.api.v1.CacheService/"
+	resp := postJSONRaw(t, ts.URL+svc+"CreateCacheEntry",
+		map[string]any{"key": "root-route", "version": "v1"}, testBearerToken(t))
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", resp.StatusCode)
+	}
+}
+
+func TestCacheServiceRejectsValidationRedirect(t *testing.T) {
+	redirectTarget := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/protobuf")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer redirectTarget.Close()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, redirectTarget.URL, http.StatusTemporaryRedirect)
+	}))
+	defer upstream.Close()
+
+	_, ts := newTestServerWithUpstream(t, upstream.URL)
+	const svc = "/twirp/github.actions.results.api.v1.CacheService/"
+	resp := postJSONRaw(t, ts.URL+svc+"CreateCacheEntry",
+		map[string]any{"key": "root-route", "version": "v1"}, testBearerToken(t))
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", resp.StatusCode)
+	}
+}
+
+func TestCacheServiceRejectsNonProtobufValidationResponse(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "<html>sign in</html>")
+	}))
+	defer upstream.Close()
+
+	_, ts := newTestServerWithUpstream(t, upstream.URL)
+	const svc = "/twirp/github.actions.results.api.v1.CacheService/"
+	resp := postJSONRaw(t, ts.URL+svc+"CreateCacheEntry",
+		map[string]any{"key": "root-route", "version": "v1"}, testBearerToken(t))
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", resp.StatusCode)
+	}
+}
+
+func TestCacheValidationPreservesUpstreamBasePath(t *testing.T) {
+	const basePath = "/results-api"
+	token := testBearerToken(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		wantPath := basePath + "/twirp/github.actions.results.api.v1.ArtifactService/ListArtifacts"
+		if r.URL.Path != wantPath {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer "+token {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/protobuf")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	_, ts := newTestServerWithUpstream(t, upstream.URL+basePath)
+	const svc = "/twirp/github.actions.results.api.v1.CacheService/"
+	resp := postJSONRaw(t, ts.URL+svc+"CreateCacheEntry",
+		map[string]any{"key": "root-route", "version": "v1"}, token)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200: %s", resp.StatusCode, raw)
+	}
 }
 
 func TestRootCacheServiceUsesLocalStore(t *testing.T) {
@@ -287,7 +440,8 @@ func TestSparsePartsRejected(t *testing.T) {
 	putChunk(t, create["signed_upload_url"].(string)+"?blockid="+blockID48(0), []byte("a"))
 	putChunk(t, create["signed_upload_url"].(string)+"?blockid="+blockID48(2), []byte("c"))
 
-	resp := postJSONRaw(t, cacheBase(s)+svc+"FinalizeCacheEntryUpload", map[string]any{"key": "sparse", "version": "v1"}, "")
+	resp := postJSONRaw(t, cacheBase(s)+svc+"FinalizeCacheEntryUpload",
+		map[string]any{"key": "sparse", "version": "v1"}, testBearerToken(t))
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		raw, _ := io.ReadAll(resp.Body)

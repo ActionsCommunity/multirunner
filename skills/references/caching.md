@@ -23,12 +23,13 @@ Keep `access_token` in an environment reference or omit it so the embedded
 server generates one. It must be URL-path-safe (no `/`, `?`, `#`, or escaping).
 For the embedded server, `advertise_url` is the untokenized base URL: Multirunner
 appends `/_mr/<token>`. Current Actions clients normalize Twirp control-plane
-requests to the URL origin, so those root cache routes always require parsable
-cache scopes and a repository ID from the Actions bearer. The private path token
-continues to protect signed upload/download URLs and other requests that retain
-the prefix. `skip_token_validation: true` relaxes validation only on those
-token-prefixed requests. Claim parsing does not verify a JWT signature, so it is
-not a replacement for the path token or network restrictions.
+requests to the URL origin. Multirunner therefore authenticates the Actions
+runtime bearer with the configured results receiver before trusting its cache
+scopes or repository ID. This is a read-only ArtifactService validation call; it
+does not use GitHub's hosted cache storage. The private path token continues to
+protect signed upload/download URLs and other requests that retain the prefix.
+`skip_token_validation` is retained for compatibility and does not bypass this
+authentication. Non-loopback upstream endpoints must use HTTPS.
 Bind only to the required interface, restrict network access, and approve
 firewall or service changes separately. Set `max_age_days`, `max_size_gb`, and
 `gc_interval_sec` from the storage budget. Don't delete cache data during

@@ -65,8 +65,8 @@ cache:
   # injects it into runners; set this only when coordinating with an external
   # standalone cacheserver's --access-token.
   access_token: "${MULTIRUNNER_CACHE_ACCESS_TOKEN}"
-  # Root Twirp control-plane routes always require a valid Actions bearer.
-  # true relaxes validation only for requests that retain the private path token.
+  # Retained for compatibility. CacheService bearer authentication is always
+  # validated against the configured upstream before claims are trusted.
   skip_token_validation: false
   upstream: "https://results-receiver.actions.githubusercontent.com"
   # Housekeeping: evict cache entries unused for max_age_days, and LRU-evict to
