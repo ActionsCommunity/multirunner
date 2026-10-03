@@ -170,14 +170,15 @@ func (a Auth) IsDeviceApp() bool { return a.PAT == "" && a.AppID == 0 && a.Token
 
 // Cache configures the self-hosted cache server.
 type Cache struct {
-	Enabled             bool   `yaml:"enabled"`
-	Mode                string `yaml:"mode"` // local-server | off
-	Storage             string `yaml:"storage"`
-	Path                string `yaml:"path"`
-	Listen              string `yaml:"listen"`
-	AdvertiseURL        string `yaml:"advertise_url"` // URL of this cache as seen from inside runner containers
-	ExternalURL         string `yaml:"external_url"`  // if set, use an already-running cache here instead of starting the embedded server
-	AccessToken         string `yaml:"access_token"`  // optional shared path token for cache API URLs; generated when omitted
+	Enabled      bool   `yaml:"enabled"`
+	Mode         string `yaml:"mode"` // local-server | off
+	Storage      string `yaml:"storage"`
+	Path         string `yaml:"path"`
+	Listen       string `yaml:"listen"`
+	AdvertiseURL string `yaml:"advertise_url"` // URL of this cache as seen from inside runner containers
+	ExternalURL  string `yaml:"external_url"`  // if set, use an already-running cache here instead of starting the embedded server
+	AccessToken  string `yaml:"access_token"`  // optional shared path token for cache API URLs; generated when omitted
+	// SkipTokenValidation is a deprecated compatibility field and is ignored.
 	SkipTokenValidation bool   `yaml:"skip_token_validation"`
 	Upstream            string `yaml:"upstream"`
 	// Housekeeping (garbage collection of stored entries):
