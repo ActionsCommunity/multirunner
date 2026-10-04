@@ -65,7 +65,9 @@ cache:
   # injects it into runners; set this only when coordinating with an external
   # standalone cacheserver's --access-token.
   access_token: "${MULTIRUNNER_CACHE_ACCESS_TOKEN}"
-  skip_token_validation: true    # path token gates access; accept opaque/missing Actions bearer
+  # Retained for compatibility. CacheService bearer authentication is always
+  # validated against the configured upstream before claims are trusted.
+  skip_token_validation: false
   upstream: "https://results-receiver.actions.githubusercontent.com"
   # Housekeeping: evict cache entries unused for max_age_days, and LRU-evict to
   # keep total blob size under max_size_gb (0 => unlimited). gc_interval_sec sets
