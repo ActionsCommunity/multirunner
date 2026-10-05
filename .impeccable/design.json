@@ -1,0 +1,183 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-09-03T20:52:00Z",
+  "title": "Design System: multirunner",
+  "extensions": {
+    "colorMeta": {
+      "primary-cobalt": {
+        "role": "primary",
+        "displayName": "Operational Cobalt",
+        "canonical": "#174FC4",
+        "tonalRamp": ["#0A1E52", "#10358A", "#174FC4", "#356ADC", "#5C86E8", "#8DABF1", "#C1D1F8", "#E8EFFD"]
+      },
+      "signal-orange": {
+        "role": "secondary",
+        "displayName": "Signal Orange",
+        "canonical": "#C6400C",
+        "tonalRamp": ["#441305", "#7D2508", "#C6400C", "#DB6336", "#E58B6A", "#EEB29B", "#F7D6C8", "#FCEDE8"]
+      },
+      "cool-paper": {
+        "role": "neutral",
+        "displayName": "Cool Paper",
+        "canonical": "#F3F7FA",
+        "tonalRamp": ["#17202A", "#2F3A45", "#53606C", "#7B8792", "#A6B0B9", "#CDD5DC", "#E5EBF0", "#F3F7FA"]
+      },
+      "deep-ink": {
+        "role": "neutral",
+        "displayName": "Deep Ink",
+        "canonical": "#101C2A",
+        "tonalRamp": ["#08101A", "#101C2A", "#233444", "#3A4C5D", "#596978", "#7A8998", "#A7B3BE", "#E1E8EE"]
+      },
+      "structural-steel": {
+        "role": "neutral",
+        "displayName": "Structural Steel",
+        "canonical": "#596978",
+        "tonalRamp": ["#111B24", "#263542", "#3E4E5C", "#596978", "#748492", "#91A0AD", "#B8C3CC", "#E3E9EE"]
+      }
+    },
+    "typographyMeta": {
+      "display": {
+        "displayName": "Display",
+        "purpose": "Hero and section headlines."
+      },
+      "headline": {
+        "displayName": "Headline",
+        "purpose": "Major section decisions."
+      },
+      "title": {
+        "displayName": "Title",
+        "purpose": "Feature and backend names."
+      },
+      "lead": {
+        "displayName": "Lead",
+        "purpose": "Primary explanatory copy."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "Explanatory product and reference prose."
+      },
+      "mono": {
+        "displayName": "Machine",
+        "purpose": "Commands, flags, measurements, and platform metadata."
+      }
+    },
+    "shadows": [
+      {
+        "name": "control-offset",
+        "value": "4px 4px 0 #101C2A",
+        "purpose": "Tactile action controls."
+      },
+      {
+        "name": "panel-offset",
+        "value": "6px 6px 0 #596978",
+        "purpose": "Code and command surfaces."
+      }
+    ],
+    "motion": [
+      {
+        "name": "ease-out",
+        "value": "cubic-bezier(0.16, 1, 0.3, 1)",
+        "purpose": "Short hover and active-state transitions."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "compact-nav",
+        "value": "520px"
+      },
+      {
+        "name": "mobile",
+        "value": "760px"
+      },
+      {
+        "name": "stack",
+        "value": "860px"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Primary build or install action.",
+      "html": "<a class=\"ds-button-primary\" href=\"#\">Build from source</a>",
+      "css": ".ds-button-primary { display:inline-flex;align-items:center;min-height:46px;padding:11px 18px;color:#F3F7FA;background:#174FC4;border:2px solid #101C2A;box-shadow:4px 4px 0 #101C2A;font:700 16px/1.4 sans-serif;text-decoration:none;transition:background-color 180ms,box-shadow 180ms,transform 180ms;}.ds-button-primary:hover{background:#C6400C;transform:translate(2px,2px);box-shadow:2px 2px 0 #101C2A}.ds-button-primary:focus-visible{outline:3px solid #C6400C;outline-offset:4px}"
+    },
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Secondary navigation action.",
+      "html": "<a class=\"ds-button-secondary\" href=\"#\">Read the CLI reference</a>",
+      "css": ".ds-button-secondary{display:inline-flex;align-items:center;min-height:46px;padding:11px 18px;color:#101C2A;background:#F3F7FA;border:2px solid #101C2A;box-shadow:4px 4px 0 #101C2A;font:700 16px/1.4 sans-serif;text-decoration:none}.ds-button-secondary:hover{color:#F3F7FA;background:#101C2A}.ds-button-secondary:focus-visible{outline:3px solid #C6400C;outline-offset:4px}"
+    },
+    {
+      "name": "Platform Chip",
+      "kind": "chip",
+      "description": "Static platform or capability metadata.",
+      "html": "<span class=\"ds-platform-chip\">Linux</span>",
+      "css": ".ds-platform-chip{display:inline-flex;padding:4px 8px;color:#101C2A;background:#F3F7FA;border:1px solid #596978;font:600 11px/1.3 monospace}"
+    },
+    {
+      "name": "Code Panel",
+      "kind": "custom",
+      "refersTo": "code-panel",
+      "description": "Runnable commands and configuration.",
+      "html": "<pre class=\"ds-code-panel\"><code>$ multirunner doctor --config config.yaml</code></pre>",
+      "css": ".ds-code-panel{margin:0;padding:24px;color:#F3F7FA;background:#101C2A;border:2px solid #101C2A;box-shadow:6px 6px 0 #596978;font:500 14px/1.6 monospace;overflow:auto}"
+    },
+    {
+      "name": "Navigation Link",
+      "kind": "nav",
+      "description": "Primary route and section navigation.",
+      "html": "<a class=\"ds-nav-link\" href=\"#\">CLI reference</a>",
+      "css": ".ds-nav-link{padding:4px 0;color:#101C2A;border-bottom:2px solid transparent;font:650 14px/1.4 sans-serif;text-decoration:none}.ds-nav-link:hover,.ds-nav-link:focus-visible{color:#174FC4;border-color:currentColor}"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Runner Yard",
+    "overview": "multirunner looks like an industrial technical artifact built by people who operate machines. Cool paper, hard ink, cobalt runner lanes, and one scarce orange state marker make parallel work visible.",
+    "keyCharacteristics": [
+      "Cool white field with hard dark rules",
+      "Cobalt carries operation and navigation",
+      "Orange marks one meaningful state at a time",
+      "Generated imagery explains the one-host, many-jobs model",
+      "Square controls and structural offset shadows"
+    ],
+    "rules": [
+      {
+        "name": "The Four-to-One Rule",
+        "body": "Cobalt occupies roughly four times the visual area of orange.",
+        "section": "colors"
+      },
+      {
+        "name": "The Blank Module Rule",
+        "body": "Job blocks in imagery remain geometric and unmarked.",
+        "section": "colors"
+      },
+      {
+        "name": "The Tool, Not Terminal Rule",
+        "body": "Monospace identifies real code or machine metadata.",
+        "section": "typography"
+      },
+      {
+        "name": "The Structural Shadow Rule",
+        "body": "A shadow must explain a tactile layer or state.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "Do use the five named colors for every durable visual role.",
+      "Do reserve orange for focus, selection, or one focal job state.",
+      "Do keep technical imagery blank, geometric, and mechanically plausible.",
+      "Do use hard rules and divided lists instead of generic cards."
+    ],
+    "donts": [
+      "Don't introduce beige, cream, warm paper, or nostalgic aging effects.",
+      "Don't add gradients, neon, glass, pill-heavy controls, or soft SaaS cards.",
+      "Don't put glyphs inside generated job modules.",
+      "Don't use monospace as a general visual theme."
+    ]
+  }
+}
