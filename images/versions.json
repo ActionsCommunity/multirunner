@@ -4,7 +4,7 @@
     "linux_base": {
       "repository": "mcr.microsoft.com/dotnet/runtime-deps",
       "tag": "8.0-noble",
-      "digest": "sha256:a83f3565178daccf8974fd854aa8359a0f8aaec5bd2ea06e11159d476369a228"
+      "digest": "sha256:a039398e7300cb326d97675bb4555d458097fdee73f4362417005cb17ea09453"
     },
     "windows_base": {
       "repository": "mcr.microsoft.com/windows/servercore",
@@ -112,7 +112,7 @@
   },
   "rust": {
     "channel": "stable",
-    "version": "1.98.1",
+    "version": "1.99.0",
     "rustup_version": "1.29.1",
     "rustup_x64_sha256": "dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71",
     "rustup_arm64_sha256": "15f6e4ce9f583b929c996c91562bad6d4454f3281de858b02cdfdef615fac433"
