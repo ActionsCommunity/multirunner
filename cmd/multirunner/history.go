@@ -23,6 +23,7 @@ import (
 	"github.com/GerardSmit/multirunner/internal/configview"
 	"github.com/GerardSmit/multirunner/internal/consoleapi"
 	"github.com/GerardSmit/multirunner/internal/consoleauth"
+	"github.com/GerardSmit/multirunner/internal/consoleipc"
 	"github.com/GerardSmit/multirunner/internal/consoleui"
 	"github.com/GerardSmit/multirunner/internal/control"
 	"github.com/GerardSmit/multirunner/internal/diagnostics"
@@ -67,6 +68,8 @@ type historyRuntime struct {
 	listener       net.Listener
 	handler        http.Handler
 	authenticator  *consoleauth.Authenticator
+	pairing        *consoleipc.Server
+	databasePath   string
 }
 
 func (r *historyRuntime) Close() error {
@@ -78,6 +81,12 @@ func (r *historyRuntime) Close() error {
 		<-r.controlDone
 	}
 	var closeErrors []error
+	if r.pairing != nil {
+		if err := r.pairing.Close(); err != nil {
+			closeErrors = append(closeErrors, err)
+		}
+		r.pairing = nil
+	}
 	if r.journal != nil {
 		if err := r.journal.CloseWithError(); err != nil {
 			closeErrors = append(closeErrors, err)
@@ -130,8 +139,28 @@ func (r *historyRuntime) StartConsole(
 		))
 	}
 	listener := r.listener
+	pairing, err := consoleipc.Listen(
+		r.databasePath, "http://"+listener.Addr().String()+"/", r.authenticator,
+	)
+	if err != nil {
+		logger.Error(
+			"operations console pairing endpoint unavailable; browser authentication is disabled",
+			"err", err,
+		)
+	} else {
+		r.pairing = pairing
+		go serveConsolePairing(ctx, pairing, logger.With("component", "pairing"))
+	}
 	r.listener = nil
 	go serveHistoryDashboard(ctx, listener, handler, logger.With("component", "console"))
+}
+
+func serveConsolePairing(
+	ctx context.Context, server *consoleipc.Server, logger *slog.Logger,
+) {
+	if err := server.Serve(ctx); err != nil && ctx.Err() == nil {
+		logger.Error("operations console pairing endpoint stopped", "err", err)
+	}
 }
 
 type degradedConsoleState struct {
@@ -406,6 +435,16 @@ func startDegradedConsole(
 			Listen: listener.Addr().String(), Reason: "console_persistence_unavailable",
 		}),
 	))
+	pairing, err := consoleipc.Listen(
+		cfg.History.DatabasePath,
+		"http://"+listener.Addr().String()+"/",
+		authenticator,
+	)
+	if err != nil {
+		_ = listener.Close()
+		return err
+	}
+	go serveConsolePairing(ctx, pairing, logger.With("component", "pairing"))
 	go serveHistoryDashboard(ctx, listener, handler, logger.With("component", "console"))
 	return nil
 }
@@ -644,6 +683,7 @@ func setupPersistentHistory(ctx context.Context, configPath string, cfg *config.
 		backups:        backupService,
 		restores:       restoreService,
 		restoreKey:     append([]byte(nil), secret...),
+		databasePath:   cfg.History.DatabasePath,
 	}
 	endpoints, adapters, err := notificationConfiguration(cfg.History.Notifications)
 	if err != nil {

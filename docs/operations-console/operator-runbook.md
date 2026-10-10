@@ -31,24 +31,15 @@ Never bypass a failed trust, integrity, compatibility, or health check.
    authenticated `/api/v1/system` and `/api/v1/session`. The token must never
    appear in the browser URL, launcher arguments, logs, or browser storage.
 
-## Create and rotate the console secret
+## Protect the console secret
 
 `service install` creates the protected console secret when history is enabled.
 `service start` requires the existing secret and fails rather than silently
 replacing it. Keep the database directory restricted to the operator and
-service identity.
-
-To invalidate every browser session:
-
-1. Stop the Multirunner service.
-2. Confirm no restore or update handoff is staged or activating.
-3. Run:
-
-   ```powershell
-   multirunner console rotate-secret --config C:\multirunner\config.yaml
-   ```
-
-4. Restart the service and pair again with `console`.
+service identity. The daemon is the sole owner of pairing and session
+authentication state; the CLI never reads or rotates the secret. On Windows,
+install the service as the operator who will launch the console; installation
+records that exact SID for the protected pairing pipe.
 
 ## Migrate and enable capabilities
 

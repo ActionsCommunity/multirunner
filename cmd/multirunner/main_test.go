@@ -46,12 +46,14 @@ func TestPrepareServiceConsoleSecretCreatesOnInstallAndRequiresOnStart(t *testin
 	}
 }
 
-func TestConsoleCommandsExposePairingAndRotation(t *testing.T) {
+func TestConsoleCommandHasNoCompatibilitySubcommands(t *testing.T) {
 	root := rootCmd()
-	for _, path := range [][]string{{"console", "open"}, {"console", "rotate-secret"}} {
-		if _, _, err := root.Find(path); err != nil {
-			t.Fatalf("find %s: %v", strings.Join(path, " "), err)
-		}
+	console, _, err := root.Find([]string{"console"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(console.Commands()) != 0 {
+		t.Fatalf("console subcommands = %d, want none", len(console.Commands()))
 	}
 }
 

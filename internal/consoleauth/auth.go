@@ -177,11 +177,19 @@ func newAuthenticator(secret []byte, now func() time.Time, usedPath string) (*Au
 
 // PairingToken creates a short-lived, single-use browser pairing token.
 func (a *Authenticator) PairingToken() (string, error) {
+	token, _, err := a.PairingTokenWithExpiry()
+	return token, err
+}
+
+// PairingTokenWithExpiry creates a short-lived, single-use browser pairing
+// token and returns its exact expiry.
+func (a *Authenticator) PairingTokenWithExpiry() (string, time.Time, error) {
 	nonce := make([]byte, 24)
 	if _, err := rand.Read(nonce); err != nil {
-		return "", fmt.Errorf("generate pairing nonce: %w", err)
+		return "", time.Time{}, fmt.Errorf("generate pairing nonce: %w", err)
 	}
-	return a.sign("pair", base64.RawURLEncoding.EncodeToString(nonce), a.now().Add(pairingLifetime)), nil
+	expiresAt := a.now().Add(pairingLifetime)
+	return a.sign("pair", base64.RawURLEncoding.EncodeToString(nonce), expiresAt), expiresAt, nil
 }
 
 // Handler exposes pairing, protects console routes with the session cookie,

@@ -3,6 +3,7 @@ module github.com/GerardSmit/multirunner
 go 1.26.9
 
 require (
+	github.com/Microsoft/go-winio v0.6.2
 	github.com/actions/scaleset v0.4.0
 	github.com/bradleyfalzon/ghinstallation/v2 v2.19.0
 	github.com/containerd/errdefs v1.0.0
@@ -21,7 +22,6 @@ require (
 )
 
 require (
-	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/containerd/errdefs/pkg v0.3.0 // indirect

@@ -107,24 +107,17 @@ real startup do.
 
 ```text
 multirunner console [--no-browser] [--config <path>]
-multirunner console open [--no-browser] [--config <path>]
-multirunner console rotate-secret [--config <path>]
 ```
 
-`console` requires `history.enabled`, verifies the local console service is
-reachable, loads the protected installation secret next to the history
-database, prints a short-lived single-use pairing token, and opens the fixed
-loopback console URL in the default browser. `console open` is an equivalent
-explicit form.
+`console` requires `history.enabled` and requests a short-lived, single-use
+pairing token from the running daemon over its protected local IPC endpoint.
+The daemon remains the sole owner of the protected installation secret. The
+command prints the token and opens the fixed loopback console URL in the
+default browser.
 `--no-browser` prints the URL and token without launching a browser. Enter the
 token in the console pairing form. The token is sensitive until exchanged and
 must not be copied into logs or shared channels; it is never included in the
 browser URL or launcher arguments.
-
-`console rotate-secret` invalidates every browser session by replacing the
-protected installation secret. The Multirunner service must be stopped, and
-rotation is refused while a restore or update handoff is staged or activating.
-Restart the service before opening the console again.
 
 ### `connect`
 
@@ -512,8 +505,6 @@ persistent and therefore accepted everywhere; `--help` likewise.
 | `run` | `--install-deps` (false), `--dry-run` (false) | yes |
 | `doctor` | none | yes |
 | `console` | `--no-browser` (false) | yes |
-| `console open` | `--no-browser` (false) | yes |
-| `console rotate-secret` | none | yes |
 | `connect` | `--org` (empty), `--repo` (empty), `--own-app` (false), `--name` (`multirunner`), `--port` (`0`), `--key-out` (empty => `<config dir>/multirunner-app.private-key.pem`), `--webhook-url` (empty), `--detect` (false), `--device` (false), `--non-interactive` (false), `--dry-run` (false); the `--name`/`--port`/`--key-out`/`--webhook-url`/`--detect` flags apply only with `--own-app` | reads it leniently (device flow, or to shape the manifest with `--own-app`), then rewrites the YAML target sections |
 | `detect` | `--path` (`.`), `--repo` (empty), `--os` (`linux`) | only with `--repo` |
 | `bake` | `--iso`, `--iso-sha256`, `--golden`, `--disk-gb` (`40`), `--mem-mb` (`4096`), `--cpus` (`2`), `--accel` (empty=auto), `--runner-version` (`2.337.0`), `--runner-sha256`, `--tools` (empty), `--licensed` (false), `--vnc` (`127.0.0.1:0`), `--vnc-web` (`127.0.0.1:8090`), `--dry-run` (false), `--prepare-only` (false) | no |
@@ -545,10 +536,9 @@ identically; the same is true of `--install-deps`.
   by pool in YAML order, top-level orphan-artifact cleanup in that pool's
   `work_dir` followed by its reachability preflight. One unreachable pool
   aborts startup for every pool.
-- Treat `run`, `connect`, `console rotate-secret`, both Windows installers,
-  `service` actions, `bake`, and the companion binaries as state-changing
-  operations. `console open` creates sensitive single-use authentication
-  material but does not alter runner state.
+- Treat `run`, `connect`, both Windows installers, `service` actions, `bake`,
+  and the companion binaries as state-changing operations. `console` requests
+  sensitive single-use authentication material but does not alter runner state.
 - Keep private keys, PATs, webhook secrets, cache path tokens, JIT blobs, and
   VNC endpoints out of terminal history, logs, and untrusted networks.
 - In autoscale mode, pass `connect --webhook-url <public https URL>` to subscribe

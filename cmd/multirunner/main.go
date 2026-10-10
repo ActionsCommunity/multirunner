@@ -27,6 +27,7 @@ import (
 	"github.com/GerardSmit/multirunner/internal/cache"
 	"github.com/GerardSmit/multirunner/internal/config"
 	"github.com/GerardSmit/multirunner/internal/consoleauth"
+	"github.com/GerardSmit/multirunner/internal/consoleipc"
 	"github.com/GerardSmit/multirunner/internal/ghapp"
 	"github.com/GerardSmit/multirunner/internal/gitcache"
 	"github.com/GerardSmit/multirunner/internal/github"
@@ -537,10 +538,16 @@ func prepareServiceConsoleSecret(cfg *config.Config, action string) error {
 		if _, err := consoleauth.EnsureSecret(secretPath); err != nil {
 			return fmt.Errorf("provision console secret before service installation: %w", err)
 		}
+		if err := consoleipc.PrepareEndpointIdentity(cfg.History.DatabasePath, true); err != nil {
+			return fmt.Errorf("provision console operator identity before service installation: %w", err)
+		}
 		return nil
 	}
 	if _, err := consoleauth.LoadSecret(secretPath); err != nil {
 		return fmt.Errorf("validate console secret before service start: %w", err)
+	}
+	if err := consoleipc.PrepareEndpointIdentity(cfg.History.DatabasePath, false); err != nil {
+		return fmt.Errorf("validate console operator identity before service start: %w", err)
 	}
 	return nil
 }
