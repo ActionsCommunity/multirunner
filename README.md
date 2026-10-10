@@ -68,63 +68,106 @@ so jobs behave exactly as on GitHub-hosted runners.
 
 ## Install
 
-Use the installer for your platform. It resolves the latest stable GitHub
-release, selects the correct OS/architecture binary, verifies the exact asset
-against `SHA256SUMS.txt`, checks the embedded version, and preserves an existing
-binary as `multirunner.previous` or `multirunner.exe.previous`.
+Open a terminal and paste the command for your platform. The installer
+downloads the latest GitHub release for your OS and architecture, verifies it
+against the release's `SHA256SUMS.txt`, checks its version, and installs it.
+An existing binary is kept as `multirunner.previous` (`multirunner.exe.previous`
+on Windows).
 
-| Platform | Repository path | Raw download URL |
-| --- | --- | --- |
-| Linux, macOS, Git Bash | [`scripts/install.sh`](https://github.com/ActionsCommunity/multirunner/blob/main/scripts/install.sh) | `https://raw.githubusercontent.com/ActionsCommunity/multirunner/main/scripts/install.sh` |
-| Windows PowerShell | [`scripts/install.ps1`](https://github.com/ActionsCommunity/multirunner/blob/main/scripts/install.ps1) | `https://raw.githubusercontent.com/ActionsCommunity/multirunner/main/scripts/install.ps1` |
-
-From a local clone, run `sh ./scripts/install.sh` or
-`.\scripts\install.ps1` from the repository root.
-
-Linux and macOS:
+**Linux and macOS** (installs to `/usr/local/bin`):
 
 ```sh
-curl -fsSLo install-multirunner.sh \
-  https://raw.githubusercontent.com/ActionsCommunity/multirunner/main/scripts/install.sh
-less install-multirunner.sh
-sh install-multirunner.sh
+curl -fsSL https://raw.githubusercontent.com/ActionsCommunity/multirunner/main/scripts/install.sh | sudo sh -s -- --install-dir /usr/local/bin
 ```
 
-The default destination is `~/.local/bin`. Add it to `PATH` if your shell does
-not already include it.
+To install for the current user only (into `~/.local/bin`, no `sudo`):
 
-Windows PowerShell:
+```sh
+curl -fsSL https://raw.githubusercontent.com/ActionsCommunity/multirunner/main/scripts/install.sh | sh
+```
+
+**Windows** (PowerShell; installs to `%LOCALAPPDATA%\Programs\Multirunner` and
+adds it to your user `PATH`):
 
 ```powershell
-$installer = Join-Path $env:TEMP install-multirunner.ps1
-Invoke-WebRequest `
-  https://raw.githubusercontent.com/ActionsCommunity/multirunner/main/scripts/install.ps1 `
-  -OutFile $installer
-Get-Content $installer
-Unblock-File $installer
-& $installer
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/ActionsCommunity/multirunner/main/scripts/install.ps1)))
 ```
 
-The default Windows destination is
-`%LOCALAPPDATA%\Programs\Multirunner`; the installer adds it to the user
-`PATH`. Open a new terminal afterward.
-
-Pin a release or choose a destination:
+Open a new terminal afterward and confirm the install:
 
 ```sh
-sudo sh install-multirunner.sh --version v1.2.3 --install-dir /usr/local/bin
+multirunner --version
+```
+
+Pin a release or choose a destination by passing options to the same command:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ActionsCommunity/multirunner/main/scripts/install.sh | sudo sh -s -- --version v1.2.3 --install-dir /usr/local/bin
 ```
 
 ```powershell
-& $installer -Version v1.2.3 -InstallDir C:\Tools\Multirunner
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/ActionsCommunity/multirunner/main/scripts/install.ps1))) -Version v1.2.3 -InstallDir C:\Tools\Multirunner
 ```
 
-Installing the CLI does not create configuration, credentials, runner pools,
-or an OS service. Continue with the configuration and service setup below.
+Installer sources:
+[`scripts/install.sh`](https://github.com/ActionsCommunity/multirunner/blob/main/scripts/install.sh)
+and
+[`scripts/install.ps1`](https://github.com/ActionsCommunity/multirunner/blob/main/scripts/install.ps1).
+To review a script before running it, download it (`curl -fsSLo install.sh <url>`
+or `irm <url> -OutFile install.ps1`), read it, then run the local file with the
+same options.
 
-Alternatively, download a binary and `SHA256SUMS.txt` from the
+### Set up with the CLI
+
+After installing, use the CLI to connect to GitHub, write the config, and
+install the background service. Replace `owner/repo` with your repository, or
+use `--org my-org` for organization runners.
+
+**Linux and macOS:**
+
+```sh
+sudo mkdir -p /etc/multirunner
+# 1. Authorize GitHub (device flow); creates the config with GitHub settings.
+sudo multirunner connect --repo owner/repo --config /etc/multirunner/config.yaml
+# 2. Print a recommended pools: block, then add it to the config.
+sudo multirunner detect --repo owner/repo --config /etc/multirunner/config.yaml
+sudoedit /etc/multirunner/config.yaml
+# 3. Check Docker/Podman and GitHub access.
+sudo multirunner doctor --config /etc/multirunner/config.yaml
+# 4. Preview, then install and start the service.
+sudo multirunner run --config /etc/multirunner/config.yaml --dry-run
+sudo multirunner service install --config /etc/multirunner/config.yaml
+sudo multirunner service start
+```
+
+**Windows** (elevated PowerShell):
+
+```powershell
+New-Item -ItemType Directory -Force C:\multirunner | Out-Null
+# 1. Authorize GitHub (device flow); creates the config with GitHub settings.
+multirunner connect --repo owner/repo --config C:\multirunner\config.yaml
+# 2. Print a recommended pools: block, then add it to the config.
+multirunner detect --repo owner/repo --os windows --config C:\multirunner\config.yaml
+notepad C:\multirunner\config.yaml
+# 3. Check container daemons and GitHub access.
+multirunner doctor --config C:\multirunner\config.yaml
+# 4. Preview, then install and start the service.
+multirunner run --config C:\multirunner\config.yaml --dry-run
+multirunner service install --config C:\multirunner\config.yaml
+multirunner service start
+```
+
+Your runners then appear under **Settings → Actions → Runners**. See
+[Quick start](#quick-start-linux) for a minimal hand-written config,
+[Backends](#backends) for Docker, Podman, Windows containers, and QEMU, and
+[Run as a service](#run-as-a-service) for service management. Commands that
+change the system accept `--dry-run` to preview first.
+
+### Other install options
+
+Download a binary and `SHA256SUMS.txt` from the
 [Releases](https://github.com/ActionsCommunity/multirunner/releases) page and
-verify/install them manually, or clone the repository and build from source:
+verify/install them manually, or build from source:
 
 ```sh
 git clone https://github.com/ActionsCommunity/multirunner.git
