@@ -68,9 +68,55 @@ so jobs behave exactly as on GitHub-hosted runners.
 
 ## Install
 
-Download a binary for your OS/arch from the
-[Releases](https://github.com/ActionsCommunity/multirunner/releases) page, or
-clone the repository and build from source:
+Use the installer for your platform. It resolves the latest stable GitHub
+release, selects the correct OS/architecture binary, verifies the exact asset
+against `SHA256SUMS.txt`, checks the embedded version, and preserves an existing
+binary as `multirunner.previous` or `multirunner.exe.previous`.
+
+Linux and macOS:
+
+```sh
+curl -fsSLo install-multirunner.sh \
+  https://raw.githubusercontent.com/ActionsCommunity/multirunner/main/scripts/install.sh
+less install-multirunner.sh
+sh install-multirunner.sh
+```
+
+The default destination is `~/.local/bin`. Add it to `PATH` if your shell does
+not already include it.
+
+Windows PowerShell:
+
+```powershell
+$installer = Join-Path $env:TEMP install-multirunner.ps1
+Invoke-WebRequest `
+  https://raw.githubusercontent.com/ActionsCommunity/multirunner/main/scripts/install.ps1 `
+  -OutFile $installer
+Get-Content $installer
+Unblock-File $installer
+& $installer
+```
+
+The default Windows destination is
+`%LOCALAPPDATA%\Programs\Multirunner`; the installer adds it to the user
+`PATH`. Open a new terminal afterward.
+
+Pin a release or choose a destination:
+
+```sh
+sudo sh install-multirunner.sh --version v1.2.3 --install-dir /usr/local/bin
+```
+
+```powershell
+& $installer -Version v1.2.3 -InstallDir C:\Tools\Multirunner
+```
+
+Installing the CLI does not create configuration, credentials, runner pools,
+or an OS service. Continue with the configuration and service setup below.
+
+Alternatively, download a binary and `SHA256SUMS.txt` from the
+[Releases](https://github.com/ActionsCommunity/multirunner/releases) page and
+verify/install them manually, or clone the repository and build from source:
 
 ```sh
 git clone https://github.com/ActionsCommunity/multirunner.git
