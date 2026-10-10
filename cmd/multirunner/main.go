@@ -81,17 +81,15 @@ parallel on one host. Each runner takes a single job, then is torn down and
 re-provisioned with a fresh just-in-time registration. It also bundles a
 self-hosted Actions cache (v2) so actions/cache stays on your host.
 
-Run with no command to start the orchestrator (same as "run").`,
+Run with no command to start the orchestrator (same as "run"). If the config
+file does not exist, multirunner offers guided setup on a terminal.`,
 		Example: `  multirunner connect --org my-org      # one-time: create + install a GitHub App
   multirunner doctor                    # verify daemons are reachable
   multirunner run                       # start the runner pools`,
 		SilenceUsage: true,
 		Args:         cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if runDryRun {
-				return planRun(cmd.OutOrStdout(), cfgPath, installDeps)
-			}
-			return runService(cfgPath, installDeps)
+			return runWithSetup(cmd.OutOrStdout(), cfgPath, installDeps, runDryRun)
 		},
 	}
 	root.PersistentFlags().StringVar(&cfgPath, "config", "config.yaml", "path to the YAML config file")
@@ -110,10 +108,7 @@ Runs identically in the foreground or under a service manager (see "service").`,
   multirunner run --install-deps        # install a missing Windows daemon, then run`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if runDryRun {
-				return planRun(cmd.OutOrStdout(), cfgPath, installDeps)
-			}
-			return runService(cfgPath, installDeps)
+			return runWithSetup(cmd.OutOrStdout(), cfgPath, installDeps, runDryRun)
 		},
 	}
 	run.Flags().BoolVar(&installDeps, "install-deps", false, "auto-install missing container daemons (elevates)")

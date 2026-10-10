@@ -804,6 +804,11 @@ multirunner service ...             install | uninstall | start | stop | restart
 multirunner completion <shell>      shell completion script
 ```
 
+If the config file does not exist, `multirunner` (or `multirunner run`) on a
+terminal offers guided setup: it asks where to write the config, runs the same
+flow as `multirunner connect`, and then offers to start the runners. Off a
+terminal it exits and prints the `connect` command to run instead.
+
 ---
 
 ## Build from source
