@@ -11,10 +11,20 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/google/go-github/v66/github"
+	"github.com/google/go-github/v88/github"
 
 	"github.com/GerardSmit/multirunner/internal/config"
 )
+
+func newGoGitHubTestClient(t *testing.T, base *url.URL) *github.Client {
+	t.Helper()
+	baseURL := base.String()
+	client, err := github.NewClient(github.WithURLs(&baseURL, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return client
+}
 
 func TestClientForSlotReturnsSelf(t *testing.T) {
 	c := &Client{scope: config.ScopeRepo, owner: "o", repo: "r"}
@@ -127,8 +137,7 @@ func TestRepoSetQueuedJobsTagsOriginatingRepo(t *testing.T) {
 
 	base, _ := url.Parse(srv.URL + "/")
 	makeClient := func(repo string) *Client {
-		ghc := github.NewClient(nil)
-		ghc.BaseURL = base
+		ghc := newGoGitHubTestClient(t, base)
 		return &Client{gh: ghc, scope: config.ScopeRepo, owner: "o", repo: repo}
 	}
 
@@ -209,8 +218,7 @@ func TestClientQueuedJobsTagsItself(t *testing.T) {
 	defer srv.Close()
 
 	base, _ := url.Parse(srv.URL + "/")
-	ghc := github.NewClient(nil)
-	ghc.BaseURL = base
+	ghc := newGoGitHubTestClient(t, base)
 	c := &Client{gh: ghc, scope: config.ScopeRepo, owner: "o", repo: "solo"}
 
 	jobs, err := c.QueuedJobs(context.Background())
@@ -251,8 +259,7 @@ func TestRepoSetQueuedJobsPartialFailure(t *testing.T) {
 
 	base, _ := url.Parse(srv.URL + "/")
 	makeClient := func(repo string) *Client {
-		ghc := github.NewClient(nil)
-		ghc.BaseURL = base
+		ghc := newGoGitHubTestClient(t, base)
 		return &Client{gh: ghc, scope: config.ScopeRepo, owner: "o", repo: repo}
 	}
 
@@ -300,8 +307,7 @@ func TestRepoSetQueuedJobsRotatesStartingRepo(t *testing.T) {
 	var clients []*Client
 	var repos []string
 	for _, repo := range []string{"a", "b", "c"} {
-		ghc := github.NewClient(nil)
-		ghc.BaseURL = base
+		ghc := newGoGitHubTestClient(t, base)
 		clients = append(clients, &Client{gh: ghc, scope: config.ScopeRepo, owner: "o", repo: repo})
 		repos = append(repos, "o/"+repo)
 	}
@@ -325,8 +331,7 @@ func TestRepoSetQueuedJobsAllFailed(t *testing.T) {
 	base, _ := url.Parse(srv.URL + "/")
 	clients := make([]*Client, 2)
 	for i, repo := range []string{"a", "b"} {
-		ghc := github.NewClient(nil)
-		ghc.BaseURL = base
+		ghc := newGoGitHubTestClient(t, base)
 		clients[i] = &Client{gh: ghc, scope: config.ScopeRepo, owner: "o", repo: repo}
 	}
 	_, err := NewRepoSet(clients, []string{"o/a", "o/b"}).QueuedJobs(context.Background())

@@ -38,6 +38,7 @@ One small binary. One config file. No Kubernetes, no control plane.
 | **Autoscaling** | Keep N warm, scale on demand (polling or webhook), or let GitHub drive capacity through runner scale sets. |
 | **Runs as a service** | Windows SCM, Linux systemd, macOS launchd. |
 | **Metrics** | Prometheus endpoint + health check. |
+| **Run history** | Optional SQLite-backed localhost dashboard with handled jobs, steps, repositories, pools, and GitHub links. |
 | **Housekeeping** | Cache + mirror garbage collection, automatic. |
 
 The Linux Docker backend is validated end-to-end against a real GitHub repo,
@@ -68,7 +69,8 @@ so jobs behave exactly as on GitHub-hosted runners.
 ## Install
 
 Download a binary for your OS/arch from the
-[Releases](../../releases) page, or clone the repository and build from source:
+[Releases](https://github.com/ActionsCommunity/multirunner/releases) page, or
+clone the repository and build from source:
 
 ```sh
 git clone https://github.com/ActionsCommunity/multirunner.git
@@ -135,6 +137,7 @@ workspace or local marketplace when installing it for Codex. The root
 
 - [CLI reference](skills/docs/cli-reference.md)
 - [Host configuration reference](skills/docs/host-configuration.md)
+- [Operations Console operator runbook](docs/operations-console/operator-runbook.md)
 - [Container build runners](skills/docs/container-build-runners.md)
 - [QEMU Windows guide](skills/docs/qemu-windows.md)
 
@@ -633,6 +636,52 @@ Set `metrics.listen` (e.g. `127.0.0.1:9090`) to expose:
 
 ---
 
+## Durable run history
+
+Multirunner can retain metadata for the GitHub Actions jobs handled by one host
+and serve an authenticated local Operations Console. The feature is disabled
+by default:
+
+```yaml
+history:
+  enabled: true
+  database: "C:/ProgramData/multirunner/history.db"
+  listen: "127.0.0.1:9092"
+  sync_interval_sec: 300
+  backfill: all_available
+  retention_days: -1
+  legacy_runner_prefixes:
+    - multirunner-linux-
+```
+
+The listener must be loopback-only. Open the console with
+`multirunner console open`, which opens the fixed local console URL and prints
+a short-lived, single-use pairing token in the initiating terminal. Enter that
+token in the browser to create a protected local session. The token is never
+placed in the browser URL or launcher arguments. Ordinary console and API
+requests require the authenticated session.
+
+`retention_days: -1` keeps imported metadata indefinitely. Workflow artifacts
+and job-log content are not persisted. An authenticated operator may explicitly
+request a transient GitHub job log in the browser. The server resolves the job
+from durable history, bounds and masks the response, sends it with
+`Cache-Control: no-store`, and records only access metadata. Log bytes are not
+written to SQLite, operational events, audit payloads, exports, support
+bundles, backups, service logs, or browser persistent storage.
+
+New jobs can be attributed exactly by queued job ID or persisted runner name.
+Older jobs can be imported by an explicitly configured runner-name prefix and
+remain marked as inferred.
+
+GitHub remains the source for enrichment and backfill. History already deleted
+by GitHub cannot be recovered. As of October 8, 2026, configured GitHub Actions
+retention also applies to workflow runs and related data; public repositories
+can retain up to 90 days and private repositories up to 400 days. Multirunner
+therefore reconciles periodically and stores imported metadata locally before
+GitHub retention removes it.
+
+---
+
 ## CLI
 
 Built with cobra — `multirunner <command> --help` for details; `--config` is global.
@@ -644,6 +693,8 @@ Hidden `_` developer helpers are excluded.
 ```text
 multirunner [run]                   run the orchestrator (default)
 multirunner connect --org <org>     create + install a GitHub App, write auth to config
+multirunner console open            create a one-time local pairing token
+multirunner console rotate-secret   invalidate sessions and rotate the local secret
 multirunner doctor                  check daemons + container mode, no runners
 multirunner detect                  scan a repo, recommend image flavors + pools
 multirunner bake                    build a golden Windows VM image (qemu backend)

@@ -34,6 +34,7 @@ optional braces) as the variable name, and only for:
 - `auth.token_path`
 - `webhook.secret`
 - `cache.access_token`
+- `history.notifications.webhooks[].secret`
 
 An unset referenced variable becomes empty and may then fail validation. Other
 configuration fields, including ordinary paths, are passed through as written;
@@ -101,6 +102,26 @@ stats the golden file (no `MR:GOLDEN_OK`, metadata, accelerator, or disk
 check) without cleaning `qemu.work_dir`; orphan cleanup occurs only when the
 orchestrator starts. It does not hash `qemu.bake_iso`; `run --dry-run` and
 real startup do.
+
+### `console`
+
+```text
+multirunner console open [--no-browser] [--config <path>]
+multirunner console rotate-secret [--config <path>]
+```
+
+`console open` requires `history.enabled`, loads the protected installation
+secret next to the history database, prints a short-lived single-use pairing
+token, and opens the fixed loopback console URL in the default browser.
+`--no-browser` prints the URL and token without launching a browser. Enter the
+token in the console pairing form. The token is sensitive until exchanged and
+must not be copied into logs or shared channels; it is never included in the
+browser URL or launcher arguments.
+
+`console rotate-secret` invalidates every browser session by replacing the
+protected installation secret. The Multirunner service must be stopped, and
+rotation is refused while a restore or update handoff is staged or activating.
+Restart the service before opening the console again.
 
 ### `connect`
 
@@ -484,9 +505,12 @@ persistent and therefore accepted everywhere; `--help` likewise.
 
 | Command | Own flags (default) | Loads config |
 | --- | --- | --- |
-| `multirunner` (root, = `run`) | `--install-deps` (false), `--dry-run` (false), `--version`/`-v` (prints the fixed string `0.1.0-dev`; not a release identifier) | yes |
+| `multirunner` (root, = `run`) | `--install-deps` (false), `--dry-run` (false), `--version`/`-v` (prints embedded version and commit; provenance-aware builds inject both, while a plain development build may report `dev (commit unknown)`) | yes |
 | `run` | `--install-deps` (false), `--dry-run` (false) | yes |
 | `doctor` | none | yes |
+| `console` | none | no |
+| `console open` | `--no-browser` (false) | yes |
+| `console rotate-secret` | none | yes |
 | `connect` | `--org` (empty), `--repo` (empty), `--own-app` (false), `--name` (`multirunner`), `--port` (`0`), `--key-out` (empty => `<config dir>/multirunner-app.private-key.pem`), `--webhook-url` (empty), `--detect` (false), `--device` (false), `--non-interactive` (false), `--dry-run` (false); the `--name`/`--port`/`--key-out`/`--webhook-url`/`--detect` flags apply only with `--own-app` | reads it leniently (device flow, or to shape the manifest with `--own-app`), then rewrites the YAML target sections |
 | `detect` | `--path` (`.`), `--repo` (empty), `--os` (`linux`) | only with `--repo` |
 | `bake` | `--iso`, `--iso-sha256`, `--golden`, `--disk-gb` (`40`), `--mem-mb` (`4096`), `--cpus` (`2`), `--accel` (empty=auto), `--runner-version` (`2.337.0`), `--runner-sha256`, `--tools` (empty), `--licensed` (false), `--vnc` (`127.0.0.1:0`), `--vnc-web` (`127.0.0.1:8090`), `--dry-run` (false), `--prepare-only` (false) | no |
@@ -518,8 +542,10 @@ identically; the same is true of `--install-deps`.
   by pool in YAML order, top-level orphan-artifact cleanup in that pool's
   `work_dir` followed by its reachability preflight. One unreachable pool
   aborts startup for every pool.
-- Treat `run`, `connect`, both Windows installers, `service` actions, `bake`,
-  and the companion binaries as state-changing operations.
+- Treat `run`, `connect`, `console rotate-secret`, both Windows installers,
+  `service` actions, `bake`, and the companion binaries as state-changing
+  operations. `console open` creates sensitive single-use authentication
+  material but does not alter runner state.
 - Keep private keys, PATs, webhook secrets, cache path tokens, JIT blobs, and
   VNC endpoints out of terminal history, logs, and untrusted networks.
 - In autoscale mode, pass `connect --webhook-url <public https URL>` to subscribe

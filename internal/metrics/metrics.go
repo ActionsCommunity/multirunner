@@ -1,5 +1,5 @@
-// Package metrics exposes Prometheus metrics + a health endpoint and provides
-// pool lifecycle hooks that update them.
+// Package metrics exposes Prometheus metrics + a health endpoint and adapts
+// structured runner lifecycle events into the existing metric series.
 package metrics
 
 import (
@@ -14,6 +14,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/GerardSmit/multirunner/internal/pool"
+	"github.com/GerardSmit/multirunner/internal/runner"
 )
 
 // Metrics holds the registry and instruments.
@@ -23,8 +24,23 @@ type Metrics struct {
 	jobs   *prometheus.CounterVec
 	reprov *prometheus.CounterVec
 
+	operationalJournalRejections *prometheus.CounterVec
+	operationalJournalErrors     prometheus.Counter
+	operationalJournalHealthy    prometheus.Gauge
+	consoleSSEActive             prometheus.Gauge
+	consoleSSERejected           *prometheus.CounterVec
+
+	historyAPICalls         *prometheus.CounterVec
+	historySyncErrors       *prometheus.CounterVec
+	historyLastSuccess      *prometheus.GaugeVec
+	historyBackfillComplete *prometheus.GaugeVec
+
+	lifecycleMu sync.Mutex
+	launched    map[string]bool
+
 	healthMu         sync.RWMutex
 	requiredSessions map[string]bool
+	journalAvailable bool
 }
 
 // New builds the metrics set.
@@ -39,26 +55,101 @@ func New() *Metrics {
 	reprov := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "multirunner_reprovision_errors_total", Help: "Runner launch/JIT errors.",
 	}, []string{"pool"})
-	reg.MustRegister(active, jobs, reprov)
+	journalRejections := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "multirunner_operational_journal_rejections_total",
+		Help: "Best-effort operational events rejected before durable append.",
+	}, []string{"reason"})
+	journalErrors := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "multirunner_operational_journal_append_errors_total",
+		Help: "Operational journal durable append failures.",
+	})
+	journalHealthy := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "multirunner_operational_journal_healthy",
+		Help: "Whether the operational journal has initialized without detected event loss.",
+	})
+	journalHealthy.Set(1)
+	sseActive := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "multirunner_console_sse_active",
+		Help: "Currently active authenticated Operations Console SSE streams.",
+	})
+	sseRejected := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "multirunner_console_sse_rejected_total",
+		Help: "Operations Console SSE streams rejected by admission control.",
+	}, []string{"reason"})
+	reg.MustRegister(
+		active, jobs, reprov, journalRejections, journalErrors, journalHealthy,
+		sseActive, sseRejected,
+	)
 	return &Metrics{
 		reg: reg, active: active, jobs: jobs, reprov: reprov,
-		requiredSessions: make(map[string]bool),
+		operationalJournalRejections: journalRejections,
+		operationalJournalErrors:     journalErrors,
+		operationalJournalHealthy:    journalHealthy,
+		consoleSSEActive:             sseActive,
+		consoleSSERejected:           sseRejected,
+		launched:                     make(map[string]bool),
+		requiredSessions:             make(map[string]bool),
+		journalAvailable:             true,
 	}
 }
 
-// Hooks returns pool lifecycle hooks that update the metrics.
+func (m *Metrics) ObserveConsoleStreamOpened() {
+	m.consoleSSEActive.Inc()
+}
+
+func (m *Metrics) ObserveConsoleStreamClosed() {
+	m.consoleSSEActive.Dec()
+}
+
+func (m *Metrics) ObserveConsoleStreamRejected(reason string) {
+	m.consoleSSERejected.WithLabelValues(reason).Inc()
+}
+
+// Hooks returns a compatibility wrapper carrying the structured metrics
+// observer. Existing composition can keep passing pool.Hooks unchanged.
 func (m *Metrics) Hooks() pool.Hooks {
 	return pool.Hooks{
-		OnStart: func(p string) { m.active.WithLabelValues(p).Inc() },
-		OnStop: func(p string, code int, err error) {
-			m.active.WithLabelValues(p).Dec()
+		Observer: m,
+		OnStart: func(poolName string) {
+			m.active.WithLabelValues(poolName).Inc()
+		},
+		OnStop: func(poolName string, _ int, err error) {
+			m.active.WithLabelValues(poolName).Dec()
 			result := "success"
 			if err != nil {
 				result = "error"
-				m.reprov.WithLabelValues(p).Inc()
+				m.reprov.WithLabelValues(poolName).Inc()
 			}
-			m.jobs.WithLabelValues(p, result).Inc()
+			m.jobs.WithLabelValues(poolName, result).Inc()
 		},
+	}
+}
+
+// ObserveRunnerLifecycle implements runner.LifecycleObserver while preserving
+// the existing metric names and terminal-result semantics.
+func (m *Metrics) ObserveRunnerLifecycle(
+	_ context.Context, event runner.LifecycleEvent,
+) {
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
+
+	switch event.Type {
+	case runner.LifecycleLaunched:
+		if !m.launched[event.LocalSessionID] {
+			m.launched[event.LocalSessionID] = true
+			m.active.WithLabelValues(event.Pool).Inc()
+		}
+	case runner.LifecycleStopped, runner.LifecycleFailed:
+		if m.launched[event.LocalSessionID] {
+			delete(m.launched, event.LocalSessionID)
+			m.active.WithLabelValues(event.Pool).Dec()
+		}
+		result := "success"
+		if event.Type == runner.LifecycleFailed {
+			result = "error"
+			m.reprov.WithLabelValues(event.Pool).Inc()
+		}
+		m.jobs.WithLabelValues(event.Pool, result).Inc()
 	}
 }
 
@@ -70,9 +161,38 @@ func (m *Metrics) SetRequiredSessionAvailable(name string, available bool) {
 	m.requiredSessions[name] = available
 }
 
+// SetOperationalJournalAvailable exposes console persistence degradation
+// without making runner provisioning depend on the console.
+func (m *Metrics) SetOperationalJournalAvailable(available bool) {
+	m.healthMu.Lock()
+	m.journalAvailable = available
+	m.healthMu.Unlock()
+	if available {
+		m.operationalJournalHealthy.Set(1)
+	} else {
+		m.operationalJournalHealthy.Set(0)
+	}
+}
+
+// ObserveOperationalJournalRejected records an event that never reached the
+// durable journal.
+func (m *Metrics) ObserveOperationalJournalRejected(reason string) {
+	m.operationalJournalRejections.WithLabelValues(reason).Inc()
+	m.SetOperationalJournalAvailable(false)
+}
+
+// ObserveOperationalJournalAppendError records a failed durable append.
+func (m *Metrics) ObserveOperationalJournalAppendError() {
+	m.operationalJournalErrors.Inc()
+	m.SetOperationalJournalAvailable(false)
+}
+
 func (m *Metrics) healthy() bool {
 	m.healthMu.RLock()
 	defer m.healthMu.RUnlock()
+	if !m.journalAvailable {
+		return false
+	}
 	for _, available := range m.requiredSessions {
 		if !available {
 			return false

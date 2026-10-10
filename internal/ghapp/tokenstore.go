@@ -2,10 +2,12 @@ package ghapp
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
+
+	"github.com/GerardSmit/multirunner/internal/securefile"
 )
 
 // storedToken is the on-disk JSON shape of a user access token sidecar. The
@@ -57,35 +59,12 @@ func SaveUserToken(path string, tok *UserToken) error {
 		return err
 	}
 
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".mr-token-*.tmp")
-	if err != nil {
-		return fmt.Errorf("create temp token file in %s: %w", dir, err)
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName) // a no-op once the rename below succeeds
-
-	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		return fmt.Errorf("chmod temp token file: %w", err)
-	}
-	// Restrict before the token is written, so the bytes never sit in a
-	// world-readable file even briefly.
-	if err := restrictToOwnerFrom(tmpName, path); err != nil {
-		tmp.Close()
+	if err := securefile.Replace(path, data); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return fmt.Errorf("write temp token file: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close temp token file: %w", err)
-	}
-	if err := os.Rename(tmpName, path); err != nil {
-		return fmt.Errorf("replace token store %s: %w", path, err)
-	}
-	return nil
+	return securefile.CreateExclusive(path, data)
 }
 
 // WriteSecretFile writes a credential with access restricted to the owner
@@ -94,17 +73,10 @@ func SaveUserToken(path string, tok *UserToken) error {
 // mode argument is ignored on Windows, so a plain 0600 write leaves the file
 // readable by other local accounts.
 func WriteSecretFile(path string, data []byte) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
-	if err != nil {
+	if err := securefile.Replace(path, data); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	if err := restrictToOwner(path); err != nil {
-		f.Close()
-		return err
-	}
-	if _, err := f.Write(data); err != nil {
-		f.Close()
-		return fmt.Errorf("write %s: %w", path, err)
-	}
-	return f.Close()
+	return securefile.CreateExclusive(path, data)
 }

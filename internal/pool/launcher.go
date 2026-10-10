@@ -4,8 +4,11 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
+	"sync"
 	"time"
 
 	"github.com/GerardSmit/multirunner/internal/backend"
@@ -19,25 +22,46 @@ const (
 	backoffMax  = 60 * time.Second
 )
 
-// Hooks observe a runner's lifecycle (used for metrics). Either may be nil.
+// Hooks observes a runner's lifecycle. OnStart and OnStop are retained for
+// compatibility; Observer receives the structured event stream.
 type Hooks struct {
-	OnStart func(pool string)
-	OnStop  func(pool string, exitCode int, err error)
+	OnStart  func(pool string)
+	OnStop   func(pool string, exitCode int, err error)
+	Observer runner.LifecycleObserver
+}
+
+// QueueIDs identifies the queued GitHub work that caused a demand-driven
+// launch. Zero values mean the corresponding ID is not known.
+type QueueIDs struct {
+	RunID int64
+	JobID int64
 }
 
 // Launcher launches one ephemeral runner for a pool. It is the shared unit used
 // by both the always-on pool model and the webhook autoscaler.
 type Launcher struct {
-	cfg       config.Pool
-	image     string
-	be        backend.Backend
-	gh        github.ClientProvider
-	env       map[string]string
-	mounts    []backend.Mount
-	container backend.ContainerSettings
-	logger    *slog.Logger
-	hooks     Hooks
+	cfg          config.Pool
+	image        string
+	be           backend.Backend
+	gh           github.ClientProvider
+	env          map[string]string
+	mounts       []backend.Mount
+	container    backend.ContainerSettings
+	logger       *slog.Logger
+	hooks        Hooks
+	controlMu    sync.Mutex
+	paused       bool
+	provisioning int
+	active       map[string]*activeRunner
+	changed      chan struct{}
 }
+
+type activeRunner struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
+var ErrRunnerSessionNotFound = errors.New("runner session is not active")
 
 // NewLauncher builds a Launcher.
 func NewLauncher(cfg config.Pool, image string, be backend.Backend, gh github.ClientProvider, env map[string]string, mounts []backend.Mount, logger *slog.Logger, hooks Hooks) *Launcher {
@@ -51,6 +75,7 @@ func NewLauncher(cfg config.Pool, image string, be backend.Backend, gh github.Cl
 			DNS:             append([]string(nil), cfg.Container.DNS...),
 		},
 		logger: logger.With("pool", cfg.Name), hooks: hooks,
+		active: make(map[string]*activeRunner), changed: make(chan struct{}),
 	}
 }
 
@@ -111,6 +136,12 @@ func (l *Launcher) RunOneOn(ctx context.Context, client *github.Client) (int, er
 
 // RunJob provisions a fresh JIT runner for an authorized queued job.
 func (l *Launcher) RunJob(ctx context.Context, job github.QueuedJob) (int, error) {
+	return l.RunJobWithQueue(ctx, job, QueueIDs{RunID: job.RunID, JobID: job.JobID})
+}
+
+// RunJobWithQueue provisions a fresh JIT runner and attaches any known queued
+// run/job IDs to its lifecycle events.
+func (l *Launcher) RunJobWithQueue(ctx context.Context, job github.QueuedJob, queue QueueIDs) (int, error) {
 	client := job.Client
 	// Resolve before the OnStart hook so an unusable pool cannot leak an
 	// unmatched start into the metrics.
@@ -127,24 +158,182 @@ func (l *Launcher) RunJob(ctx context.Context, job github.QueuedJob) (int, error
 			l.cfg.Name, target, job.WorkflowPath, job.Event, job.Actor,
 		)
 	}
-	if l.hooks.OnStart != nil {
+	if err := l.reserveProvisioning(ctx); err != nil {
+		return 0, err
+	}
+	reserved := true
+	defer func() {
+		if !reserved {
+			return
+		}
+		l.controlMu.Lock()
+		l.provisioning--
+		l.notifyControlChangeLocked()
+		l.controlMu.Unlock()
+	}()
+	if l.hooks.Observer == nil && l.hooks.OnStart != nil {
 		l.hooks.OnStart(l.cfg.Name)
 	}
+	sessionID := runner.NewLocalSessionID()
+	runContext, cancel := context.WithCancel(ctx)
+	active := &activeRunner{cancel: cancel, done: make(chan struct{})}
+	l.controlMu.Lock()
+	l.active[sessionID] = active
+	l.provisioning--
+	reserved = false
+	l.notifyControlChangeLocked()
+	l.controlMu.Unlock()
+	defer func() {
+		cancel()
+		l.controlMu.Lock()
+		delete(l.active, sessionID)
+		close(active.done)
+		l.notifyControlChangeLocked()
+		l.controlMu.Unlock()
+	}()
+	runnerName := l.runnerName()
 	spec := runner.Spec{
-		Name:          l.runnerName(),
-		Image:         l.image,
-		RunnerGroupID: l.cfg.RunnerGroupID,
-		Labels:        l.cfg.Labels,
-		WorkFolder:    l.cfg.WorkFolder,
-		Env:           l.env,
-		Mounts:        l.mounts,
-		Container:     l.container,
+		Name:             runnerName,
+		LocalSessionID:   sessionID,
+		Pool:             l.cfg.Name,
+		Target:           client.Target(),
+		Repository:       job.Repository,
+		QueuedRunID:      queue.RunID,
+		QueuedRunAttempt: job.RunAttempt,
+		QueuedJobID:      queue.JobID,
+		Observer:         l.hooks.Observer,
+		Image:            l.image,
+		RunnerGroupID:    l.cfg.RunnerGroupID,
+		Labels:           l.cfg.Labels,
+		WorkFolder:       l.cfg.WorkFolder,
+		Env:              l.env,
+		Mounts:           l.mounts,
+		Container:        l.container,
 	}
-	code, err := runner.RunOnce(ctx, client, l.be, spec, l.logger.With("target", client.Target()))
-	if l.hooks.OnStop != nil {
+	code, err := runner.RunOnce(runContext, client, l.be, spec, l.logger.With("target", client.Target()))
+	if l.hooks.Observer == nil && l.hooks.OnStop != nil {
 		l.hooks.OnStop(l.cfg.Name, code, err)
 	}
 	return code, err
+}
+
+// Pause prevents new runners from being provisioned while allowing active
+// sessions to finish.
+func (l *Launcher) Pause() {
+	l.controlMu.Lock()
+	defer l.controlMu.Unlock()
+	if !l.paused {
+		l.paused = true
+		l.notifyControlChangeLocked()
+	}
+}
+
+// Resume allows new runners to be provisioned.
+func (l *Launcher) Resume() {
+	l.controlMu.Lock()
+	defer l.controlMu.Unlock()
+	if l.paused {
+		l.paused = false
+		l.notifyControlChangeLocked()
+	}
+}
+
+// Paused reports whether new provisioning is paused.
+func (l *Launcher) Paused() bool {
+	l.controlMu.Lock()
+	defer l.controlMu.Unlock()
+	return l.paused
+}
+
+// ActiveSessions returns the stable local IDs of active runner sessions.
+func (l *Launcher) ActiveSessions() []string {
+	l.controlMu.Lock()
+	defer l.controlMu.Unlock()
+	sessions := make([]string, 0, len(l.active))
+	for id := range l.active {
+		sessions = append(sessions, id)
+	}
+	sort.Strings(sessions)
+	return sessions
+}
+
+// Drain pauses provisioning and waits for active runner sessions to finish.
+func (l *Launcher) Drain(ctx context.Context) error {
+	l.controlMu.Lock()
+	if !l.paused {
+		l.paused = true
+		l.notifyControlChangeLocked()
+	}
+	l.controlMu.Unlock()
+	for {
+		l.controlMu.Lock()
+		if l.provisioning == 0 && len(l.active) == 0 {
+			l.controlMu.Unlock()
+			return nil
+		}
+		changed := l.changed
+		l.controlMu.Unlock()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-changed:
+		}
+	}
+}
+
+// Terminate cancels one active runner through its existing cleanup path and
+// waits until that session is no longer owned by the launcher.
+func (l *Launcher) Terminate(ctx context.Context, sessionID string) error {
+	l.controlMu.Lock()
+	active, ok := l.active[sessionID]
+	if ok {
+		active.cancel()
+	}
+	l.controlMu.Unlock()
+	if !ok {
+		return ErrRunnerSessionNotFound
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-active.done:
+		return nil
+	}
+}
+
+func (l *Launcher) reserveProvisioning(ctx context.Context) error {
+	for {
+		l.controlMu.Lock()
+		if !l.paused {
+			l.provisioning++
+			l.notifyControlChangeLocked()
+			l.controlMu.Unlock()
+			return nil
+		}
+		changed := l.changed
+		l.controlMu.Unlock()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-changed:
+		}
+	}
+}
+
+func (l *Launcher) waitUntilProvisioningAllowed(ctx context.Context) error {
+	if err := l.reserveProvisioning(ctx); err != nil {
+		return err
+	}
+	l.controlMu.Lock()
+	l.provisioning--
+	l.notifyControlChangeLocked()
+	l.controlMu.Unlock()
+	return nil
+}
+
+func (l *Launcher) notifyControlChangeLocked() {
+	close(l.changed)
+	l.changed = make(chan struct{})
 }
 
 func (l *Launcher) runnerName() string {

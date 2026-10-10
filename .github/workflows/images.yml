@@ -5,6 +5,10 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
+concurrency:
+  group: images-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   # Linux runner (minimal + flavors) and cache server images (multi-arch: amd64 + arm64).
   # Flavors layer on one another, so the steps are ordered minimal -> native-build ->
@@ -12,15 +16,16 @@ jobs:
   # staging tag until the complete graph is ready for stable-tag promotion.
   linux:
     runs-on: ubuntu-latest
+    timeout-minutes: 240
     env:
       IMG: gerardsmit/multirunner-runner-linux
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: docker/setup-qemu-action@v4      # arm64 emulation
-      - uses: docker/setup-buildx-action@v4
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4, arm64 emulation
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
-      - uses: docker/login-action@v4
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
         with:
           username: gerardsmit
           password: ${{ secrets.DOCKER_PAT }}
@@ -37,7 +42,7 @@ jobs:
           fi
 
       - name: Build + push staged minimal runner image
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
           file: images/linux/Dockerfile
@@ -48,7 +53,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Build + push staged native-build flavor
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
           file: images/linux/flavors/native-build.Dockerfile
@@ -60,7 +65,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Build + push staged node flavor
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
           file: images/linux/flavors/node.Dockerfile
@@ -72,7 +77,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Build + push staged dotnet flavor
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
           file: images/linux/flavors/dotnet.Dockerfile
@@ -84,7 +89,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Build + push staged rust flavor
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
           file: images/linux/flavors/rust.Dockerfile
@@ -96,7 +101,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Build + push staged go flavor
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
           file: images/linux/flavors/go.Dockerfile
@@ -128,7 +133,7 @@ jobs:
 
       - name: Cache server image metadata
         id: meta-cache
-        uses: docker/metadata-action@v6
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
         with:
           images: gerardsmit/multirunner-cacheserver
           tags: |
@@ -138,7 +143,7 @@ jobs:
             type=sha,enable=${{ github.ref_type != 'tag' }}
 
       - name: Build + push cache server image
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
           file: images/cacheserver/Dockerfile
@@ -152,11 +157,12 @@ jobs:
   # minimal first, then node -> dotnet chained on it, plus buildtools on minimal.
   windows:
     runs-on: windows-2025
+    timeout-minutes: 240
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: ./.github/actions/wait-for-docker
 
-      - uses: docker/login-action@v4
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
         with:
           username: gerardsmit
           password: ${{ secrets.DOCKER_PAT }}
@@ -221,10 +227,11 @@ jobs:
   promote-windows:
     needs: windows
     runs-on: ubuntu-latest
+    timeout-minutes: 240
     steps:
-      - uses: actions/checkout@v7
-      - uses: docker/setup-buildx-action@v4
-      - uses: docker/login-action@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
         with:
           username: gerardsmit
           password: ${{ secrets.DOCKER_PAT }}

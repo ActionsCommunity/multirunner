@@ -8,21 +8,34 @@ import (
 	"errors"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/GerardSmit/multirunner/internal/config"
 	"github.com/GerardSmit/multirunner/internal/github"
 	"github.com/GerardSmit/multirunner/internal/pool"
+	"github.com/GerardSmit/multirunner/internal/webhook"
+)
+
+const (
+	defaultMetadataWorkers = 4
+	metadataQueuePerWorker = 32
 )
 
 // Scaler launches runners on demand across a set of pool launchers.
 type Scaler struct {
-	states    []*state
-	gh        github.ClientProvider
-	scope     config.Scope
-	pollEvery time.Duration
-	logger    *slog.Logger
-	baseCtx   context.Context // long-lived launch context (set in Run)
+	states          []*state
+	gh              github.ClientProvider
+	scope           config.Scope
+	pollEvery       time.Duration
+	logger          *slog.Logger
+	ctxMu           sync.RWMutex
+	baseCtx         context.Context
+	metadataQueue   chan metadataRequest
+	metadataWorkers int
+	metadataOnce    sync.Once
+	metadataWG      sync.WaitGroup
+	resolveMetadata func(context.Context, *github.Client, github.QueuedJob) (github.QueuedJob, error)
 }
 
 type state struct {
@@ -30,32 +43,56 @@ type state struct {
 	sem chan struct{} // capacity = launcher max
 }
 
+type metadataRequest struct {
+	client *github.Client
+	job    github.QueuedJob
+}
+
+var _ webhook.QueuedObserver = (*Scaler)(nil)
+
 // New builds a Scaler. pollSec <= 0 disables API polling (webhook-only).
 func New(launchers []*pool.Launcher, gh github.ClientProvider, scope config.Scope, pollSec int, logger *slog.Logger) *Scaler {
 	states := make([]*state, len(launchers))
+	workers := 0
 	for i, l := range launchers {
 		states[i] = &state{l: l, sem: make(chan struct{}, l.Max())}
+		workers += l.Max()
+	}
+	if workers <= 0 || workers > defaultMetadataWorkers {
+		workers = defaultMetadataWorkers
 	}
 	every := time.Duration(pollSec) * time.Second
-	return &Scaler{states: states, gh: gh, scope: scope, pollEvery: every,
-		logger: logger.With("component", "autoscale"), baseCtx: context.Background()}
+	scaler := &Scaler{
+		states: states, gh: gh, scope: scope, pollEvery: every,
+		logger: logger.With("component", "autoscale"), baseCtx: context.Background(),
+		metadataWorkers: workers,
+		metadataQueue:   make(chan metadataRequest, workers*metadataQueuePerWorker),
+	}
+	scaler.resolveMetadata = func(
+		ctx context.Context, client *github.Client, job github.QueuedJob,
+	) (github.QueuedJob, error) {
+		return client.ResolveQueuedJob(ctx, job.Repository, job.RunID, job.Labels, job)
+	}
+	return scaler
 }
 
 // Run ensures images are present, starts the poller (if enabled), and blocks
 // until ctx is cancelled.
 func (s *Scaler) Run(ctx context.Context) error {
-	s.baseCtx = ctx // launched runners use this long-lived context, not a request ctx
+	s.setContext(ctx)
 	for _, st := range s.states {
 		if err := st.l.EnsureImage(ctx); err != nil {
 			return err
 		}
 	}
+	s.startMetadataWorkers(ctx)
 	s.logger.Info("autoscaler running", "pools", len(s.states), "poll", s.pollEvery.String())
 	if s.pollEvery > 0 {
 		s.reconcile() // initial top-up
 		go s.pollLoop(ctx)
 	}
 	<-ctx.Done()
+	s.metadataWG.Wait()
 	return nil
 }
 
@@ -64,18 +101,31 @@ func (s *Scaler) Run(ctx context.Context) error {
 // that triggered it. Empty or unmanaged repositories are ignored.
 // Launches use the scaler's long-lived context (NOT the caller's), so a webhook
 // handler returning does not cancel the runner.
-func (s *Scaler) OnQueued(repo string, runID int64, labels []string) {
-	client := s.gh.ClientFor(repo)
+func (s *Scaler) OnQueued(event webhook.WorkflowJobEvent) {
+	client := s.gh.ClientFor(event.Repository)
 	if client == nil {
-		s.logger.Warn("ignoring queued job for unmanaged repository", "repo", repo)
+		s.logger.Warn("ignoring queued job for unmanaged repository", "repo", event.Repository)
 		return
 	}
 	job := github.QueuedJob{
-		Client: client, Repository: repo, Labels: append([]string(nil), labels...),
+		Client:        client,
+		Repository:    event.Repository,
+		Labels:        append([]string(nil), event.WorkflowJob.Labels...),
+		RunID:         event.WorkflowJob.RunID,
+		RunAttempt:    event.WorkflowJob.RunAttempt,
+		JobID:         event.WorkflowJob.ID,
+		JobName:       event.WorkflowJob.Name,
+		JobHTMLURL:    event.WorkflowJob.HTMLURL,
+		JobStatus:     event.WorkflowJob.Status,
+		JobConclusion: event.WorkflowJob.Conclusion,
+		WorkflowName:  event.WorkflowJob.WorkflowName,
+		HeadBranch:    event.WorkflowJob.HeadBranch,
+		HeadSHA:       event.WorkflowJob.HeadSHA,
+		Ref:           event.WorkflowJob.HeadBranch,
 	}
 	requiresMetadata := false
 	for _, st := range s.states {
-		if labelsMatch(st.l.Labels(), labels) && st.l.RequiresWorkflowMetadata() {
+		if labelsMatch(st.l.Labels(), job.Labels) && st.l.RequiresWorkflowMetadata() {
 			requiresMetadata = true
 			break
 		}
@@ -84,19 +134,63 @@ func (s *Scaler) OnQueued(repo string, runID int64, labels []string) {
 		s.launchFor(job)
 		return
 	}
-	ctx := s.baseCtx
-	if ctx == nil {
-		ctx = context.Background()
+	request := metadataRequest{client: client, job: job}
+	select {
+	case <-s.context().Done():
+		return
+	case s.metadataQueue <- request:
+	default:
+		s.logger.Warn("ignoring queued job because workflow metadata queue is full",
+			"repo", job.Repository, "run_id", job.RunID,
+			"queue_capacity", cap(s.metadataQueue))
 	}
-	go func() {
-		resolved, err := client.ResolveQueuedJob(ctx, repo, runID, labels)
-		if err != nil {
-			s.logger.Warn("ignoring queued job whose workflow metadata could not be resolved",
-				"repo", repo, "run_id", runID, "err", err)
-			return
+}
+
+func (s *Scaler) startMetadataWorkers(ctx context.Context) {
+	s.metadataOnce.Do(func() {
+		for range s.metadataWorkers {
+			s.metadataWG.Add(1)
+			go func() {
+				defer s.metadataWG.Done()
+				s.metadataWorker(ctx)
+			}()
 		}
-		s.launchFor(resolved)
-	}()
+	})
+}
+
+func (s *Scaler) metadataWorker(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case request := <-s.metadataQueue:
+			resolved, err := s.resolveMetadata(ctx, request.client, request.job)
+			if err != nil {
+				if ctx.Err() == nil {
+					s.logger.Warn("ignoring queued job whose workflow metadata could not be resolved",
+						"repo", request.job.Repository, "run_id", request.job.RunID, "err", err)
+				}
+				continue
+			}
+			s.launchFor(resolved)
+		}
+	}
+}
+
+func (s *Scaler) setContext(ctx context.Context) {
+	s.ctxMu.Lock()
+	s.baseCtx = ctx
+	s.ctxMu.Unlock()
+}
+
+func (s *Scaler) context() context.Context {
+	s.ctxMu.RLock()
+	ctx := s.baseCtx
+	s.ctxMu.RUnlock()
+	if ctx == nil {
+		return context.Background()
+	}
+	return ctx
 }
 
 // launchFor launches one runner for the first authorized matching pool with
@@ -119,9 +213,10 @@ func (s *Scaler) tryLaunch(st *state, job github.QueuedJob) bool {
 	case st.sem <- struct{}{}:
 		target := job.Client.Target()
 		s.logger.Info("scaling up", "pool", st.l.Name(), "target", target)
+		ctx := s.context()
 		go func() {
 			defer func() { <-st.sem }()
-			if _, err := st.l.RunJob(s.baseCtx, job); err != nil && s.baseCtx.Err() == nil {
+			if _, err := st.l.RunJob(ctx, job); err != nil && ctx.Err() == nil {
 				s.logger.Error("runner failed", "pool", st.l.Name(), "err", err)
 			}
 		}()
@@ -151,7 +246,7 @@ func (s *Scaler) reconcile() {
 	if s.scope != config.ScopeRepo && s.scope != config.ScopeRepos {
 		return // org/enterprise: rely on webhook (no cheap queued-jobs endpoint)
 	}
-	jobs, err := s.gh.QueuedJobs(s.baseCtx)
+	jobs, err := s.gh.QueuedJobs(s.context())
 	if err != nil {
 		s.logger.Warn("poll queued jobs failed", "err", err)
 		var pollErr *github.RepoPollError

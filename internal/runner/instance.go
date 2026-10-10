@@ -12,7 +12,7 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/docker/docker/pkg/stdcopy"
+	"github.com/moby/moby/api/pkg/stdcopy"
 
 	"github.com/GerardSmit/multirunner/internal/backend"
 	"github.com/GerardSmit/multirunner/internal/github"
@@ -20,21 +20,55 @@ import (
 
 // Spec describes one runner to launch.
 type Spec struct {
-	Name          string
-	Image         string
-	RunnerGroupID int64
-	Labels        []string
-	WorkFolder    string
-	Env           map[string]string
-	Mounts        []backend.Mount
-	Container     backend.ContainerSettings
-	Index         int
+	Name             string
+	LocalSessionID   string
+	Pool             string
+	Target           string
+	Repository       string
+	QueuedRunID      int64
+	QueuedRunAttempt int
+	QueuedJobID      int64
+	Observer         LifecycleObserver
+	Image            string
+	RunnerGroupID    int64
+	Labels           []string
+	WorkFolder       string
+	Env              map[string]string
+	Mounts           []backend.Mount
+	Container        backend.ContainerSettings
+	Index            int
 }
 
 // RunOnce provisions a fresh JIT config, launches the runner on the backend,
 // streams its logs, and blocks until it exits (after its single job). The
 // returned exit code is the runner process exit code.
-func RunOnce(ctx context.Context, gh *github.Client, be backend.Backend, spec Spec, logger *slog.Logger) (int, error) {
+func RunOnce(ctx context.Context, gh *github.Client, be backend.Backend, spec Spec, logger *slog.Logger) (code int, err error) {
+	event := LifecycleEvent{
+		Type:             LifecyclePlanned,
+		LocalSessionID:   spec.LocalSessionID,
+		Pool:             spec.Pool,
+		Target:           spec.Target,
+		Repository:       spec.Repository,
+		RunnerName:       spec.Name,
+		QueuedRunID:      spec.QueuedRunID,
+		QueuedRunAttempt: spec.QueuedRunAttempt,
+		QueuedJobID:      spec.QueuedJobID,
+		Timestamp:        time.Now().UTC(),
+		ExitCode:         -1,
+	}
+	observe(ctx, spec.Observer, event)
+	defer func() {
+		event.Timestamp = time.Now().UTC()
+		event.ExitCode = code
+		event.Error = sanitizeLifecycleError(err)
+		if err != nil {
+			event.Type = LifecycleFailed
+		} else {
+			event.Type = LifecycleStopped
+		}
+		observe(ctx, spec.Observer, event)
+	}()
+
 	jit, err := gh.GenerateJITConfig(ctx, github.JITConfigRequest{
 		Name:          spec.Name,
 		RunnerGroupID: spec.RunnerGroupID,
@@ -44,6 +78,10 @@ func RunOnce(ctx context.Context, gh *github.Client, be backend.Backend, spec Sp
 	if err != nil {
 		return -1, fmt.Errorf("jit config: %w", err)
 	}
+	event.Type = LifecycleRegistered
+	event.GitHubRegistrationID = jit.Runner.ID
+	event.Timestamp = time.Now().UTC()
+	observe(ctx, spec.Observer, event)
 
 	handle, err := be.Launch(ctx, backend.LaunchRequest{
 		Name:             spec.Name,
@@ -59,6 +97,7 @@ func RunOnce(ctx context.Context, gh *github.Client, be backend.Backend, spec Sp
 	if err != nil {
 		launchErr := fmt.Errorf("launch: %w", err)
 		if handle != nil {
+			event.BackendInstanceID = handle.ID()
 			// A non-nil handle means Launch could not prove the instance is absent,
 			// so terminate it before reclaiming the registration. If even that
 			// fails the runner may be alive and already on a job, so GitHub
@@ -72,6 +111,10 @@ func RunOnce(ctx context.Context, gh *github.Client, be backend.Backend, spec Sp
 		return -1, launchErr
 	}
 
+	event.Type = LifecycleLaunched
+	event.BackendInstanceID = handle.ID()
+	event.Timestamp = time.Now().UTC()
+	observe(ctx, spec.Observer, event)
 	logger.Info("runner launched", "name", spec.Name, "container", short(handle.ID()), "runner_id", jit.Runner.ID)
 
 	logCtx, cancelLogs := context.WithCancel(ctx)
@@ -101,6 +144,14 @@ func RunOnce(ctx context.Context, gh *github.Client, be backend.Backend, spec Sp
 	deregister(ctx, gh, jit.Runner.ID, spec.Name, logger)
 	logger.Info("runner exited", "name", spec.Name, "exit_code", code)
 	return code, nil
+}
+
+func observe(
+	ctx context.Context, observer LifecycleObserver, event LifecycleEvent,
+) {
+	if observer != nil {
+		observer.ObserveRunnerLifecycle(ctx, event)
+	}
 }
 
 // cleanupTimeout bounds the detached cleanup calls made once the job context is

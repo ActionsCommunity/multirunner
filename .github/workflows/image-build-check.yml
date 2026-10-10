@@ -17,16 +17,21 @@ on:
       - "internal/winvm/bake.go"
   workflow_dispatch:
 
+concurrency:
+  group: image-build-check-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   version-policy:
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     outputs:
       buildtools-lines: ${{ steps.buildtools-lines.outputs.lines }}
       linux-changed: ${{ steps.inputs.outputs.linux }}
       windows-changed: ${{ steps.inputs.outputs.windows }}
       buildtools-changed: ${{ steps.inputs.outputs.buildtools }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # Windows image jobs cost a hosted runner ten to twenty minutes each,
       # most of it Windows layer extraction that nothing can cache. Only build
@@ -84,8 +89,9 @@ jobs:
     needs: version-policy
     if: needs.version-policy.outputs.linux-changed == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Build flavor chain (no push, host arch)
         run: |
@@ -218,9 +224,10 @@ jobs:
     needs: version-policy
     if: needs.version-policy.outputs.linux-changed == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v7
-      - uses: docker/setup-qemu-action@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
       - name: Build and run arm64 node flavor
         run: |
           set -euo pipefail
@@ -241,8 +248,9 @@ jobs:
     needs: version-policy
     if: needs.version-policy.outputs.windows-changed == 'true'
     runs-on: windows-2025
+    timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: ./.github/actions/wait-for-docker
 
       # Windows images are large, so keep this job to the Node/.NET branch.
@@ -389,8 +397,9 @@ jobs:
       matrix:
         line: ${{ fromJSON(needs.version-policy.outputs.buildtools-lines) }}
     runs-on: windows-2025
+    timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Reclaim host Visual Studio disk
         shell: pwsh

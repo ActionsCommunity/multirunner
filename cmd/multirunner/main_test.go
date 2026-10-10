@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -19,9 +20,40 @@ import (
 	"github.com/GerardSmit/multirunner/internal/backend"
 	"github.com/GerardSmit/multirunner/internal/buildinfo"
 	"github.com/GerardSmit/multirunner/internal/config"
+	"github.com/GerardSmit/multirunner/internal/consoleauth"
 	"github.com/GerardSmit/multirunner/internal/ghapp"
+	"github.com/GerardSmit/multirunner/internal/securefile"
 	"github.com/GerardSmit/multirunner/internal/winvm"
 )
+
+func TestPrepareServiceConsoleSecretCreatesOnInstallAndRequiresOnStart(t *testing.T) {
+	database := filepath.Join(t.TempDir(), "history.db")
+	cfg := &config.Config{}
+	cfg.History.Enabled = true
+	cfg.History.DatabasePath = database
+	if err := prepareServiceConsoleSecret(cfg, "start"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing start secret error = %v", err)
+	}
+	if err := prepareServiceConsoleSecret(cfg, "install"); err != nil {
+		t.Fatal(err)
+	}
+	path := consoleauth.SecretPath(database)
+	if err := securefile.Check(path); err != nil {
+		t.Fatalf("installed secret policy: %v", err)
+	}
+	if err := prepareServiceConsoleSecret(cfg, "start"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestConsoleCommandsExposePairingAndRotation(t *testing.T) {
+	root := rootCmd()
+	for _, path := range [][]string{{"console", "open"}, {"console", "rotate-secret"}} {
+		if _, _, err := root.Find(path); err != nil {
+			t.Fatalf("find %s: %v", strings.Join(path, " "), err)
+		}
+	}
+}
 
 func TestVersionOutputIncludesVersionAndCommit(t *testing.T) {
 	originalVersion, originalCommit := buildinfo.Version, buildinfo.Commit

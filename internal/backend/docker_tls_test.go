@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/docker/docker/client"
+	"github.com/moby/moby/client"
 )
 
 func TestDockerTLSClientOptionDisabledWithoutConfig(t *testing.T) {
@@ -39,7 +39,7 @@ func TestDockerTLSClientOptionLoadsCertificates(t *testing.T) {
 	if opt == nil {
 		t.Fatal("matching Docker TLS host did not produce a client option")
 	}
-	if _, err := client.NewClientWithOpts(opt); err == nil {
+	if _, err := client.New(opt); err == nil {
 		t.Fatal("Docker TLS option did not attempt to load the configured certificates")
 	}
 }

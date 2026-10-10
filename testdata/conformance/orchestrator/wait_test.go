@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	githubapi "github.com/google/go-github/v66/github"
+	githubapi "github.com/google/go-github/v88/github"
 )
 
 type waitPoll struct {

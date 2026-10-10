@@ -5,6 +5,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -25,12 +26,17 @@ import (
 	"github.com/GerardSmit/multirunner/internal/buildinfo"
 	"github.com/GerardSmit/multirunner/internal/cache"
 	"github.com/GerardSmit/multirunner/internal/config"
+	"github.com/GerardSmit/multirunner/internal/consoleauth"
 	"github.com/GerardSmit/multirunner/internal/ghapp"
 	"github.com/GerardSmit/multirunner/internal/gitcache"
 	"github.com/GerardSmit/multirunner/internal/github"
 	"github.com/GerardSmit/multirunner/internal/metrics"
+	"github.com/GerardSmit/multirunner/internal/operations"
 	"github.com/GerardSmit/multirunner/internal/pool"
+	"github.com/GerardSmit/multirunner/internal/restore"
+	"github.com/GerardSmit/multirunner/internal/runner"
 	"github.com/GerardSmit/multirunner/internal/servicehost"
+	"github.com/GerardSmit/multirunner/internal/update"
 	"github.com/GerardSmit/multirunner/internal/vmview"
 	"github.com/GerardSmit/multirunner/internal/webhook"
 	"github.com/GerardSmit/multirunner/internal/winsetup"
@@ -280,7 +286,7 @@ Use --dry-run first to inspect host state and print the plan without elevation.`
 	}
 	installContainerd.Flags().BoolVar(&containerdDryRun, "dry-run", false, "inspect the host and print planned changes without elevation or mutation")
 
-	root.AddCommand(run, doctorC, connectC, winDaemon, installContainerd, bakeCmd(), detectCmd(&cfgPath), screenshotCmd(), bootKeysCmd(), vmViewCmd(), jitISOCmd(), serviceCmd(&cfgPath))
+	root.AddCommand(run, doctorC, connectC, consoleCmd(&cfgPath), winDaemon, installContainerd, bakeCmd(), detectCmd(&cfgPath), screenshotCmd(), bootKeysCmd(), vmViewCmd(), jitISOCmd(), serviceCmd(&cfgPath))
 	return root
 }
 
@@ -481,6 +487,15 @@ install/uninstall/start/stop require administrator/root.`,
 				if dryRun {
 					return servicePlan(cmd.OutOrStdout(), svc, action, abs)
 				}
+				if action == "install" || action == "start" || action == "restart" {
+					cfg, err := config.Load(abs)
+					if err != nil {
+						return err
+					}
+					if err := prepareServiceConsoleSecret(cfg, action); err != nil {
+						return err
+					}
+				}
 				if action == "start" || action == "restart" {
 					if err := servicehost.ResetRecovery("multirunner", svc.Platform()); err != nil {
 						return fmt.Errorf("reset native service recovery: %w", err)
@@ -511,6 +526,23 @@ install/uninstall/start/stop require administrator/root.`,
 		})
 	}
 	return c
+}
+
+func prepareServiceConsoleSecret(cfg *config.Config, action string) error {
+	if cfg == nil || !cfg.History.Enabled {
+		return nil
+	}
+	secretPath := consoleauth.SecretPath(cfg.History.DatabasePath)
+	if action == "install" {
+		if _, err := consoleauth.EnsureSecret(secretPath); err != nil {
+			return fmt.Errorf("provision console secret before service installation: %w", err)
+		}
+		return nil
+	}
+	if _, err := consoleauth.LoadSecret(secretPath); err != nil {
+		return fmt.Errorf("validate console secret before service start: %w", err)
+	}
+	return nil
 }
 
 func servicePlan(w io.Writer, svc service.Service, action, configPath string) error {
@@ -628,6 +660,11 @@ func planRun(w io.Writer, configPath string, installDeps bool) error {
 	if cfg.Webhook.Listen != "" {
 		fmt.Fprintf(w, "Webhook: listen on %s%s\n", cfg.Webhook.Listen, cfg.Webhook.Path)
 	}
+	if cfg.History.Enabled {
+		fmt.Fprintf(w, "History: store metadata in %s; dashboard on http://%s; sync every %d seconds; backfill=%s; retention_days=%d\n",
+			cfg.History.DatabasePath, cfg.History.Listen, cfg.History.SyncIntervalSec,
+			cfg.History.Backfill, cfg.History.RetentionDays)
+	}
 
 	now := time.Now()
 	for _, pool := range cfg.Pools {
@@ -691,7 +728,7 @@ func runOrchestrator(ctx context.Context, configPath string, interactive, instal
 	if err != nil {
 		return err
 	}
-	secrets := []string{cfg.Auth.PAT, cfg.Webhook.Secret, cfg.Cache.AccessToken}
+	secrets := cfg.SecretValues()
 	logger := newLogger(cfg.Log, output, secrets...)
 	defer func() {
 		if err != nil && ctx.Err() == nil {
@@ -789,6 +826,20 @@ func runOrchestrator(ctx context.Context, configPath string, interactive, instal
 		}()
 	}
 	hooks := m.Hooks()
+	historyRuntime, err := setupHistory(ctx, configPath, cfg, ghProvider, m, logger)
+	if err != nil {
+		return fmt.Errorf("history: %w", err)
+	}
+	if historyRuntime != nil {
+		defer historyRuntime.Close()
+		metricsObserver := hooks.Observer
+		hooks.Observer = runner.LifecycleObserverFunc(func(
+			ctx context.Context, event runner.LifecycleEvent,
+		) {
+			metricsObserver.ObserveRunnerLifecycle(ctx, event)
+			historyRuntime.lifecycle.ObserveRunnerLifecycle(ctx, event)
+		})
+	}
 
 	var launchers []*pool.Launcher
 	var backends []backend.Backend
@@ -826,13 +877,100 @@ func runOrchestrator(ctx context.Context, configPath string, interactive, instal
 	if len(launchers) == 0 {
 		return fmt.Errorf("no runnable pools")
 	}
+	if historyRuntime != nil {
+		consoleDegradedReason := ""
+		if err := historyRuntime.StartDiagnostics(cfg, launchers, backends); err != nil {
+			return fmt.Errorf("diagnostics: %w", err)
+		}
+		if handoff, committed, err := restore.CommitHealthy(
+			ctx, cfg.History.DatabasePath, historyRuntime.restoreKey,
+			historyRuntime.store, time.Now(),
+		); err != nil {
+			return fmt.Errorf("commit restored database health: %w", err)
+		} else if committed {
+			logger.Info("restore startup outcome recorded", "state", handoff.State, "restore_id", handoff.ID)
+			payload, marshalErr := json.Marshal(map[string]any{
+				"backup_id": handoff.BackupID, "state": handoff.State,
+				"rollback_reason": handoff.RollbackReason,
+			})
+			if marshalErr != nil {
+				logger.Error("encode restore startup event", "err", marshalErr)
+			} else if _, appendErr := historyRuntime.journal.Append(ctx, operations.EventInput{
+				Type: "restore." + string(handoff.State), EntityType: "restore",
+				EntityID: handoff.ID, Timestamp: time.Now(),
+				ActorKind: operations.ActorSystem, ActorID: "service-supervisor",
+				Payload: payload, CommandID: handoff.CommandID,
+			}); appendErr != nil {
+				logger.Error("append restore startup event", "err", appendErr)
+			}
+		}
+		if err := historyRuntime.StartControls(
+			ctx, launchers, !cfg.Provisioning.IsScaleset(),
+			cfg.History.OperationsConsole.Capabilities,
+			logger.With("component", "commands"),
+		); err != nil {
+			consoleDegradedReason = "command_initialization_failed"
+			logger.Error(
+				"operations console controls unavailable; runner runtime will continue",
+				"mode", "read_only", "err", err,
+			)
+		}
+		fallback, executableErr := os.Executable()
+		if executableErr != nil {
+			return fmt.Errorf("locate service executable: %w", executableErr)
+		}
+		updateOptions, optionsErr := updateActivationOptions(
+			cfg, fallback, historyRuntime.restoreKey,
+		)
+		if optionsErr != nil {
+			return optionsErr
+		}
+		if handoff, committed, err := update.CommitHealthy(
+			ctx, updateOptions, historyRuntime.store, time.Now(),
+		); err != nil {
+			return fmt.Errorf("commit updated application health: %w", err)
+		} else if committed {
+			logger.Info("update startup outcome recorded", "state", handoff.State, "update_id", handoff.ID)
+			payload, marshalErr := json.Marshal(map[string]any{
+				"version": handoff.VersionName, "commit": handoff.Commit,
+				"state": handoff.State, "rollback_reason": handoff.RollbackReason,
+			})
+			if marshalErr != nil {
+				logger.Error("encode update startup event", "err", marshalErr)
+			} else if _, appendErr := historyRuntime.journal.Append(ctx, operations.EventInput{
+				Type: "update." + string(handoff.State), EntityType: "update",
+				EntityID: handoff.ID, Timestamp: time.Now(),
+				ActorKind: operations.ActorSystem, ActorID: "service-supervisor",
+				Payload: payload, CommandID: handoff.CommandID,
+			}); appendErr != nil {
+				logger.Error("append update startup event", "err", appendErr)
+			}
+		}
+		historyRuntime.StartConsole(
+			ctx, consoleDegradedReason, logger.With("component", "console"),
+		)
+	}
 
 	logger.Info("orchestrator running", "mode", cfg.Provisioning)
+	if historyRuntime != nil && historyRuntime.webhook != nil &&
+		!cfg.Provisioning.IsAutoscale() && cfg.Webhook.Listen != "" {
+		wh := webhook.New(cfg.Webhook.Listen, cfg.Webhook.Path, cfg.Webhook.Secret, nil, logger)
+		wh.AddObserver(historyRuntime.webhook)
+		go func() {
+			if err := wh.Start(ctx); err != nil {
+				logger.Error("history webhook server error", "err", err)
+			}
+		}()
+	}
 	switch {
 	case cfg.Provisioning.IsScaleset():
 		err = runScaleset(ctx, cfg, scaleSetPools, hooks, reportScaleSetState, logger)
 	case cfg.Provisioning.IsAutoscale():
-		err = runAutoscale(ctx, cfg, ghProvider, launchers, logger)
+		var historyObserver webhook.Observer
+		if historyRuntime != nil {
+			historyObserver = historyRuntime.webhook
+		}
+		err = runAutoscale(ctx, cfg, ghProvider, launchers, historyObserver, logger)
 	default:
 		pools := make([]*pool.Pool, len(launchers))
 		for i, l := range launchers {
@@ -883,13 +1021,14 @@ func runQEMUHousekeeping(ctx context.Context, cfg *config.Config, logger *slog.L
 
 // runAutoscale runs the on-demand scaler (polling) plus an optional webhook
 // receiver (when webhook.listen is set and reachable from GitHub).
-func runAutoscale(ctx context.Context, cfg *config.Config, ghProvider github.ClientProvider, launchers []*pool.Launcher, logger *slog.Logger) error {
+func runAutoscale(ctx context.Context, cfg *config.Config, ghProvider github.ClientProvider, launchers []*pool.Launcher, historyObserver webhook.Observer, logger *slog.Logger) error {
 	scaler := autoscale.New(launchers, ghProvider, cfg.GitHub.Scope, cfg.Webhook.PollIntervalSec, logger)
 	if cfg.Webhook.Listen != "" {
 		if cfg.Webhook.Secret == "" {
-			logger.Warn("webhook listener has no secret; signatures will not be verified")
+			return errors.New("webhook secret is required when the listener is configured")
 		}
 		wh := webhook.New(cfg.Webhook.Listen, cfg.Webhook.Path, cfg.Webhook.Secret, scaler, logger)
+		wh.AddObserver(historyObserver)
 		go func() {
 			if err := wh.Start(ctx); err != nil {
 				logger.Error("webhook server error", "err", err)
@@ -1035,6 +1174,15 @@ func doctor(configPath string) error {
 
 	fmt.Printf("config: %s\nscope=%s owner=%s pools=%d cache=%v\n\n",
 		configPath, cfg.GitHub.Scope, cfg.GitHub.Owner, len(cfg.Pools), cfg.Cache.Enabled)
+	if cfg.History.Enabled {
+		if err := checkHistoryDatabase(ctx, cfg); err != nil {
+			fmt.Printf("[history] UNAVAILABLE: %v\n", err)
+			allOK = false
+		} else {
+			fmt.Printf("[history] database=%s dashboard=http://%s -> ok\n",
+				cfg.History.DatabasePath, cfg.History.Listen)
+		}
+	}
 
 	for _, pc := range cfg.Pools {
 		be, err := newBackend(pc)

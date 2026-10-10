@@ -44,14 +44,27 @@ type ClientProvider interface {
 // queued it. Carrying the client is what lets the scaler register the new runner
 // where the work actually is instead of wherever rotation happens to point.
 type QueuedJob struct {
-	Client       *Client
-	Repository   string
-	Labels       []string
-	WorkflowPath string
-	Event        string
-	Actor        string
-	Ref          string
-	Status       string
+	Client        *Client
+	Repository    string
+	Labels        []string
+	RunID         int64
+	RunAttempt    int
+	RunNumber     int
+	RunHTMLURL    string
+	JobID         int64
+	JobName       string
+	JobHTMLURL    string
+	JobStatus     string
+	JobConclusion string
+	WorkflowID    int64
+	WorkflowName  string
+	WorkflowPath  string
+	Event         string
+	Actor         string
+	HeadBranch    string
+	HeadSHA       string
+	Ref           string
+	Status        string
 }
 
 // Verify *Client satisfies ClientProvider at compile time.

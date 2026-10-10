@@ -1,0 +1,597 @@
+name: release-sign
+
+on:
+  workflow_run:
+    workflows: ["release-build"]
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: release-sign-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
+jobs:
+  authorize:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      startsWith(github.event.workflow_run.head_branch, 'v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    outputs:
+      tag: ${{ steps.authorize.outputs.tag }}
+      commit: ${{ steps.authorize.outputs.commit }}
+      source-run-id: ${{ steps.authorize.outputs.source-run-id }}
+      source-invocation: ${{ steps.authorize.outputs.source-invocation }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - id: authorize
+        name: Verify protected-branch release ancestry
+        env:
+          RELEASE_TAG: ${{ github.event.workflow_run.head_branch }}
+          RELEASE_COMMIT: ${{ github.event.workflow_run.head_sha }}
+          SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
+          SOURCE_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin \
+            "refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
+          tag_commit="$(git rev-list -n 1 "refs/tags/${RELEASE_TAG}")"
+          test "$tag_commit" = "$RELEASE_COMMIT"
+          git merge-base --is-ancestor "$RELEASE_COMMIT" "origin/${DEFAULT_BRANCH}"
+          printf 'tag=%s\n' "$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          printf 'commit=%s\n' "$RELEASE_COMMIT" >> "$GITHUB_OUTPUT"
+          printf 'source-run-id=%s\n' "$SOURCE_RUN_ID" >> "$GITHUB_OUTPUT"
+          printf 'source-invocation=%s/%s/actions/runs/%s/attempts/%s\n' \
+            "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" \
+            "$SOURCE_RUN_ID" "$SOURCE_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+
+  prepare-signing-request:
+    needs: authorize
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.authorize.outputs.commit }}
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download unsigned request from authorized source run
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: multirunner-update-signing-request
+          path: signing-request
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.authorize.outputs.source-run-id }}
+
+      - name: Verify unsigned request with authorized commit
+        run: |
+          set -euo pipefail
+          go run ./cmd/update-repository verify-prepared \
+            -request signing-request \
+            -version "${{ needs.authorize.outputs.tag }}" \
+            -commit "${{ needs.authorize.outputs.commit }}" \
+            -repository "$GITHUB_REPOSITORY" \
+            -workflow ".github/workflows/release-sign.yml" \
+            -builder-id "https://github.com/actions/runner" \
+            -invocation-id "${{ needs.authorize.outputs.source-invocation }}" \
+            -source-run-id "${{ needs.authorize.outputs.source-run-id }}"
+
+  sign:
+    needs: [authorize, prepare-signing-request]
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    environment: release-signing
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Download exact authorized signing request
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: multirunner-update-signing-request
+          path: signing-request
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.authorize.outputs.source-run-id }}
+
+      - name: Independently validate request before exposing keys
+        env:
+          AUTHORIZED_TAG: ${{ needs.authorize.outputs.tag }}
+          AUTHORIZED_COMMIT: ${{ needs.authorize.outputs.commit }}
+          AUTHORIZED_SOURCE_RUN_ID: ${{ needs.authorize.outputs.source-run-id }}
+          AUTHORIZED_SOURCE_INVOCATION: ${{ needs.authorize.outputs.source-invocation }}
+        run: |
+          set -euo pipefail
+          request=signing-request
+          manifest="$request/request.json"
+          payload="$request/payloads/targets.signed.json"
+          root="$request/root.json"
+
+          test -f "$manifest" -a -f "$payload" -a -f "$root" -a -f "$request/SHA256SUMS"
+          test -z "$(find "$request" -xdev ! -type d ! -type f -print -quit)"
+          test -z "$(find "$request" -xdev -type f -links +1 -print -quit)"
+          awk '
+            length($1) != 64 || $1 !~ /^[0-9a-f]+$/ || substr($0, 65, 2) != "  " { exit 1 }
+            {
+              path = substr($0, 67)
+              if (path == "" || path ~ /^\// || path ~ /(^|\/)\.\.(\/|$)/ || seen[path]++) exit 1
+            }
+          ' "$request/SHA256SUMS"
+          cut -c67- "$request/SHA256SUMS" | sort > "$RUNNER_TEMP/checksummed-files"
+          {
+            printf '%s\n' SHA256SUMS
+            find "$request" -type f -printf '%P\n' | grep -v '^SHA256SUMS$'
+          } | sort > "$RUNNER_TEMP/request-files"
+          cmp -s "$RUNNER_TEMP/checksummed-files" \
+            <(grep -v '^SHA256SUMS$' "$RUNNER_TEMP/request-files")
+          (cd "$request" && sha256sum -c SHA256SUMS)
+
+          test "$(jq -r '.schema' "$manifest")" = "multirunner.update-signing-request/v1"
+          test "$(jq -r '.repository' "$manifest")" = "$GITHUB_REPOSITORY"
+          test "$(jq -r '.release_tag' "$manifest")" = "$AUTHORIZED_TAG"
+          test "$(jq -r '.release_commit' "$manifest")" = "$AUTHORIZED_COMMIT"
+          test "$(jq -r '.source_run_id' "$manifest")" = "$AUTHORIZED_SOURCE_RUN_ID"
+          test "$(jq -r '.metadata_version' "$manifest")" = "$AUTHORIZED_SOURCE_RUN_ID"
+          test "$(jq -r '.workflow' "$manifest")" = ".github/workflows/release-sign.yml"
+          test "$(jq -r '.builder_id' "$manifest")" = "https://github.com/actions/runner"
+          test "$(jq -r '.invocation_id' "$manifest")" = "$AUTHORIZED_SOURCE_INVOCATION"
+
+          tag_ref="$(git ls-remote "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" \
+            "refs/tags/$AUTHORIZED_TAG" "refs/tags/$AUTHORIZED_TAG^{}")"
+          resolved="$(printf '%s\n' "$tag_ref" | awk '$2 ~ /\^\{\}$/ {print $1}')"
+          if [ -z "$resolved" ]; then
+            resolved="$(printf '%s\n' "$tag_ref" | awk 'NR == 1 {print $1}')"
+          fi
+          test "$resolved" = "$AUTHORIZED_COMMIT"
+
+          for document in "$manifest" "$payload" "$root"; do
+            test -z "$(jq --stream -c 'select(length == 2) | .[0]' "$document" |
+              sort | uniq -d | head -n 1)"
+          done
+          jq -cSj . "$payload" > "$RUNNER_TEMP/targets.canonical.json"
+          cmp -s "$payload" "$RUNNER_TEMP/targets.canonical.json"
+          test "$(sha256sum "$payload" | cut -d' ' -f1)" = \
+            "$(jq -r '.targets_payload_sha256' "$manifest")"
+          test "$(sha256sum "$root" | cut -d' ' -f1)" = \
+            "$(jq -r '.root_sha256' "$manifest")"
+          test "$(tr -d '\r\n' < "$request/evidence/console-tree.sha256")" = \
+            "$(jq -r '.embedded_console_sha256' "$manifest")"
+          test "$(jq -r '.release_tag' "$request/evidence/build-info.json")" = "$AUTHORIZED_TAG"
+          test "$(jq -r '.release_commit' "$request/evidence/build-info.json")" = "$AUTHORIZED_COMMIT"
+          test "$(jq -r '.source_run_id' "$request/evidence/build-info.json")" = \
+            "$AUTHORIZED_SOURCE_RUN_ID"
+          test "$(jq -r --arg commit "$AUTHORIZED_COMMIT" \
+            '[.artifacts[] | select(.vcs_revision == $commit)] | length' \
+            "$request/evidence/build-info.json")" = 6
+
+          printf '%s\n' \
+            linux/amd64 linux/arm64 windows/amd64 windows/arm64 \
+            darwin/amd64 darwin/arm64 | sort > "$RUNNER_TEMP/expected-platforms"
+          jq -r '.files[] | select(.kind == "executable") | "\(.os)/\(.arch)"' \
+            "$manifest" | sort > "$RUNNER_TEMP/actual-platforms"
+          cmp -s "$RUNNER_TEMP/expected-platforms" "$RUNNER_TEMP/actual-platforms"
+          for kind in executable sbom provenance; do
+            test "$(jq -r --arg kind "$kind" \
+              '[.files[] | select(.kind == $kind)] | length' "$manifest")" = 6
+          done
+          test "$(jq '[.files[] | select(.kind == "license")] | length' "$manifest")" = 2
+
+          find "$request/targets" -type f -printf '%P\n' |
+            sed 's#^#targets/#' | sort > "$RUNNER_TEMP/actual-target-files"
+          jq -r '.files[].path' "$manifest" | sort > "$RUNNER_TEMP/declared-target-files"
+          cmp -s "$RUNNER_TEMP/actual-target-files" "$RUNNER_TEMP/declared-target-files"
+          test "$(jq '.files | length' "$manifest")" = \
+            "$(jq '.targets | length' "$payload")"
+
+          while IFS=$'\t' read -r file target length digest kind os arch; do
+            test -f "$request/$file"
+            test "$(stat -c %s "$request/$file")" = "$length"
+            test "$(sha256sum "$request/$file" | cut -d' ' -f1)" = "$digest"
+            test "$(jq -r --arg target "$target" '.targets[$target].length' "$payload")" = "$length"
+            test "$(jq -r --arg target "$target" '.targets[$target].hashes.sha256' "$payload")" = "$digest"
+            test "$file" = "targets/${digest}.${target##*/}"
+            case "$kind" in
+              executable)
+                expected="multirunner_${AUTHORIZED_TAG}_${os}_${arch}"
+                [ "$os" = windows ] && expected="${expected}.exe"
+                test "$target" = "targets/$expected"
+                strings "$request/$file" | grep -Fq "vcs.revision=$AUTHORIZED_COMMIT"
+                test "$(jq -r --arg target "$target" '.targets[$target].custom.version' "$payload")" = \
+                  "$AUTHORIZED_TAG"
+                test "$(jq -r --arg target "$target" '.targets[$target].custom.commit' "$payload")" = \
+                  "$AUTHORIZED_COMMIT"
+                test "$(jq -r --arg target "$target" '.targets[$target].custom.os' "$payload")" = "$os"
+                test "$(jq -r --arg target "$target" '.targets[$target].custom.arch' "$payload")" = "$arch"
+                test "$(jq -r --arg target "$target" '.targets[$target].custom.api_version' "$payload")" = \
+                  "$(jq -r '.api_version' "$manifest")"
+                test "$(jq -r --arg target "$target" '.targets[$target].custom.schema_min' "$payload")" = \
+                  "$(jq -r '.schema_min' "$manifest")"
+                test "$(jq -r --arg target "$target" '.targets[$target].custom.schema_max' "$payload")" = \
+                  "$(jq -r '.schema_max' "$manifest")"
+                test "$(jq -r --arg target "$target" \
+                  '.targets[$target].custom.embedded_console_sha256' "$payload")" = \
+                  "$(jq -r '.embedded_console_sha256' "$manifest")"
+                test "$(jq -r --arg target "$target" \
+                  '.targets[$target].custom.provenance.repository' "$payload")" = "$GITHUB_REPOSITORY"
+                test "$(jq -r --arg target "$target" \
+                  '.targets[$target].custom.provenance.commit' "$payload")" = "$AUTHORIZED_COMMIT"
+                test "$(jq -r --arg target "$target" \
+                  '.targets[$target].custom.provenance.workflow' "$payload")" = \
+                  ".github/workflows/release-sign.yml"
+                test "$(jq -r --arg target "$target" \
+                  '.targets[$target].custom.provenance.builder_id' "$payload")" = \
+                  "https://github.com/actions/runner"
+                sbom_target="${target}.cdx.json"
+                provenance_target="${target}.provenance.json"
+                sbom_file="$(jq -r --arg target "$sbom_target" \
+                  '.files[] | select(.target_path == $target) | .path' "$manifest")"
+                provenance_file="$(jq -r --arg target "$provenance_target" \
+                  '.files[] | select(.target_path == $target) | .path' "$manifest")"
+                test "$(jq -r '.metadata.component.name' "$request/$sbom_file")" = "$expected"
+                test "$(jq -r '.metadata.component.version' "$request/$sbom_file")" = "$AUTHORIZED_TAG"
+                test "$(jq -r '.metadata.component.hashes[] |
+                  select(.alg == "SHA-256") | .content' "$request/$sbom_file")" = "$digest"
+                test "$(jq -r '.subject | length' "$request/$provenance_file")" = 1
+                test "$(jq -r '.subject[0].name' "$request/$provenance_file")" = "$expected"
+                test "$(jq -r '.subject[0].digest.sha256' "$request/$provenance_file")" = "$digest"
+                test "$(jq -r '.predicate.buildDefinition.resolvedDependencies[0].uri' \
+                  "$request/$provenance_file")" = "git+https://github.com/$GITHUB_REPOSITORY"
+                test "$(jq -r '.predicate.buildDefinition.resolvedDependencies[0].digest.gitCommit' \
+                  "$request/$provenance_file")" = "$AUTHORIZED_COMMIT"
+                test "$(jq -r '.predicate.runDetails.builder.id' \
+                  "$request/$provenance_file")" = "https://github.com/actions/runner"
+                test "$(jq -r '.predicate.runDetails.metadata.invocationId' \
+                  "$request/$provenance_file")" = "$AUTHORIZED_SOURCE_INVOCATION"
+                ;;
+              sbom) [[ "$target" == *.cdx.json ]] ;;
+              provenance) [[ "$target" == *.provenance.json ]] ;;
+              license)
+                test -z "$os$arch"
+                case "$target" in
+                  targets/LICENSE|targets/THIRD_PARTY_NOTICES.md) ;;
+                  *) exit 1 ;;
+                esac
+                ;;
+              *) exit 1 ;;
+            esac
+          done < <(jq -r '.files[] |
+            [.path,.target_path,.length,.sha256,.kind,.os,.arch] | @tsv' "$manifest")
+
+          root_expires="$(jq -r '.signed.expires' "$root")"
+          test "$(date -u -d "$root_expires" +%s)" -gt "$(date -u +%s)"
+          test "$(jq -r '.signed.consistent_snapshot' "$root")" = true
+          while IFS= read -r key_id; do
+            test "$(jq -cSj --arg key "$key_id" '.signed.keys[$key]' "$root" |
+              sha256sum | cut -d' ' -f1)" = "$key_id"
+          done < <(jq -r '.signed.keys | keys[]' "$root")
+          for role in timestamp snapshot targets; do
+            test "$(jq -r --arg role "$role" '.signed.roles[$role].threshold' "$root")" = 1
+            test "$(jq -r --arg role "$role" '
+              [.signed.roles[$role].keyids[] as $id |
+               select(.signed.keys[$id].keytype == "ed25519" and
+                      .signed.keys[$id].scheme == "ed25519" and
+                      (.signed.keys[$id].keyval.public | test("^[0-9a-f]{64}$")))] |
+              length' "$root")" = \
+              "$(jq -r --arg role "$role" '.signed.roles[$role].keyids | length' "$root")"
+          done
+          for role in root timestamp snapshot targets; do
+            jq -r --arg role "$role" '.signed.roles[$role].keyids[]' "$root" |
+              sort > "$RUNNER_TEMP/$role.keyids"
+            test -z "$(uniq -d "$RUNNER_TEMP/$role.keyids" | head -n 1)"
+          done
+
+          make_public_key() {
+            key_id="$1"
+            public_hex="$(jq -r --arg key "$key_id" '.signed.keys[$key].keyval.public' "$root")"
+            test "$(printf '%s' "$public_hex" | wc -c)" = 64
+            printf '302a300506032b6570032100%s' "$public_hex" |
+              xxd -r -p > "$RUNNER_TEMP/$key_id.der"
+            openssl pkey -pubin -inform DER -in "$RUNNER_TEMP/$key_id.der" \
+              -out "$RUNNER_TEMP/$key_id.pem"
+          }
+          jq -cSj '.signed' "$root" > "$RUNNER_TEMP/root.signed.json"
+          root_threshold="$(jq -r '.signed.roles.root.threshold' "$root")"
+          valid_root_signatures=0
+          : > "$RUNNER_TEMP/verified-root-keyids"
+          while IFS=$'\t' read -r key_id signature; do
+            jq -e --arg key "$key_id" '.signed.roles.root.keyids | index($key)' \
+              "$root" > /dev/null || continue
+            grep -Fxq "$key_id" "$RUNNER_TEMP/verified-root-keyids" && continue
+            make_public_key "$key_id"
+            printf '%s' "$signature" | xxd -r -p > "$RUNNER_TEMP/root.sig"
+            if openssl pkeyutl -verify -rawin -pubin \
+              -inkey "$RUNNER_TEMP/$key_id.pem" \
+              -in "$RUNNER_TEMP/root.signed.json" \
+              -sigfile "$RUNNER_TEMP/root.sig"; then
+              printf '%s\n' "$key_id" >> "$RUNNER_TEMP/verified-root-keyids"
+              valid_root_signatures=$((valid_root_signatures + 1))
+            fi
+          done < <(jq -r '.signatures[] | [.keyid,.sig] | @tsv' "$root")
+          test "$valid_root_signatures" -ge "$root_threshold"
+
+      # Secret migration: replace the former raw hexadecimal seed secrets with
+      # PKCS#8 PEM values named *_PRIVATE_KEY_PEM. Generate/import PEMs outside
+      # Actions, confirm their public keys are present in root.json, then remove
+      # the legacy MULTIRUNNER_TUF_*_PRIVATE_KEY secrets.
+      - name: Sign canonical TUF payloads with isolated PEM keys
+        env:
+          MULTIRUNNER_TUF_TIMESTAMP_PRIVATE_KEY_PEM: ${{ secrets.MULTIRUNNER_TUF_TIMESTAMP_PRIVATE_KEY_PEM }}
+          MULTIRUNNER_TUF_SNAPSHOT_PRIVATE_KEY_PEM: ${{ secrets.MULTIRUNNER_TUF_SNAPSHOT_PRIVATE_KEY_PEM }}
+          MULTIRUNNER_TUF_TARGETS_PRIVATE_KEY_PEM: ${{ secrets.MULTIRUNNER_TUF_TARGETS_PRIVATE_KEY_PEM }}
+        run: |
+          set -euo pipefail
+          umask 077
+          request=signing-request
+          manifest="$request/request.json"
+          root="$request/root.json"
+          output=signed-output
+          repository="$output/repository"
+          mkdir -p "$repository/targets"
+          keys=()
+          cleanup() {
+            if [ "${#keys[@]}" -gt 0 ]; then
+              rm -f -- "${keys[@]}"
+            fi
+          }
+          trap cleanup EXIT
+
+          write_key() {
+            role="$1"
+            value="$2"
+            test -n "$value"
+            key="$RUNNER_TEMP/$role.pkcs8.pem"
+            printf '%s\n' "$value" > "$key"
+            openssl pkey -in "$key" -noout -check
+            keys+=("$key")
+          }
+          write_key timestamp "$MULTIRUNNER_TUF_TIMESTAMP_PRIVATE_KEY_PEM"
+          write_key snapshot "$MULTIRUNNER_TUF_SNAPSHOT_PRIVATE_KEY_PEM"
+          write_key targets "$MULTIRUNNER_TUF_TARGETS_PRIVATE_KEY_PEM"
+          unset MULTIRUNNER_TUF_TIMESTAMP_PRIVATE_KEY_PEM
+          unset MULTIRUNNER_TUF_SNAPSHOT_PRIVATE_KEY_PEM
+          unset MULTIRUNNER_TUF_TARGETS_PRIVATE_KEY_PEM
+
+          role_key_id() {
+            role="$1"
+            key="$RUNNER_TEMP/$role.pkcs8.pem"
+            openssl pkey -in "$key" -pubout -outform DER |
+              tail -c 32 | od -An -tx1 -v | tr -d ' \n' > "$RUNNER_TEMP/$role.public.hex"
+            public_hex="$(cat "$RUNNER_TEMP/$role.public.hex")"
+            matches="$(jq -r --arg role "$role" --arg public "$public_hex" \
+              '.signed.roles[$role].keyids[] as $id |
+               select(.signed.keys[$id].keytype == "ed25519" and
+                      .signed.keys[$id].scheme == "ed25519" and
+                      .signed.keys[$id].keyval.public == $public) | $id' "$root")"
+            test "$(printf '%s\n' "$matches" | sed '/^$/d' | wc -l)" = 1
+            printf '%s' "$matches"
+          }
+
+          verify_signature() {
+            role="$1"
+            key_id="$2"
+            payload="$3"
+            signature="$4"
+            public_hex="$(jq -r --arg key "$key_id" '.signed.keys[$key].keyval.public' "$root")"
+            printf '302a300506032b6570032100%s' "$public_hex" |
+              xxd -r -p > "$RUNNER_TEMP/$role.public.der"
+            openssl pkey -pubin -inform DER -in "$RUNNER_TEMP/$role.public.der" \
+              -out "$RUNNER_TEMP/$role.public.pem"
+            openssl pkeyutl -verify -rawin -pubin \
+              -inkey "$RUNNER_TEMP/$role.public.pem" \
+              -in "$payload" -sigfile "$signature"
+          }
+
+          sign_envelope() {
+            role="$1"
+            payload="$2"
+            destination="$3"
+            key="$RUNNER_TEMP/$role.pkcs8.pem"
+            key_id="$(role_key_id "$role")"
+            signature="$RUNNER_TEMP/$role.sig"
+            openssl pkeyutl -sign -rawin -inkey "$key" \
+              -in "$payload" -out "$signature"
+            verify_signature "$role" "$key_id" "$payload" "$signature"
+            signature_hex="$(od -An -tx1 -v "$signature" | tr -d ' \n')"
+            jq -cSj -n --arg key "$key_id" --arg sig "$signature_hex" \
+              --slurpfile signed "$payload" \
+              '{signatures:[{keyid:$key,sig:$sig}],signed:$signed[0]}' > "$destination"
+          }
+
+          metadata_version="$(jq -r '.metadata_version' "$manifest")"
+          targets_payload="$request/payloads/targets.signed.json"
+          targets_metadata="$repository/$metadata_version.targets.json"
+          sign_envelope targets "$targets_payload" "$targets_metadata"
+
+          targets_length="$(stat -c %s "$targets_metadata")"
+          targets_sha256="$(sha256sum "$targets_metadata" | cut -d' ' -f1)"
+          jq -cSj -n \
+            --arg expires "$(jq -r '.snapshot_expires' "$manifest")" \
+            --argjson version "$metadata_version" \
+            --argjson length "$targets_length" \
+            --arg sha256 "$targets_sha256" \
+            '{_type:"snapshot",spec_version:"1.0.31",version:$version,
+              expires:$expires,meta:{"targets.json":{
+                version:$version,length:$length,hashes:{sha256:$sha256}}}}' \
+            > "$RUNNER_TEMP/snapshot.signed.json"
+          snapshot_metadata="$repository/$metadata_version.snapshot.json"
+          sign_envelope snapshot "$RUNNER_TEMP/snapshot.signed.json" "$snapshot_metadata"
+
+          snapshot_length="$(stat -c %s "$snapshot_metadata")"
+          snapshot_sha256="$(sha256sum "$snapshot_metadata" | cut -d' ' -f1)"
+          jq -cSj -n \
+            --arg expires "$(jq -r '.timestamp_expires' "$manifest")" \
+            --argjson version "$metadata_version" \
+            --argjson length "$snapshot_length" \
+            --arg sha256 "$snapshot_sha256" \
+            '{_type:"timestamp",spec_version:"1.0.31",version:$version,
+              expires:$expires,meta:{"snapshot.json":{
+                version:$version,length:$length,hashes:{sha256:$sha256}}}}' \
+            > "$RUNNER_TEMP/timestamp.signed.json"
+          sign_envelope timestamp "$RUNNER_TEMP/timestamp.signed.json" \
+            "$repository/timestamp.json"
+
+          root_version="$(jq -r '.signed.version' "$root")"
+          cp "$root" "$repository/$root_version.root.json"
+          cp -a "$request/targets/." "$repository/targets/"
+
+          test "$(jq -r '.signed.meta["snapshot.json"].length' \
+            "$repository/timestamp.json")" = "$(stat -c %s "$snapshot_metadata")"
+          test "$(jq -r '.signed.meta["snapshot.json"].hashes.sha256' \
+            "$repository/timestamp.json")" = \
+            "$(sha256sum "$snapshot_metadata" | cut -d' ' -f1)"
+          test "$(jq -r '.signed.meta["targets.json"].length' \
+            "$snapshot_metadata")" = "$(stat -c %s "$targets_metadata")"
+          test "$(jq -r '.signed.meta["targets.json"].hashes.sha256' \
+            "$snapshot_metadata")" = \
+            "$(sha256sum "$targets_metadata" | cut -d' ' -f1)"
+          while IFS=$'\t' read -r target length digest file; do
+            test "$(jq -r --arg target "$target" \
+              '.signed.targets[$target].length' "$targets_metadata")" = "$length"
+            test "$(jq -r --arg target "$target" \
+              '.signed.targets[$target].hashes.sha256' "$targets_metadata")" = "$digest"
+            test "$(stat -c %s "$request/$file")" = "$length"
+            test "$(sha256sum "$request/$file" | cut -d' ' -f1)" = "$digest"
+          done < <(jq -r '.files[] | [.target_path,.length,.sha256,.path] | @tsv' "$manifest")
+
+          cleanup
+          keys=()
+          (cd "$repository" && zip -Xqr "../multirunner_update_repository_${{ needs.authorize.outputs.tag }}.zip" .)
+
+      - name: Upload signed repository for no-key verification
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: multirunner-signed-update-repository
+          path: signed-output/**
+          if-no-files-found: error
+
+  verify-final:
+    needs: [authorize, sign]
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.authorize.outputs.commit }}
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download signed repository
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: multirunner-signed-update-repository
+          path: signed-output
+
+      - name: Download authorized signing request
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: multirunner-update-signing-request
+          path: signing-request
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.authorize.outputs.source-run-id }}
+
+      - name: Download immutable release binaries
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: multirunner-binaries
+          path: dist
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.authorize.outputs.source-run-id }}
+
+      - name: Verify signatures, links, provenance, and publication bytes
+        run: |
+          set -euo pipefail
+          verify_args=(
+            -request signing-request
+            -version "${{ needs.authorize.outputs.tag }}"
+            -commit "${{ needs.authorize.outputs.commit }}"
+            -repository "$GITHUB_REPOSITORY"
+            -workflow ".github/workflows/release-sign.yml"
+            -builder-id "https://github.com/actions/runner"
+            -invocation-id "${{ needs.authorize.outputs.source-invocation }}"
+            -source-run-id "${{ needs.authorize.outputs.source-run-id }}"
+          )
+          go run ./cmd/update-repository verify-final \
+            "${verify_args[@]}" \
+            -repository-dir signed-output/repository \
+            -dist dist
+          mkdir extracted-repository
+          unzip -q "signed-output/multirunner_update_repository_${{ needs.authorize.outputs.tag }}.zip" \
+            -d extracted-repository
+          go run ./cmd/update-repository verify-final \
+            "${verify_args[@]}" \
+            -repository-dir extracted-repository \
+            -dist dist
+
+      - name: Assemble verified publication artifact
+        run: |
+          set -euo pipefail
+          mkdir -p verified-publication/assets
+          cp -a dist/. verified-publication/assets/
+          cp "signed-output/multirunner_update_repository_${{ needs.authorize.outputs.tag }}.zip" \
+            verified-publication/assets/
+
+      - name: Upload verified publication artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: multirunner-verified-publication
+          path: verified-publication/**
+          if-no-files-found: error
+
+  publish:
+    needs: [authorize, verify-final]
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Download verified publication artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: multirunner-verified-publication
+          path: verified-publication
+
+      - name: Publish immutable GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.authorize.outputs.tag }}
+          RELEASE_COMMIT: ${{ needs.authorize.outputs.commit }}
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "release $RELEASE_TAG already exists; refusing to replace assets" >&2
+            exit 1
+          fi
+          gh release create "$RELEASE_TAG" verified-publication/assets/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$RELEASE_COMMIT" \
+            --verify-tag \
+            --generate-notes \
+            --notes "The signed update-repository archive contains threshold-verified TUF metadata, consistent-snapshot targets, CycloneDX SBOMs, and SLSA-style provenance. Verify the installed build identity with: multirunner --version"

@@ -17,8 +17,9 @@ type windowsSupervisedProcessGroup struct {
 	job windows.Handle
 }
 
-func prepareSupervisedProcess(cmd *exec.Cmd) {
+func prepareSupervisedProcess(cmd *exec.Cmd, _ *os.File) error {
 	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_NEW_PROCESS_GROUP}
+	return nil
 }
 
 func attachSupervisedProcess(cmd *exec.Cmd) (supervisedProcessGroup, error) {

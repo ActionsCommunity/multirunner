@@ -12,7 +12,9 @@ import (
 
 func TestPrepareSupervisedProcessCreatesNewProcessGroup(t *testing.T) {
 	cmd := exec.Command("cmd.exe")
-	prepareSupervisedProcess(cmd)
+	if err := prepareSupervisedProcess(cmd, nil); err != nil {
+		t.Fatal(err)
+	}
 	if cmd.SysProcAttr == nil {
 		t.Fatal("prepareSupervisedProcess did not set process attributes")
 	}

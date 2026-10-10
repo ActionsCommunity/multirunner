@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/bradleyfalzon/ghinstallation/v2"
-	"github.com/google/go-github/v66/github"
+	"github.com/google/go-github/v88/github"
 
 	"github.com/GerardSmit/multirunner/internal/config"
 	"github.com/GerardSmit/multirunner/internal/ghapp"
@@ -22,10 +22,11 @@ import (
 
 // Client talks to GitHub for a single configured scope.
 type Client struct {
-	gh    *github.Client
-	scope config.Scope
-	owner string // org name, repo owner, or enterprise slug
-	repo  string // only for repo scope
+	gh             *github.Client
+	downloadClient *http.Client
+	scope          config.Scope
+	owner          string // org name, repo owner, or enterprise slug
+	repo           string // only for repo scope
 }
 
 // JITConfigRequest is the input for generate-jitconfig.
@@ -53,15 +54,14 @@ func New(ctx context.Context, gh config.GitHub, auth config.Auth) (*Client, erro
 		return nil, err
 	}
 
-	var ghc *github.Client
-	if isDotCom(gh.URL) {
-		ghc = github.NewClient(httpClient)
-	} else {
+	clientOptions := []github.ClientOptionsFunc{github.WithHTTPClient(httpClient)}
+	if !isDotCom(gh.URL) {
 		// GHES: REST API lives under <url>/api/v3/.
-		ghc, err = github.NewClient(httpClient).WithEnterpriseURLs(gh.URL, gh.URL)
-		if err != nil {
-			return nil, fmt.Errorf("enterprise urls: %w", err)
-		}
+		clientOptions = append(clientOptions, github.WithEnterpriseURLs(gh.URL, gh.URL))
+	}
+	ghc, err := github.NewClient(clientOptions...)
+	if err != nil {
+		return nil, fmt.Errorf("github client: %w", err)
 	}
 
 	return &Client{gh: ghc, scope: gh.Scope, owner: gh.Owner, repo: gh.Repo}, nil
@@ -206,12 +206,12 @@ func (c *Client) GenerateJITConfig(ctx context.Context, in JITConfigRequest) (*J
 	if err != nil {
 		return nil, err
 	}
-	req, err := c.gh.NewRequest(http.MethodPost, path, body)
+	req, err := c.gh.NewRequest(ctx, http.MethodPost, path, body)
 	if err != nil {
 		return nil, fmt.Errorf("build jitconfig request: %w", err)
 	}
 	var out JITConfig
-	resp, err := c.gh.Do(ctx, req, &out)
+	resp, err := c.gh.Do(req, &out)
 	if err != nil {
 		return nil, fmt.Errorf("generate-jitconfig (%s): %w", c.scope, err)
 	}
@@ -228,14 +228,14 @@ func (c *Client) CreateRegistrationToken(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	req, err := c.gh.NewRequest(http.MethodPost, path, nil)
+	req, err := c.gh.NewRequest(ctx, http.MethodPost, path, nil)
 	if err != nil {
 		return "", fmt.Errorf("build registration-token request: %w", err)
 	}
 	var out struct {
 		Token string `json:"token"`
 	}
-	if _, err := c.gh.Do(ctx, req, &out); err != nil {
+	if _, err := c.gh.Do(req, &out); err != nil {
 		return "", fmt.Errorf("registration-token (%s): %w", c.scope, err)
 	}
 	return out.Token, nil
@@ -259,11 +259,11 @@ func (c *Client) DeleteRunner(ctx context.Context, runnerID int64) error {
 	if err != nil {
 		return err
 	}
-	req, err := c.gh.NewRequest(http.MethodDelete, path, nil)
+	req, err := c.gh.NewRequest(ctx, http.MethodDelete, path, nil)
 	if err != nil {
 		return fmt.Errorf("build delete-runner request: %w", err)
 	}
-	resp, err := c.gh.Do(ctx, req, nil)
+	resp, err := c.gh.Do(req, nil)
 	if err != nil {
 		if resp != nil && resp.StatusCode == http.StatusNotFound {
 			return fmt.Errorf("delete-runner %d: %w", runnerID, ErrRunnerNotFound)
@@ -280,12 +280,12 @@ func (c *Client) RunnerBusy(ctx context.Context, runnerID int64) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	req, err := c.gh.NewRequest(http.MethodGet, path, nil)
+	req, err := c.gh.NewRequest(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return false, fmt.Errorf("build get-runner request: %w", err)
 	}
 	var out github.Runner
-	resp, err := c.gh.Do(ctx, req, &out)
+	resp, err := c.gh.Do(req, &out)
 	if err != nil {
 		if resp != nil && resp.StatusCode == http.StatusNotFound {
 			return false, fmt.Errorf("get-runner %d: %w", runnerID, ErrRunnerNotFound)
@@ -355,33 +355,64 @@ func (c *Client) QueuedJobLabels(ctx context.Context) ([][]string, error) {
 }
 
 // ResolveQueuedJob enriches a workflow_job webhook event from the authoritative
-// workflow-run record before a privileged pool can authorize it.
-func (c *Client) ResolveQueuedJob(ctx context.Context, repository string, runID int64, labels []string) (QueuedJob, error) {
-	if runID <= 0 {
+// workflow-run record before a privileged pool can authorize it. Callers that
+// have full webhook identity can pass it as identity; the original repository,
+// run ID, and labels call form remains compatible.
+func (c *Client) ResolveQueuedJob(ctx context.Context, repository string, runID int64, labels []string, identity ...QueuedJob) (QueuedJob, error) {
+	job := QueuedJob{
+		Repository: repository,
+		RunID:      runID,
+		Labels:     append([]string(nil), labels...),
+	}
+	if len(identity) > 0 {
+		job = identity[0]
+		job.Repository = repository
+		job.RunID = runID
+		job.Labels = append([]string(nil), labels...)
+	}
+	if job.RunID <= 0 {
 		return QueuedJob{}, fmt.Errorf("workflow run id must be positive")
 	}
-	owner, repo, ok := strings.Cut(repository, "/")
+	owner, repo, ok := strings.Cut(job.Repository, "/")
 	if !ok || owner == "" || repo == "" {
 		return QueuedJob{}, fmt.Errorf("repository must be owner/repo")
 	}
-	run, _, err := c.gh.Actions.GetWorkflowRunByID(ctx, owner, repo, runID)
+	run, _, err := c.gh.Actions.GetWorkflowRunByID(ctx, owner, repo, job.RunID)
 	if err != nil {
-		return QueuedJob{}, fmt.Errorf("get workflow run %d: %w", runID, err)
+		return QueuedJob{}, fmt.Errorf("get workflow run %d: %w", job.RunID, err)
 	}
 	if run == nil {
-		return QueuedJob{}, fmt.Errorf("get workflow run %d returned no run", runID)
+		return QueuedJob{}, fmt.Errorf("get workflow run %d returned no run", job.RunID)
 	}
-	job := queuedJobMetadata(run)
-	if job.Actor == "" {
-		return QueuedJob{}, fmt.Errorf("workflow run %d has no triggering actor", runID)
+	resolved := queuedJobMetadata(run)
+	if resolved.Actor == "" {
+		return QueuedJob{}, fmt.Errorf("workflow run %d has no triggering actor", job.RunID)
 	}
-	if job.Status != "queued" && job.Status != "in_progress" {
-		return QueuedJob{}, fmt.Errorf("workflow run %d is not active: status %q", runID, job.Status)
+	if resolved.Status != "queued" && resolved.Status != "in_progress" {
+		return QueuedJob{}, fmt.Errorf("workflow run %d is not active: status %q", job.RunID, resolved.Status)
 	}
-	job.Client = c
-	job.Repository = repository
-	job.Labels = append([]string(nil), labels...)
-	return job, nil
+	resolved.Client = c
+	resolved.Repository = job.Repository
+	resolved.Labels = append([]string(nil), job.Labels...)
+	resolved.JobID = job.JobID
+	resolved.JobName = job.JobName
+	resolved.JobHTMLURL = job.JobHTMLURL
+	resolved.JobStatus = job.JobStatus
+	resolved.JobConclusion = job.JobConclusion
+	if job.RunAttempt > 0 {
+		resolved.RunAttempt = job.RunAttempt
+	}
+	if job.WorkflowName != "" {
+		resolved.WorkflowName = job.WorkflowName
+	}
+	if job.HeadBranch != "" {
+		resolved.HeadBranch = job.HeadBranch
+		resolved.Ref = job.HeadBranch
+	}
+	if job.HeadSHA != "" {
+		resolved.HeadSHA = job.HeadSHA
+	}
+	return resolved, nil
 }
 
 func (c *Client) queuedJobsForRun(ctx context.Context, run *github.WorkflowRun) ([]QueuedJob, error) {
@@ -403,6 +434,24 @@ func (c *Client) queuedJobsForRun(ctx context.Context, run *github.WorkflowRun) 
 			if job.GetStatus() == "queued" {
 				item := queuedJobMetadata(run)
 				item.Labels = append([]string(nil), job.Labels...)
+				item.JobID = job.GetID()
+				item.JobName = job.GetName()
+				item.JobHTMLURL = job.GetHTMLURL()
+				item.JobStatus = job.GetStatus()
+				item.JobConclusion = job.GetConclusion()
+				if attempt := int(job.GetRunAttempt()); attempt > 0 {
+					item.RunAttempt = attempt
+				}
+				if name := job.GetWorkflowName(); name != "" {
+					item.WorkflowName = name
+				}
+				if branch := job.GetHeadBranch(); branch != "" {
+					item.HeadBranch = branch
+					item.Ref = branch
+				}
+				if sha := job.GetHeadSHA(); sha != "" {
+					item.HeadSHA = sha
+				}
 				queued = append(queued, item)
 			}
 		}
@@ -420,9 +469,17 @@ func queuedJobMetadata(run *github.WorkflowRun) QueuedJob {
 		actor = triggering.GetLogin()
 	}
 	return QueuedJob{
+		RunID:        run.GetID(),
+		RunAttempt:   run.GetRunAttempt(),
+		RunNumber:    run.GetRunNumber(),
+		RunHTMLURL:   run.GetHTMLURL(),
+		WorkflowID:   run.GetWorkflowID(),
+		WorkflowName: run.GetName(),
 		WorkflowPath: run.GetPath(),
 		Event:        run.GetEvent(),
 		Actor:        actor,
+		HeadBranch:   run.GetHeadBranch(),
+		HeadSHA:      run.GetHeadSHA(),
 		Ref:          run.GetHeadBranch(),
 		Status:       run.GetStatus(),
 	}
@@ -440,11 +497,11 @@ func (c *Client) CheckRunnerAccess(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	req, err := c.gh.NewRequest(http.MethodGet, path+"?per_page=1", nil)
+	req, err := c.gh.NewRequest(ctx, http.MethodGet, path+"?per_page=1", nil)
 	if err != nil {
 		return fmt.Errorf("build list-runners request: %w", err)
 	}
-	resp, err := c.gh.Do(ctx, req, nil)
+	resp, err := c.gh.Do(req, nil)
 	if err == nil {
 		return nil
 	}

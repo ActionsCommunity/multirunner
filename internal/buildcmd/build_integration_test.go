@@ -11,6 +11,14 @@ import (
 )
 
 func TestBuildInjectsIdentityIntoRealCLI(t *testing.T) {
+	repository := filepath.Join("..", "..")
+	commitOutput, err := commandOutput(
+		context.Background(), repository, "git", "rev-parse", "HEAD",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commit := strings.TrimSpace(string(commitOutput))
 	outputDir := filepath.Join(t.TempDir(), "output with spaces")
 	if err := os.MkdirAll(outputDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -21,10 +29,10 @@ func TestBuildInjectsIdentityIntoRealCLI(t *testing.T) {
 	}
 	const version = "v9.8.7-integration"
 	if err := Build(context.Background(), Options{
-		Directory:  filepath.Join("..", ".."),
+		Directory:  repository,
 		Output:     binary,
 		Version:    version,
-		Commit:     testCommit,
+		Commit:     commit,
 		GOOS:       runtime.GOOS,
 		GOARCH:     runtime.GOARCH,
 		AllowDirty: true,
@@ -36,7 +44,7 @@ func TestBuildInjectsIdentityIntoRealCLI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("execute real CLI: %v\n%s", err, output)
 	}
-	want := "multirunner version " + version + " (commit " + testCommit + ")"
+	want := "multirunner version " + version + " (commit " + commit + ")"
 	if strings.TrimSpace(string(output)) != want {
 		t.Fatalf("--version output = %q, want %q", output, want)
 	}

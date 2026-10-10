@@ -2,13 +2,16 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	imageversions "github.com/GerardSmit/multirunner/images"
@@ -59,6 +62,8 @@ type Config struct {
 	GitCache     GitCache     `yaml:"git_cache"`
 	Webhook      Webhook      `yaml:"webhook"`
 	Metrics      Metrics      `yaml:"metrics"`
+	History      History      `yaml:"history"`
+	Updates      Updates      `yaml:"updates"`
 	Pools        []Pool       `yaml:"pools"`
 	Log          Log          `yaml:"log"`
 }
@@ -74,6 +79,67 @@ type Webhook struct {
 // Metrics configures the Prometheus metrics + health endpoint.
 type Metrics struct {
 	Listen string `yaml:"listen"` // empty disables it
+}
+
+const MinHistorySyncIntervalSec = 30
+
+// History configures the optional local workflow and runner history store.
+type History struct {
+	Enabled           bool              `yaml:"enabled"`
+	DatabasePath      string            `yaml:"database"`
+	Listen            string            `yaml:"listen"`
+	SyncIntervalSec   int               `yaml:"sync_interval_sec"`
+	Backfill          string            `yaml:"backfill"` // all_available | none
+	RetentionDays     int               `yaml:"retention_days"`
+	LegacyPrefixes    []string          `yaml:"legacy_runner_prefixes"`
+	Notifications     Notifications     `yaml:"notifications"`
+	OperationsConsole OperationsConsole `yaml:"operations_console"`
+}
+
+// OperationsConsole configures privileged local operator capabilities. Every
+// capability defaults to disabled and must be deliberately enabled.
+type OperationsConsole struct {
+	Capabilities OperationsConsoleCapabilities `yaml:"capabilities"`
+}
+
+// OperationsConsoleCapabilities gates each privileged command family.
+type OperationsConsoleCapabilities struct {
+	PoolPauseResume bool `yaml:"pool_pause_resume"`
+	PoolDrain       bool `yaml:"pool_drain"`
+	RunnerTerminate bool `yaml:"runner_terminate"`
+	RunnerRecycle   bool `yaml:"runner_recycle"`
+	HistorySync     bool `yaml:"history_sync"`
+	SupportBundles  bool `yaml:"support_bundles"`
+	BackupCreate    bool `yaml:"backup_create"`
+	RestoreStage    bool `yaml:"restore_stage"`
+	UpdateStage     bool `yaml:"update_stage"`
+	UpdateApply     bool `yaml:"update_apply"`
+}
+
+// Updates configures signed release inspection and staging. Application is
+// always operator-triggered and remains disabled without TrustedRootPath.
+type Updates struct {
+	MetadataURL       string   `yaml:"metadata_url"`
+	TrustedRootPath   string   `yaml:"trusted_root"`
+	AllowedTargetKeys []string `yaml:"allowed_target_key_ids"`
+	RevokedKeys       []string `yaml:"revoked_key_ids"`
+	Repository        string   `yaml:"repository"`
+	Workflow          string   `yaml:"workflow"`
+	BuilderID         string   `yaml:"builder_id"`
+	CheckEnabled      bool     `yaml:"check_enabled"`
+}
+
+// Notifications configures the fixed local AiText bridge and signed HTTPS alert receivers.
+type Notifications struct {
+	AiTextURL string                `yaml:"aitext_url"`
+	Webhooks  []NotificationWebhook `yaml:"webhooks"`
+}
+
+// NotificationWebhook is one signed HTTPS alert receiver.
+type NotificationWebhook struct {
+	Name   string `yaml:"name"`
+	URL    string `yaml:"url"`
+	Secret string `yaml:"secret"`
 }
 
 // GitCache configures the host-resident bare-mirror git cache.
@@ -373,6 +439,7 @@ func (p Pool) ImageRef() string {
 // localImageTierPattern is Docker's grammar for one repository path component,
 // which is where an unpublished tier ends up in the local :dev reference.
 var localImageTierPattern = regexp.MustCompile(`^[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*$`)
+var updateKeyIDPattern = regexp.MustCompile(`\A[0-9a-fA-F]{64}\z`)
 
 // maxLocalImageTierLength keeps the generated local reference well inside
 // Docker's 255-character limit for the full repository name.
@@ -510,6 +577,26 @@ func (c *Config) resolveSecrets() {
 	c.Auth.TokenPath = expandEnvRef(c.Auth.TokenPath)
 	c.Webhook.Secret = expandEnvRef(c.Webhook.Secret)
 	c.Cache.AccessToken = expandEnvRef(c.Cache.AccessToken)
+	for index := range c.History.Notifications.Webhooks {
+		c.History.Notifications.Webhooks[index].Secret =
+			expandEnvRef(c.History.Notifications.Webhooks[index].Secret)
+	}
+}
+
+// SecretValues returns configured secret material that must be masked from
+// logs, diagnostics, and transient operator output.
+func (c *Config) SecretValues() []string {
+	values := []string{c.Auth.PAT, c.Webhook.Secret, c.Cache.AccessToken}
+	for _, webhook := range c.History.Notifications.Webhooks {
+		values = append(values, webhook.Secret)
+	}
+	secrets := values[:0]
+	for _, value := range values {
+		if value != "" {
+			secrets = append(secrets, value)
+		}
+	}
+	return secrets
 }
 
 // expandEnvRef resolves a value of the form "${NAME}" or "$NAME" to the named
@@ -570,6 +657,15 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Log.Format == "" {
 		c.Log.Format = "text"
+	}
+	if c.History.SyncIntervalSec == 0 {
+		c.History.SyncIntervalSec = 300
+	}
+	if c.History.Backfill == "" {
+		c.History.Backfill = "all_available"
+	}
+	if c.History.RetentionDays == 0 {
+		c.History.RetentionDays = -1
 	}
 	if c.Cache.Enabled {
 		if c.Cache.Mode == "" {
@@ -649,6 +745,105 @@ func (c *Config) Warnings() []string {
 
 // Validate checks required fields and cross-field consistency.
 func (c *Config) Validate() error {
+	if strings.TrimSpace(c.Webhook.Listen) != "" &&
+		strings.TrimSpace(c.Webhook.Secret) == "" {
+		return errors.New("webhook.secret is required when webhook.listen is configured")
+	}
+	if c.History.Enabled {
+		if strings.TrimSpace(c.History.DatabasePath) == "" {
+			return fmt.Errorf("history.database is required when history is enabled")
+		}
+		if err := validateLoopbackListen(c.History.Listen); err != nil {
+			return fmt.Errorf("history.listen: %w", err)
+		}
+		if c.History.SyncIntervalSec < MinHistorySyncIntervalSec {
+			return fmt.Errorf("history.sync_interval_sec must be >= %d", MinHistorySyncIntervalSec)
+		}
+		if c.History.Backfill != "all_available" && c.History.Backfill != "none" {
+			return fmt.Errorf("history.backfill must be all_available|none, got %q", c.History.Backfill)
+		}
+		if c.History.RetentionDays != -1 && c.History.RetentionDays < 1 {
+			return fmt.Errorf("history.retention_days must be -1 or a positive number")
+		}
+		seenPrefixes := make(map[string]struct{}, len(c.History.LegacyPrefixes))
+		for i, prefix := range c.History.LegacyPrefixes {
+			if prefix == "" || strings.TrimSpace(prefix) != prefix {
+				return fmt.Errorf("history.legacy_runner_prefixes[%d] must be non-empty and have no surrounding whitespace", i)
+			}
+			key := strings.ToLower(prefix)
+			if _, exists := seenPrefixes[key]; exists {
+				return fmt.Errorf("history.legacy_runner_prefixes contains duplicate prefix %q", prefix)
+			}
+			seenPrefixes[key] = struct{}{}
+		}
+		if c.History.Notifications.AiTextURL != "" {
+			endpoint, err := url.Parse(c.History.Notifications.AiTextURL)
+			if err != nil || endpoint.Host == "" || endpoint.User != nil ||
+				(endpoint.Scheme != "http" && endpoint.Scheme != "https") {
+				return errors.New("history.notifications.aitext_url must be an absolute HTTP(S) URL without user info")
+			}
+			host := endpoint.Hostname()
+			ip := net.ParseIP(host)
+			if !strings.EqualFold(host, "localhost") && (ip == nil || !ip.IsLoopback()) {
+				return errors.New("history.notifications.aitext_url must use a fixed loopback host")
+			}
+		}
+		seenEndpoints := make(map[string]struct{}, len(c.History.Notifications.Webhooks))
+		for index, webhook := range c.History.Notifications.Webhooks {
+			name := strings.TrimSpace(webhook.Name)
+			if name == "" || name != webhook.Name {
+				return fmt.Errorf("history.notifications.webhooks[%d].name must be non-empty and trimmed", index)
+			}
+			key := strings.ToLower(name)
+			if _, exists := seenEndpoints[key]; exists {
+				return fmt.Errorf("history.notifications.webhooks contains duplicate name %q", name)
+			}
+			seenEndpoints[key] = struct{}{}
+			endpoint, err := url.Parse(webhook.URL)
+			if err != nil || endpoint.Scheme != "https" || endpoint.Host == "" ||
+				endpoint.User != nil {
+				return fmt.Errorf("history.notifications.webhooks[%d].url must be an absolute HTTPS URL without user info", index)
+			}
+			if strings.TrimSpace(webhook.Secret) == "" {
+				return fmt.Errorf("history.notifications.webhooks[%d].secret is required", index)
+			}
+		}
+	}
+	if c.Updates.MetadataURL != "" {
+		endpoint, err := url.Parse(c.Updates.MetadataURL)
+		if err != nil || endpoint.Scheme != "https" || endpoint.Host == "" ||
+			endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" {
+			return errors.New("updates.metadata_url must be an HTTPS directory without credentials, query, or fragment")
+		}
+	}
+	if c.Updates.TrustedRootPath != "" {
+		if c.Updates.MetadataURL == "" {
+			return errors.New("updates.metadata_url is required when updates.trusted_root is configured")
+		}
+		if len(c.Updates.AllowedTargetKeys) == 0 ||
+			strings.TrimSpace(c.Updates.Repository) == "" ||
+			strings.TrimSpace(c.Updates.Workflow) == "" ||
+			strings.TrimSpace(c.Updates.BuilderID) == "" {
+			return errors.New("updates signing identity and provenance policy are required with a trusted root")
+		}
+	}
+	seenUpdateKeys := map[string]string{}
+	for field, values := range map[string][]string{
+		"allowed_target_key_ids": c.Updates.AllowedTargetKeys,
+		"revoked_key_ids":        c.Updates.RevokedKeys,
+	} {
+		for index, keyID := range values {
+			if !updateKeyIDPattern.MatchString(keyID) {
+				return fmt.Errorf("updates.%s[%d] must be a SHA-256 key ID", field, index)
+			}
+			normalized := strings.ToLower(keyID)
+			if prior, exists := seenUpdateKeys[normalized]; exists {
+				return fmt.Errorf("updates key %q appears in both %s and %s", keyID, prior, field)
+			}
+			seenUpdateKeys[normalized] = field
+		}
+	}
+
 	switch c.GitHub.Scope {
 	case ScopeRepo:
 		if c.GitHub.Owner == "" || c.GitHub.Repo == "" {
@@ -880,6 +1075,24 @@ func (c *Config) Validate() error {
 			}
 			seen[p.ScaleSet] = p.Name
 		}
+	}
+	return nil
+}
+
+func validateLoopbackListen(listen string) error {
+	host, port, err := net.SplitHostPort(listen)
+	if err != nil {
+		return fmt.Errorf("must be a loopback host:port: %w", err)
+	}
+	if !strings.EqualFold(host, "localhost") {
+		ip := net.ParseIP(host)
+		if ip == nil || !ip.IsLoopback() {
+			return fmt.Errorf("must use a loopback address")
+		}
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil || n < 1 || n > 65535 {
+		return fmt.Errorf("port must be between 1 and 65535")
 	}
 	return nil
 }

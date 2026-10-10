@@ -210,7 +210,13 @@ func TestAwaitInstallationNonInteractiveDoesNotWait(t *testing.T) {
 	}
 	// The fail-fast install URL is then surfaced by selectInstallation.
 	p := newPrompt(failingReader{t}, &bytes.Buffer{})
-	if _, err := selectInstallation(got, "acme", "https://github.com", ghapp.DefaultAppSlug, true, p, false); err == nil || !strings.Contains(err.Error(), "installations/new") {
+	if _, err := selectInstallation(got, installationSelectionOptions{
+		Owner:               "acme",
+		BaseURL:             "https://github.com",
+		AppSlug:             ghapp.DefaultAppSlug,
+		RequireOrganization: true,
+		Prompt:              p,
+	}); err == nil || !strings.Contains(err.Error(), "installations/new") {
 		t.Fatalf("want fail-fast install URL, got %v", err)
 	}
 }

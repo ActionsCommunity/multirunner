@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Workflow runs</title>
+  <link rel="stylesheet" href="/assets/style.css">
+  <script src="/assets/app.js" defer></script>
+</head>
+<body>
+<header><strong>Multirunner history</strong><nav><a href="/">Overview</a><a href="/runs">Runs</a></nav></header>
+<main>
+  <h1>Workflow runs</h1>
+  <form method="get" action="/runs">
+    <label>Repository <input name="repository" value="{{.Filter.Repository}}" placeholder="owner/repository"></label>
+    <label>Status
+      <select name="status">
+        <option value="">Any</option>
+        {{range .Statuses}}<option value="{{.}}" {{if eq $.Filter.Status .}}selected{{end}}>{{.}}</option>{{end}}
+      </select>
+    </label>
+    <label>Page size <input name="page_size" type="number" min="1" max="{{.MaxPageSize}}" value="{{.Pagination.PageSize}}"></label>
+    <button type="submit">Filter</button>
+  </form>
+  {{if .Error}}<div class="state error">{{.Error}}</div>{{end}}
+  {{if .Runs}}
+  <div class="table-wrap"><table>
+    <thead><tr><th>Repository</th><th>Workflow</th><th>State</th><th>Branch / SHA</th><th>Actor</th><th>Created</th></tr></thead>
+    <tbody>{{range .Runs}}<tr>
+      <td>{{.Repository}}</td>
+      <td><a href="{{runPath .Repository .ID}}">{{displayRun .}}</a>{{with safeGitHubURL .HTMLURL}} · <a href="{{.}}" rel="noreferrer">GitHub</a>{{end}}</td>
+      <td><span class="badge {{stateClass .Status .Conclusion}}">{{stateText .Status .Conclusion}}</span></td>
+      <td>{{.HeadBranch}} {{shortSHA .HeadSHA}}</td>
+      <td>{{.Actor}}</td>
+      <td>{{timeTag .CreatedAt}}</td>
+    </tr>{{end}}</tbody>
+  </table></div>
+  {{else if not .Error}}<div class="state">No runs match these filters.</div>{{end}}
+  <div class="pager">
+    <span>{{if .Pagination.HasPrevious}}<a href="{{pageURL .Filter .Pagination.PageSize .PreviousPage}}">Previous</a>{{end}}</span>
+    <span>Page {{.Pagination.Page}}</span>
+    <span>{{if .Pagination.HasNext}}<a href="{{pageURL .Filter .Pagination.PageSize .NextPage}}">Next</a>{{end}}</span>
+  </div>
+</main>
+</body></html>

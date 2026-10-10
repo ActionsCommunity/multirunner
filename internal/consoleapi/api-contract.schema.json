@@ -1,0 +1,430 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://multirunner.local/schemas/console-api-v1.json",
+  "title": "Multirunner Operations Console API v1",
+  "type": "object",
+  "$defs": {
+    "fieldViolation": {
+      "type": "object",
+      "required": ["field", "message"],
+      "properties": {
+        "field": { "type": "string" },
+        "message": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "error": {
+      "type": "object",
+      "required": ["code", "message", "correlation_id", "field_violations", "retry"],
+      "properties": {
+        "code": { "type": "string" },
+        "message": { "type": "string" },
+        "correlation_id": { "type": "string" },
+        "field_violations": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/fieldViolation" }
+        },
+        "retry": { "type": ["object", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "collection": {
+      "type": "object",
+      "required": ["items", "applied_filters", "cursor", "next_cursor", "count"],
+      "properties": {
+        "items": { "type": "array" },
+        "applied_filters": { "type": "object" },
+        "cursor": { "type": "string" },
+        "next_cursor": { "type": "string" },
+        "count": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": true
+    },
+    "system": {
+      "type": "object",
+      "required": ["status", "mode", "listen", "database", "started_at", "app_version", "api_version", "configuration"],
+      "properties": {
+        "status": { "type": "string" },
+        "mode": { "const": "local" },
+        "listen": { "type": "string" },
+        "database": { "type": "string" },
+        "started_at": { "type": "string", "format": "date-time" },
+        "app_version": { "type": "string" },
+        "api_version": { "const": "v1" },
+        "configuration": { "const": "read_only" }
+      },
+      "additionalProperties": true
+    },
+    "session": {
+      "type": "object",
+      "required": ["actor_id", "csrf_token"],
+      "properties": {
+        "actor_id": { "type": "string" },
+        "csrf_token": { "type": "string" },
+        "issued_at": { "type": "string", "format": "date-time" },
+        "paired_at": { "type": "string", "format": "date-time" },
+        "revocation_generation": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": true
+    },
+    "host": {
+      "type": "object",
+      "required": ["id", "epoch", "status", "mode", "app_version"],
+      "properties": {
+        "id": { "type": "string" },
+        "epoch": { "type": "string" },
+        "status": { "type": "string" },
+        "mode": { "const": "local" },
+        "app_version": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "namedResource": {
+      "type": "object",
+      "required": ["name", "count"],
+      "properties": {
+        "name": { "type": "string" },
+        "count": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "event": {
+      "type": "object",
+      "required": ["id", "host_id", "host_epoch", "sequence", "type", "timestamp"],
+      "properties": {
+        "id": { "type": "string" },
+        "host_id": { "type": "string" },
+        "host_epoch": { "type": "string" },
+        "sequence": { "type": "integer", "minimum": 1 },
+        "type": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "additionalProperties": true
+    },
+    "snapshot": {
+      "type": "object",
+      "required": ["host_epoch", "last_sequence", "generated_at", "runners"],
+      "properties": {
+        "host_epoch": { "type": "string" },
+        "last_sequence": { "type": "integer", "minimum": 0 },
+        "generated_at": { "type": "string", "format": "date-time" },
+        "runners": { "type": "array" }
+      },
+      "additionalProperties": true
+    },
+    "commandRequest": {
+      "type": "object",
+      "required": ["type", "target_type", "target_id", "parameters", "reason", "confirmation"],
+      "properties": {
+        "type": { "type": "string" },
+        "target_type": { "type": "string" },
+        "target_id": { "type": "string" },
+        "parameters": {},
+        "reason": { "type": "string", "maxLength": 500 },
+        "confirmation": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "commandPlan": {
+      "type": "object",
+      "required": ["conflict_domain", "reason_required", "impact"],
+      "properties": {
+        "conflict_domain": { "type": "string" },
+        "confirmation_phrase": { "type": "string" },
+        "reason_required": { "type": "boolean" },
+        "impact": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "command": {
+      "type": "object",
+      "required": ["id", "type", "target_type", "target_id", "state"],
+      "properties": {
+        "id": { "type": "string" },
+        "type": { "type": "string" },
+        "target_type": { "type": "string" },
+        "target_id": { "type": "string" },
+        "state": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "diagnosticReport": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "configurationSnapshot": {
+      "type": "object",
+      "required": ["source_file", "drifted", "fields", "raw_redacted", "normalized_redacted"],
+      "properties": {
+        "source_file": { "type": "string" },
+        "drifted": { "type": "boolean" },
+        "fields": { "type": "array" },
+        "raw_redacted": { "type": "string" },
+        "normalized_redacted": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "searchResult": {
+      "type": "object",
+      "required": ["entity_type", "entity_key", "title", "context", "timestamp", "state", "route"],
+      "properties": {
+        "entity_type": { "type": "string" },
+        "entity_key": { "type": "string" },
+        "repository": { "type": "string" },
+        "title": { "type": "string" },
+        "context": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "state": { "type": "string" },
+        "route": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "runnerState": {
+      "type": "object",
+      "required": ["id", "host_id", "host_epoch", "pool", "status", "sequence", "updated_at"],
+      "properties": {
+        "id": { "type": "string" },
+        "host_id": { "type": "string" },
+        "host_epoch": { "type": "string" },
+        "pool": { "type": "string" },
+        "status": { "type": "string" },
+        "sequence": { "type": "integer", "minimum": 0 },
+        "updated_at": { "type": "string", "format": "date-time" }
+      },
+      "additionalProperties": true
+    },
+    "runnerSession": {
+      "type": "object",
+      "required": ["id", "runner_name", "pool_name", "target", "status", "started_at"],
+      "properties": {
+        "id": { "type": "string" },
+        "runner_name": { "type": "string" },
+        "pool_name": { "type": "string" },
+        "target": { "type": "string" },
+        "status": { "type": "string" },
+        "started_at": { "type": "string", "format": "date-time" }
+      },
+      "additionalProperties": true
+    },
+    "runInspection": {
+      "type": "object",
+      "required": ["run", "jobs", "runner_sessions"],
+      "properties": {
+        "run": { "type": "object" },
+        "jobs": { "type": "array" },
+        "runner_sessions": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/runnerSession" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "analyticsReport": {
+      "type": "object",
+      "required": ["generated_at", "group_by", "since", "until", "rows"],
+      "properties": {
+        "generated_at": { "type": "string", "format": "date-time" },
+        "group_by": { "type": "string" },
+        "since": { "type": "string", "format": "date-time" },
+        "until": { "type": "string", "format": "date-time" },
+        "rows": { "type": "array" }
+      },
+      "additionalProperties": false
+    },
+    "savedView": {
+      "type": "object",
+      "required": ["id", "name"],
+      "properties": {
+        "id": { "type": ["string", "integer"] },
+        "name": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "exportMetadata": {
+      "type": "object",
+      "required": ["id", "created_at", "expires_at", "file_name", "size", "sha256", "record_count", "download_url"],
+      "properties": {
+        "id": { "type": "string" },
+        "created_at": { "type": "string", "format": "date-time" },
+        "expires_at": { "type": "string", "format": "date-time" },
+        "file_name": { "type": "string" },
+        "size": { "type": "integer", "minimum": 0 },
+        "sha256": { "type": "string" },
+        "record_count": { "type": "integer", "minimum": 0 },
+        "download_url": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "alert": {
+      "type": "object",
+      "required": ["id", "state"],
+      "properties": {
+        "id": { "type": "string" },
+        "state": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "annotation": {
+      "type": "object",
+      "required": ["id", "alert_id", "body", "created_at", "created_by", "correlation_id"],
+      "properties": {
+        "id": { "type": "string" },
+        "alert_id": { "type": "string" },
+        "body": { "type": "string" },
+        "created_at": { "type": "string", "format": "date-time" },
+        "created_by": { "type": "string" },
+        "correlation_id": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "auditRecord": {
+      "type": "object",
+      "required": ["id", "source", "occurred_at", "actor_kind", "actor_id", "action", "target_type", "target_id", "correlation_id"],
+      "properties": {
+        "id": { "type": "string" },
+        "source": { "type": "string" },
+        "occurred_at": { "type": "string", "format": "date-time" },
+        "actor_kind": { "type": "string" },
+        "actor_id": { "type": "string" },
+        "action": { "type": "string" },
+        "target_type": { "type": "string" },
+        "target_id": { "type": "string" },
+        "correlation_id": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "backupMetadata": {
+      "type": "object",
+      "required": ["id", "command_id", "purpose", "state", "created_at", "expires_at"],
+      "properties": {
+        "id": { "type": "string" },
+        "command_id": { "type": "string" },
+        "purpose": { "type": "string" },
+        "state": { "type": "string" },
+        "created_at": { "type": "string", "format": "date-time" },
+        "expires_at": { "type": "string", "format": "date-time" }
+      },
+      "additionalProperties": true
+    },
+    "restoreMetadata": {
+      "type": "object",
+      "required": ["id", "command_id", "backup_id", "state", "created_at", "updated_at", "host_id", "schema_version", "size_bytes", "sha256"],
+      "properties": {
+        "id": { "type": "string" },
+        "command_id": { "type": "string" },
+        "backup_id": { "type": "string" },
+        "state": { "type": "string" },
+        "created_at": { "type": "string", "format": "date-time" },
+        "updated_at": { "type": "string", "format": "date-time" },
+        "host_id": { "type": "string" },
+        "schema_version": { "type": "integer", "minimum": 0 },
+        "size_bytes": { "type": "integer", "minimum": 0 },
+        "sha256": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "updateMetadata": {
+      "type": "object",
+      "required": ["id", "command_id", "state", "created_at", "updated_at", "version", "commit", "host_id", "target_path", "size_bytes", "sha256", "schema_min", "schema_max", "api_version"],
+      "properties": {
+        "id": { "type": "string" },
+        "command_id": { "type": "string" },
+        "state": { "type": "string" },
+        "created_at": { "type": "string", "format": "date-time" },
+        "updated_at": { "type": "string", "format": "date-time" },
+        "version": { "type": "string" },
+        "commit": { "type": "string" },
+        "host_id": { "type": "string" },
+        "target_path": { "type": "string" },
+        "size_bytes": { "type": "integer", "minimum": 0 },
+        "sha256": { "type": "string" },
+        "schema_min": { "type": "integer", "minimum": 0 },
+        "schema_max": { "type": "integer", "minimum": 0 },
+        "api_version": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "updateInspection": {
+      "type": "object",
+      "required": ["checked_at", "trust_configured", "verified", "metadata_consistent", "compatible", "apply_allowed"],
+      "properties": {
+        "checked_at": { "type": "string", "format": "date-time" },
+        "trust_configured": { "type": "boolean" },
+        "verified": { "type": "boolean" },
+        "metadata_consistent": { "type": "boolean" },
+        "compatible": { "type": "boolean" },
+        "apply_allowed": { "type": "boolean" },
+        "reason": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "opaqueResource": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  "x-resource-groups": [
+    "system", "hosts", "pools", "runners", "sessions", "runs", "jobs",
+    "repositories", "workflows", "search", "analytics", "events", "commands",
+    "alerts", "incidents", "configuration", "backups", "restores", "updates",
+    "diagnostics", "support-bundles", "saved-views", "exports", "annotations",
+    "tags", "audit"
+  ],
+  "x-routes": [
+    { "method": "GET", "path": "/api/v1/system", "response": "#/$defs/system" },
+    { "method": "GET", "path": "/api/v1/session", "response": "#/$defs/session" },
+    { "method": "GET", "path": "/api/v1/hosts", "response": "#/$defs/collection", "item": "#/$defs/host" },
+    { "method": "GET", "path": "/api/v1/events", "response_media_type": "text/event-stream", "item": "#/$defs/event" },
+    { "method": "GET", "path": "/api/v1/events/query", "response": "#/$defs/collection", "item": "#/$defs/event" },
+    { "method": "GET", "path": "/api/v1/events/snapshot", "response": "#/$defs/snapshot" },
+    { "method": "GET", "path": "/api/v1/runners", "response": "#/$defs/collection", "item": "#/$defs/runnerState" },
+    { "method": "POST", "path": "/api/v1/commands/preview", "request": "#/$defs/commandRequest", "response": "#/$defs/commandPlan" },
+    { "method": "POST", "path": "/api/v1/commands", "request": "#/$defs/commandRequest", "response": "#/$defs/command" },
+    { "method": "GET", "path": "/api/v1/commands/{id}", "response": "#/$defs/command" },
+    { "method": "GET", "path": "/api/v1/diagnostics", "response": "#/$defs/diagnosticReport" },
+    { "method": "GET", "path": "/api/v1/configuration", "response": "#/$defs/configurationSnapshot" },
+    { "method": "GET", "path": "/api/v1/support-bundles/{id}", "response_media_type": "application/zip" },
+    { "method": "GET", "path": "/api/v1/search", "response": "#/$defs/collection", "item": "#/$defs/searchResult" },
+    { "method": "GET", "path": "/api/v1/runs/{id}", "response": "#/$defs/runInspection" },
+    { "method": "GET", "path": "/api/v1/jobs/{id}/log", "response_media_type": "text/plain" },
+    { "method": "GET", "path": "/api/v1/analytics", "response": "#/$defs/analyticsReport" },
+    { "method": "GET", "path": "/api/v1/saved-views", "response": "#/$defs/collection", "item": "#/$defs/savedView" },
+    { "method": "POST", "path": "/api/v1/saved-views", "response": "#/$defs/savedView" },
+    { "method": "DELETE", "path": "/api/v1/saved-views/{id}", "response_status": 204 },
+    { "method": "POST", "path": "/api/v1/exports", "response": "#/$defs/exportMetadata" },
+    { "method": "GET", "path": "/api/v1/exports/{id}", "response_media_type": "application/x-ndjson" },
+    { "method": "GET", "path": "/api/v1/alerts", "response": "#/$defs/collection", "item": "#/$defs/alert" },
+    { "method": "GET", "path": "/api/v1/alerts/{id}", "response": "#/$defs/alert" },
+    { "method": "POST", "path": "/api/v1/alerts/{id}/acknowledge", "response": "#/$defs/alert" },
+    { "method": "POST", "path": "/api/v1/alerts/{id}/silence", "response": "#/$defs/opaqueResource" },
+    { "method": "POST", "path": "/api/v1/alerts/{id}/annotations", "response": "#/$defs/opaqueResource" },
+    { "method": "POST", "path": "/api/v1/alerts/{id}/resolve", "response": "#/$defs/alert" },
+    { "method": "GET", "path": "/api/v1/incidents", "response": "#/$defs/collection", "item": "#/$defs/alert" },
+    { "method": "GET", "path": "/api/v1/incidents/{id}", "response": "#/$defs/alert" },
+    { "method": "GET", "path": "/api/v1/backups", "response": "#/$defs/collection", "item": "#/$defs/backupMetadata" },
+    { "method": "GET", "path": "/api/v1/backups/{id}/download", "response_media_type": "application/vnd.sqlite3" },
+    { "method": "GET", "path": "/api/v1/restores", "response": "#/$defs/collection", "item": "#/$defs/restoreMetadata" },
+    { "method": "GET", "path": "/api/v1/updates", "response": "#/$defs/collection", "item": "#/$defs/updateMetadata" },
+    { "method": "GET", "path": "/api/v1/updates/check", "response": "#/$defs/updateInspection" },
+    { "method": "GET", "path": "/api/v1/pools", "response": "#/$defs/collection", "item": "#/$defs/namedResource" },
+    { "method": "GET", "path": "/api/v1/sessions", "response": "#/$defs/collection", "item": "#/$defs/runnerSession" },
+    { "method": "GET", "path": "/api/v1/repositories", "response": "#/$defs/collection", "item": "#/$defs/namedResource" },
+    { "method": "GET", "path": "/api/v1/workflows", "response": "#/$defs/collection", "item": "#/$defs/namedResource" },
+    { "method": "GET", "path": "/api/v1/annotations", "response": "#/$defs/collection", "item": "#/$defs/annotation" },
+    { "method": "GET", "path": "/api/v1/tags", "response": "#/$defs/collection", "item": "#/$defs/namedResource" },
+    { "method": "GET", "path": "/api/v1/audit", "response": "#/$defs/collection", "item": "#/$defs/auditRecord" }
+  ],
+  "x-compatibility": {
+    "incidents": "Alert instances are the v1 incident representation.",
+    "tags": "Workflow job labels are exposed as read-only compatibility tags.",
+    "legacy": "/api/* remains read-only and uses the common JSON error envelope."
+  },
+  "x-sse": {
+    "host_stream_limit": 16,
+    "session_stream_limit": 2,
+    "maximum_lifetime_seconds": 1800,
+    "rejection_status": 429,
+    "rejection_code": "rate_limited",
+    "terminal_event": "stream-close"
+  }
+}

@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	githubapi "github.com/google/go-github/v66/github"
+	githubapi "github.com/google/go-github/v88/github"
 )
 
 type apiClient struct {
@@ -41,8 +41,15 @@ func newAPIClient(token string, serverRawURL string, apiRawURL string) (*apiClie
 			return nil
 		},
 	}
-	client := githubapi.NewClient(httpClient).WithAuthToken(token)
-	client.BaseURL = apiBase
+	baseURL := apiBase.String()
+	client, err := githubapi.NewClient(
+		githubapi.WithHTTPClient(httpClient),
+		githubapi.WithAuthToken(token),
+		githubapi.WithURLs(&baseURL, nil),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create GitHub API client: %w", err)
+	}
 	return &apiClient{
 		github: client,
 		token:  token,
@@ -352,13 +359,13 @@ func (c *apiClient) dispatch(ctx context.Context, target target, opts options) (
 		},
 	}
 	endpoint := repositoryPath(target.Repository, "actions/workflows/"+url.PathEscape(targetWorkflow)+"/dispatches")
-	request, err := c.github.NewRequest(http.MethodPost, endpoint, body)
+	request, err := c.github.NewRequest(ctx, http.MethodPost, endpoint, body)
 	if err != nil {
 		return 0, c.apiError("build workflow dispatch request", err)
 	}
 	request.Header.Set("X-GitHub-Api-Version", apiVersion)
 	var response dispatchResponse
-	if _, err := c.github.Do(ctx, request, &response); err != nil {
+	if _, err := c.github.Do(request, &response); err != nil {
 		return 0, c.apiError(fmt.Sprintf("dispatch %s in %s", targetWorkflow, target.Repository), err)
 	}
 	if response.WorkflowRunID <= 0 {

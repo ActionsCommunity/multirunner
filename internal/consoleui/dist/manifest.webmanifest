@@ -1,0 +1,1 @@
+{"name":"Multirunner Operations Console","short_name":"Multirunner","description":"Local operations console for Multirunner hosts.","start_url":"/","display":"standalone","background_color":"#f3f7fa","theme_color":"#101c2a","lang":"en","scope":"/","icons":[{"src":"/icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any maskable"}]}

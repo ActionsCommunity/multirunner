@@ -102,7 +102,13 @@ func TestSelectInstallationRejectsNamedPersonalAccount(t *testing.T) {
 	var out bytes.Buffer
 	p := newPrompt(failingReader{t}, &out)
 
-	_, err := selectInstallation([]ghapp.Installation{personal}, "octocat", "https://github.com", ghapp.DefaultAppSlug, true, p, false)
+	_, err := selectInstallation([]ghapp.Installation{personal}, installationSelectionOptions{
+		Owner:               "octocat",
+		BaseURL:             "https://github.com",
+		AppSlug:             ghapp.DefaultAppSlug,
+		RequireOrganization: true,
+		Prompt:              p,
+	})
 	if err == nil {
 		t.Fatal("expected a personal-account installation to be refused")
 	}
