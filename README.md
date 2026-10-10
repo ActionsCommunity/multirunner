@@ -73,6 +73,14 @@ release, selects the correct OS/architecture binary, verifies the exact asset
 against `SHA256SUMS.txt`, checks the embedded version, and preserves an existing
 binary as `multirunner.previous` or `multirunner.exe.previous`.
 
+| Platform | Repository path | Raw download URL |
+| --- | --- | --- |
+| Linux, macOS, Git Bash | [`scripts/install.sh`](https://github.com/ActionsCommunity/multirunner/blob/main/scripts/install.sh) | `https://raw.githubusercontent.com/ActionsCommunity/multirunner/main/scripts/install.sh` |
+| Windows PowerShell | [`scripts/install.ps1`](https://github.com/ActionsCommunity/multirunner/blob/main/scripts/install.ps1) | `https://raw.githubusercontent.com/ActionsCommunity/multirunner/main/scripts/install.ps1` |
+
+From a local clone, run `sh ./scripts/install.sh` or
+`.\scripts\install.ps1` from the repository root.
+
 Linux and macOS:
 
 ```sh
