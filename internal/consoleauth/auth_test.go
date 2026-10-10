@@ -352,7 +352,7 @@ func TestUnauthenticatedRequestExplainsPairing(t *testing.T) {
 		httptest.NewRequest(http.MethodGet, "/api/v1/session", nil),
 	)
 	if response.Code != http.StatusUnauthorized ||
-		!strings.Contains(response.Body.String(), "multirunner console open") {
+		!strings.Contains(response.Body.String(), "multirunner console") {
 		t.Fatalf("unexpected response: %d %q", response.Code, response.Body.String())
 	}
 }

@@ -133,7 +133,7 @@ func requiresRecentPairing(plan commandPlan) bool {
 func writeStepUpRequired(w http.ResponseWriter) {
 	writeErrorDetails(
 		w, http.StatusForbidden, "step_up_required",
-		"This sensitive action requires a recent console pairing. Run `multirunner console open` on this host and retry.",
+		"This sensitive action requires a recent console pairing. Run `multirunner console` on this host and retry.",
 		nil, map[string]any{"pairing_required": true},
 	)
 }

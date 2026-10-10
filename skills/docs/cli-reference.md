@@ -106,13 +106,16 @@ real startup do.
 ### `console`
 
 ```text
+multirunner console [--no-browser] [--config <path>]
 multirunner console open [--no-browser] [--config <path>]
 multirunner console rotate-secret [--config <path>]
 ```
 
-`console open` requires `history.enabled`, loads the protected installation
-secret next to the history database, prints a short-lived single-use pairing
-token, and opens the fixed loopback console URL in the default browser.
+`console` requires `history.enabled`, verifies the local console service is
+reachable, loads the protected installation secret next to the history
+database, prints a short-lived single-use pairing token, and opens the fixed
+loopback console URL in the default browser. `console open` is an equivalent
+explicit form.
 `--no-browser` prints the URL and token without launching a browser. Enter the
 token in the console pairing form. The token is sensitive until exchanged and
 must not be copied into logs or shared channels; it is never included in the
@@ -508,7 +511,7 @@ persistent and therefore accepted everywhere; `--help` likewise.
 | `multirunner` (root, = `run`) | `--install-deps` (false), `--dry-run` (false), `--version`/`-v` (prints embedded version and commit; provenance-aware builds inject both, while a plain development build may report `dev (commit unknown)`) | yes |
 | `run` | `--install-deps` (false), `--dry-run` (false) | yes |
 | `doctor` | none | yes |
-| `console` | none | no |
+| `console` | `--no-browser` (false) | yes |
 | `console open` | `--no-browser` (false) | yes |
 | `console rotate-secret` | none | yes |
 | `connect` | `--org` (empty), `--repo` (empty), `--own-app` (false), `--name` (`multirunner`), `--port` (`0`), `--key-out` (empty => `<config dir>/multirunner-app.private-key.pem`), `--webhook-url` (empty), `--detect` (false), `--device` (false), `--non-interactive` (false), `--dry-run` (false); the `--name`/`--port`/`--key-out`/`--webhook-url`/`--detect` flags apply only with `--own-app` | reads it leniently (device flow, or to shape the manifest with `--own-app`), then rewrites the YAML target sections |

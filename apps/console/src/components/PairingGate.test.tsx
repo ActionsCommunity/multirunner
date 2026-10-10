@@ -28,10 +28,14 @@ test('pairs through POST without putting the token in URLs or browser storage', 
     </PairingGate>,
   )
 
+  expect(
+    await screen.findByRole('heading', { name: 'Open Multirunner Console' }),
+  ).toBeInTheDocument()
+  expect(screen.getByText(/multirunner console/)).toBeInTheDocument()
   const input = await screen.findByLabelText('One-time pairing token')
   await waitFor(() => expect(input).toHaveFocus())
   fireEvent.change(input, { target: { value: token } })
-  fireEvent.click(screen.getByRole('button', { name: 'Pair browser' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Open console' }))
 
   await waitFor(() => expect(onPaired).toHaveBeenCalledOnce())
   const [url, init] = fetchMock.mock.calls[1] as [string, RequestInit]
@@ -59,7 +63,7 @@ test('reports bounded pairing attempts and clears the submitted token', async ()
 
   const input = await screen.findByLabelText('One-time pairing token')
   fireEvent.change(input, { target: { value: 'invalid-token' } })
-  fireEvent.click(screen.getByRole('button', { name: 'Pair browser' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Open console' }))
 
   expect(
     await screen.findByText(/Too many attempts\. Wait two minutes/),

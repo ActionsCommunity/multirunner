@@ -20,7 +20,7 @@ Never bypass a failed trust, integrity, compatibility, or health check.
 2. Start Multirunner, then run:
 
    ```powershell
-   multirunner console open --config C:\multirunner\config.yaml
+   multirunner console --config C:\multirunner\config.yaml
    ```
 
 3. Open the fixed loopback URL shown by the command and enter the one-time
@@ -48,7 +48,7 @@ To invalidate every browser session:
    multirunner console rotate-secret --config C:\multirunner\config.yaml
    ```
 
-4. Restart the service and pair again with `console open`.
+4. Restart the service and pair again with `console`.
 
 ## Migrate and enable capabilities
 

@@ -655,11 +655,12 @@ history:
 ```
 
 The listener must be loopback-only. Open the console with
-`multirunner console open`, which opens the fixed local console URL and prints
-a short-lived, single-use pairing token in the initiating terminal. Enter that
-token in the browser to create a protected local session. The token is never
-placed in the browser URL or launcher arguments. Ordinary console and API
-requests require the authenticated session.
+`multirunner console`, which verifies the local service is reachable, opens the
+fixed console URL, and prints a short-lived, single-use pairing token in the
+initiating terminal. Enter that token in the browser to create a protected
+local session. The token is never placed in the browser URL or launcher
+arguments. `multirunner console open` remains an equivalent explicit form.
+Ordinary console and API requests require the authenticated session.
 
 `retention_days: -1` keeps imported metadata indefinitely. Workflow artifacts
 and job-log content are not persisted. An authenticated operator may explicitly
@@ -693,7 +694,8 @@ Hidden `_` developer helpers are excluded.
 ```text
 multirunner [run]                   run the orchestrator (default)
 multirunner connect --org <org>     create + install a GitHub App, write auth to config
-multirunner console open            create a one-time local pairing token
+multirunner console                 open the local Operations Console
+multirunner console open            explicit alias for `multirunner console`
 multirunner console rotate-secret   invalidate sessions and rotate the local secret
 multirunner doctor                  check daemons + container mode, no runners
 multirunner detect                  scan a repo, recommend image flavors + pools

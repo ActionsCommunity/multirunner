@@ -81,11 +81,10 @@ export function PairingGate({
   return (
     <main className="pairing-page">
       <section className="pairing-card" aria-labelledby="pairing-title">
-        <p className="eyebrow">Local Operations Console</p>
-        <h1 id="pairing-title">Pair this browser</h1>
-        <p>
-          Run <code>multirunner console open</code> on this host, then enter the
-          one-time token displayed in that terminal. Tokens expire after two minutes.
+        <h1 id="pairing-title">Open Multirunner Console</h1>
+        <p id="pairing-instructions">
+          Run <code>multirunner console</code> on this host, then paste the one-time
+          token shown in that terminal. The token expires after two minutes.
         </p>
         {state === 'checking' ? (
           <p role="status">Checking console session…</p>
@@ -101,12 +100,13 @@ export function PairingGate({
               onChange={(event) => setToken(event.target.value)}
               autoComplete="one-time-code"
               autoCapitalize="none"
+              aria-describedby="pairing-instructions pairing-privacy"
               spellCheck={false}
               disabled={state === 'submitting'}
               required
             />
             <button type="submit" disabled={state === 'submitting'}>
-              {state === 'submitting' ? 'Pairing…' : 'Pair browser'}
+              {state === 'submitting' ? 'Opening…' : 'Open console'}
             </button>
           </form>
         )}
@@ -115,7 +115,7 @@ export function PairingGate({
             {message}
           </p>
         ) : null}
-        <p className="pairing-privacy">
+        <p id="pairing-privacy" className="pairing-privacy">
           The token is submitted only to this loopback console and is never stored in
           browser history or local storage.
         </p>

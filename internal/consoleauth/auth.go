@@ -203,7 +203,7 @@ func (a *Authenticator) Handler(next http.Handler) http.Handler {
 			w.Header().Set("Cache-Control", "no-store")
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 			w.WriteHeader(http.StatusUnauthorized)
-			_, _ = w.Write([]byte("Console pairing required. Run `multirunner console open` on this host.\n"))
+			_, _ = w.Write([]byte("Console pairing required. Run `multirunner console` on this host.\n"))
 			return
 		}
 		if (r.URL.Path == "/api" || strings.HasPrefix(r.URL.Path, "/api/")) &&
@@ -211,7 +211,7 @@ func (a *Authenticator) Handler(next http.Handler) http.Handler {
 			w.Header().Set("Cache-Control", "no-store")
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 			w.WriteHeader(http.StatusUnauthorized)
-			_, _ = w.Write([]byte("Console pairing proof is required. Run `multirunner console open` on this host.\n"))
+			_, _ = w.Write([]byte("Console pairing proof is required. Run `multirunner console` on this host.\n"))
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(

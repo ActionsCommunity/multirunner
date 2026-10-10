@@ -37,14 +37,14 @@ test('maps the typed step-up response for frontend command handling', async () =
     new Response(
       JSON.stringify({
         code: 'step_up_required',
-        message: 'Run `multirunner console open` and retry.',
+        message: 'Run `multirunner console` and retry.',
       }),
       { status: 403, headers: { 'Content-Type': 'application/json' } },
     ),
     'Command request failed',
   )
   expect(error).toBeInstanceOf(StepUpRequiredError)
-  expect(error.message).toContain('console open')
+  expect(error.message).toContain('multirunner console')
 })
 
 test('consoleFetch preserves headers, sends proof, and clears it on 401', async () => {
