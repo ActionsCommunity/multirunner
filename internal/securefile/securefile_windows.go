@@ -93,6 +93,9 @@ func Read(path string) ([]byte, error) {
 	if err := validateParentChain(path); err != nil {
 		return nil, err
 	}
+	if err := repairLegacyDACL(path); err != nil {
+		return nil, err
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -110,6 +113,9 @@ func Read(path string) ([]byte, error) {
 
 func Check(path string) error {
 	if err := validateParentChain(path); err != nil {
+		return err
+	}
+	if err := repairLegacyDACL(path); err != nil {
 		return err
 	}
 	file, err := os.Open(path)
@@ -207,6 +213,21 @@ func applyProtectedDACL(file *os.File) error {
 	if err != nil {
 		return err
 	}
+	acl, err := protectedDACL(system, installation)
+	if err != nil {
+		return err
+	}
+	if err := windows.SetNamedSecurityInfo(
+		file.Name(), windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		installation, nil, acl, nil,
+	); err != nil {
+		return fmt.Errorf("protect secret DACL: %w", err)
+	}
+	return nil
+}
+
+func protectedDACL(system, installation *windows.SID) (*windows.ACL, error) {
 	sids := []*windows.SID{system, installation}
 	entries := make([]windows.EXPLICIT_ACCESS, 0, len(sids))
 	for _, sid := range sids {
@@ -222,16 +243,9 @@ func applyProtectedDACL(file *os.File) error {
 	}
 	acl, err := windows.ACLFromEntries(entries, nil)
 	if err != nil {
-		return fmt.Errorf("build secret DACL: %w", err)
+		return nil, fmt.Errorf("build secret DACL: %w", err)
 	}
-	if err := windows.SetNamedSecurityInfo(
-		file.Name(), windows.SE_FILE_OBJECT,
-		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
-		installation, nil, acl, nil,
-	); err != nil {
-		return fmt.Errorf("protect secret DACL: %w", err)
-	}
-	return nil
+	return acl, nil
 }
 
 func expectedSIDs() (*windows.SID, *windows.SID, *windows.SID, *windows.SID, error) {

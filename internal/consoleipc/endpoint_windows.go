@@ -35,12 +35,17 @@ func PrepareEndpointIdentity(databasePath string, create bool) error {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	if !create {
-		return fmt.Errorf("read console operator identity: %w", os.ErrNotExist)
+	// Installations from releases before the operator identity existed are
+	// upgraded by the next elevated service command, run by the operator.
+	if !create && !windows.GetCurrentProcessToken().IsElevated() {
+		return fmt.Errorf("read console operator identity: %w (run this command from an elevated terminal once to record you as the console operator)", os.ErrNotExist)
 	}
 	operator, err := currentUserSID()
 	if err != nil {
 		return err
+	}
+	if !create && operator.IsWellKnown(windows.WinLocalSystemSid) {
+		return fmt.Errorf("read console operator identity: %w", os.ErrNotExist)
 	}
 	if err := securefile.CreateExclusive(path, []byte(operator.String()+"\n")); err != nil {
 		if !errors.Is(err, os.ErrExist) {

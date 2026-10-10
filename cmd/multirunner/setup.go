@@ -90,5 +90,17 @@ func runWithSetup(out io.Writer, cfgPath string, installDeps, dryRun bool) error
 	if dryRun {
 		return planRun(out, abs, installDeps)
 	}
+	if running := runningServiceConfig(); running != "" && sameConfigPath(running, abs) {
+		return serviceAlreadyRunningError(abs)
+	}
 	return runService(abs, installDeps)
+}
+
+// serviceAlreadyRunningError refuses a second orchestrator for a config the
+// installed service is already running; both would compete for the same
+// runners, history database, and console secret.
+func serviceAlreadyRunningError(cfgPath string) error {
+	return fmt.Errorf("the multirunner service is already running with %s.\n"+
+		"Open the console:   multirunner console --config %s\n"+
+		"Manage the service: multirunner service restart|stop (elevated)", cfgPath, cfgPath)
 }

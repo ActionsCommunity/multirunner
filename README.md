@@ -716,6 +716,13 @@ multirunner service start
 
 `service uninstall` removes it.
 
+When upgrading an existing Windows installation, run `multirunner service start`
+from an elevated terminal once. It records you as the console operator, so
+`multirunner console` works from a normal terminal, and the service tightens a
+console secret written by an earlier release. Running `multirunner` in the
+foreground with the config an installed service is already running is refused,
+because both would compete for the same runners.
+
 On Windows, `connect` restricts credentials to your account and LocalSystem,
 the default service identity. Service token refresh preserves your access.
 For a custom service account, grant that account access to the credentials.
