@@ -4,7 +4,7 @@
     "linux_base": {
       "repository": "mcr.microsoft.com/dotnet/runtime-deps",
       "tag": "8.0-noble",
-      "digest": "sha256:a83f3565178daccf8974fd854aa8359a0f8aaec5bd2ea06e11159d476369a228"
+      "digest": "sha256:a039398e7300cb326d97675bb4555d458097fdee73f4362417005cb17ea09453"
     },
     "windows_base": {
       "repository": "mcr.microsoft.com/windows/servercore",
@@ -12,15 +12,15 @@
       "digest": "sha256:e18a49cbc074dfaa8e106296d51cebd62bbf6effb999f134a5c48eed1c2334e1"
     },
     "runner": {
-      "version": "2.337.0",
-      "linux_x64_sha256": "70920811a4f8ad4328818682bca5c6469c1c942fab52448868071d0063816613",
-      "linux_arm64_sha256": "9b1dc70626422526e3c94767cf024896beb15da5342a3f4819bf2feac13e0393",
-      "windows_x64_sha256": "1150692afa94e71f872017e254ea55b6eece1eece3fe7e3a6d4c93d0a1b85cfc"
+      "version": "2.338.0",
+      "linux_x64_sha256": "af4b794c1bc41d73d40535e3fe092a39f9679cd8d965954c2aca25a05ca41d32",
+      "linux_arm64_sha256": "628b4a7258487b80c1d3c221095a7ded349f5ae0175fd3dfab708d07428f041b",
+      "windows_x64_sha256": "f48e0750a21812bca5f82de5f7f5aeae71abee647fab5a582f1742d07eba455f"
     },
     "mingit": {
-      "version": "2.56.0.windows.1",
-      "url": "https://github.com/git-for-windows/git/releases/download/v2.56.0.windows.1/MinGit-2.56.0-64-bit.zip",
-      "sha256": "064b440ff870ed5198527e8f3a92cdf5bd2fd0fedf5e718af95e3fdaddeff718"
+      "version": "2.56.0.windows.2",
+      "url": "https://github.com/git-for-windows/git/releases/download/v2.56.0.windows.2/MinGit-2.56.0.2-64-bit.zip",
+      "sha256": "da35e72aa21c005a5a0d298cfbae110bc1609a815730ea0dde84b01a1b3cd3be"
     },
     "powershell": {
       "version": "7.6.6",
@@ -105,14 +105,14 @@
   },
   "go": {
     "strategy": "latest stable",
-    "version": "1.27.1",
-    "linux_amd64_sha256": "63d339f0da5ab53635a56f2490a7984dfe12dfcff22ad749f63edaf590168445",
-    "linux_arm64_sha256": "3450b45a3f9ee8568792736a5c5e70a1f2e9b36c35a8f74958c03e51d7d92bec",
-    "windows_amd64_sha256": "a3911b5e0e1b1053f25ed0675f4c1c6aad1e2bfcf253df2b9be4caabd2edd95d"
+    "version": "1.27.2",
+    "linux_amd64_sha256": "ecbadb99091a3f46e31f5f934b068b1864eafa7995211b39eaddf76996045fe5",
+    "linux_arm64_sha256": "94f3e30b8e374bc285e7dadc11e0865726b9bc6e85b841ccceaabc0214c6b7c8",
+    "windows_amd64_sha256": "1314008898bd40df77af4b014f777f08873dbdfbcd3d92308728ee03304fe04f"
   },
   "rust": {
     "channel": "stable",
-    "version": "1.98.1",
+    "version": "1.99.0",
     "rustup_version": "1.29.1",
     "rustup_x64_sha256": "dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71",
     "rustup_arm64_sha256": "15f6e4ce9f583b929c996c91562bad6d4454f3281de858b02cdfdef615fac433"
