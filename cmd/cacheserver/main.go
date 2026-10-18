@@ -21,8 +21,10 @@ func main() {
 	path := flag.String("path", "/data", "storage path for cache db + blobs")
 	advertise := flag.String("advertise", "", "external URL of this cache (informational)")
 	accessToken := flag.String("access-token", "", "shared path token for cache API URLs (generated when empty)")
-	upstream := flag.String("upstream", "https://results-receiver.actions.githubusercontent.com", "catch-all proxy upstream")
-	skipToken := flag.Bool("skip-token-validation", true, "accept any bearer token")
+	upstream := flag.String("upstream", "https://results-receiver.actions.githubusercontent.com",
+		"catch-all proxy and runtime-token validation upstream (HTTPS unless loopback)")
+	skipToken := flag.Bool("skip-token-validation", true,
+		"deprecated compatibility flag (ignored; bearer tokens are always validated)")
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
