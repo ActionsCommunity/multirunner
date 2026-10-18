@@ -19,8 +19,8 @@ func protectRoot(path string) error {
 func validateRoot(path string) error {
 	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_DIRECTORY, 0)
 	if err != nil {
-		if errors.Is(err, syscall.ELOOP) {
-			return fmt.Errorf("%w: symbolic-link roots are not allowed", ErrInsecure)
+		if errors.Is(err, syscall.ELOOP) || errors.Is(err, syscall.ENOTDIR) {
+			return fmt.Errorf("%w: root must be a plain directory", ErrInsecure)
 		}
 		return err
 	}
@@ -46,8 +46,8 @@ func validateRoot(path string) error {
 func openAtRoot(root, path string) (*os.File, error) {
 	rootFD, err := unix.Open(root, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_DIRECTORY, 0)
 	if err != nil {
-		if errors.Is(err, syscall.ELOOP) {
-			return nil, fmt.Errorf("%w: symbolic-link roots are not allowed", ErrInsecure)
+		if errors.Is(err, syscall.ELOOP) || errors.Is(err, syscall.ENOTDIR) {
+			return nil, fmt.Errorf("%w: root must be a plain directory", ErrInsecure)
 		}
 		return nil, err
 	}

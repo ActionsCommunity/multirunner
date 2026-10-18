@@ -57,7 +57,7 @@ func TestEngineReplaysDurableEventsAndResumesFromWatermark(t *testing.T) {
 		}
 		done := make(chan error, 1)
 		go func() { done <- engine.Run(ctx) }()
-		waitForAlert(t, store)
+		waitForAlert(t, store, epoch.ID, event.Sequence)
 		cancel()
 		select {
 		case <-done:
@@ -145,12 +145,19 @@ func TestEngineReplaysUnfinishedPriorEpoch(t *testing.T) {
 	}
 }
 
-func waitForAlert(t *testing.T, store *history.Store) {
+func waitForAlert(t *testing.T, store *history.Store, epochID string, sequence int64) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		instances, err := store.ListAlerts(t.Context(), alerts.ListOptions{Limit: 10})
-		if err == nil && len(instances) == 1 {
+		if err != nil {
+			t.Fatal(err)
+		}
+		cursor, err := store.AlertEventCursor(t.Context(), epochID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(instances) == 1 && cursor >= sequence {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)

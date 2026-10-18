@@ -14,7 +14,26 @@ func TestPrepareRootRejectsInheritedDirectorySecurity(t *testing.T) {
 	if err := os.Mkdir(root, 0o700); err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := PrepareRoot(root); !errors.Is(err, ErrInsecure) {
 		t.Fatalf("inherited root security error = %v", err)
+	}
+}
+
+func TestOpenAcceptsArtifactCreatedInProtectedRoot(t *testing.T) {
+	root, err := PrepareRoot(filepath.Join(t.TempDir(), "artifacts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "artifact")
+	if err := os.WriteFile(path, []byte("artifact"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	file, err := Open(root, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
 	}
 }

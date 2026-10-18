@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/GerardSmit/multirunner/internal/control"
@@ -184,21 +186,65 @@ func TestExecutorRejectsExpiredQueuedCommandWithoutEffect(t *testing.T) {
 }
 
 func TestExecutorDeadlineDuringEffectRecordsUnknownOutcome(t *testing.T) {
-	store := openControlStore(t)
-	deadline := time.Now().Add(100 * time.Millisecond)
-	command := queueCommandWithTimeout(t, store, "deadline", &deadline)
-	adapter := &fakeAdapter{blockUntilDone: true}
-	executor := newTestExecutor(t, store, adapter, control.ExecutorHooks{})
-	if worked, err := executor.RunOnce(t.Context()); !worked || err != nil {
-		t.Fatalf("RunOnce deadline worked=%v err=%v", worked, err)
+	synctest.Test(t, func(t *testing.T) {
+		deadline := time.Now().Add(100 * time.Millisecond)
+		store := &deadlineStore{command: control.Command{
+			ID: "deadline", Type: "pool.reconcile", State: control.StateQueued,
+			TimeoutAt: &deadline,
+		}}
+		adapter := &fakeAdapter{blockUntilDone: true}
+		executor, err := control.NewExecutor(
+			store, control.AdapterMap{"pool.reconcile": adapter},
+			control.ExecutorOptions{Owner: "executor", Lease: time.Second},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if worked, err := executor.RunOnce(t.Context()); !worked || err != nil {
+			t.Fatalf("RunOnce deadline worked=%v err=%v", worked, err)
+		}
+		synctest.Wait()
+		if store.command.State != control.StateUnknownOutcome || adapter.executeCount != 1 {
+			t.Fatalf("deadline command state=%q execute count=%d", store.command.State, adapter.executeCount)
+		}
+		if store.command.Error != "command deadline expired while effect outcome was uncertain" {
+			t.Fatalf("deadline command error = %q", store.command.Error)
+		}
+	})
+}
+
+type deadlineStore struct {
+	command control.Command
+}
+
+func (*deadlineStore) ResumePendingCommands(context.Context, string) ([]control.Command, error) {
+	return nil, nil
+}
+
+func (*deadlineStore) ExpireQueuedCommands(context.Context, string) ([]control.Command, error) {
+	return nil, nil
+}
+
+func (*deadlineStore) ReconcileExpiredCommands(context.Context, string, time.Duration) ([]control.Command, error) {
+	return nil, nil
+}
+
+func (s *deadlineStore) ClaimNextCommand(context.Context, string, time.Duration) (control.Command, error) {
+	s.command.State = control.StateClaimed
+	return s.command, nil
+}
+
+func (s *deadlineStore) TransitionCommand(_ context.Context, _ string, transition control.Transition) (control.Command, error) {
+	if s.command.State != transition.ExpectedState {
+		return control.Command{}, fmt.Errorf("unexpected command state %q", s.command.State)
 	}
-	unknown := assertCommandState(t, store, command.ID, control.StateUnknownOutcome)
-	if adapter.executeCount != 1 {
-		t.Fatalf("deadline command execute count = %d", adapter.executeCount)
-	}
-	if unknown.Error != "command deadline expired while effect outcome was uncertain" {
-		t.Fatalf("deadline command error = %q", unknown.Error)
-	}
+	s.command.State = transition.To
+	s.command.Error = transition.Error
+	return s.command, nil
+}
+
+func (*deadlineStore) HeartbeatCommand(context.Context, string, string, int64, time.Duration) error {
+	return errors.New("unexpected heartbeat before command deadline")
 }
 
 func openControlStore(t *testing.T) *history.Store {

@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"syscall"
 
 	"golang.org/x/sys/unix"
@@ -171,6 +172,19 @@ func validateParentChain(path string) error {
 		info, err := os.Lstat(parent)
 		if err != nil {
 			return err
+		}
+		if runtime.GOOS == "darwin" && info.Mode()&os.ModeSymlink != 0 {
+			stat, ok := info.Sys().(*syscall.Stat_t)
+			if ok && stat.Uid == 0 && (parent == "/var" || parent == "/tmp" || parent == "/etc") {
+				target, err := os.Readlink(parent)
+				if err != nil {
+					return err
+				}
+				if target == "/private"+parent || target == "private"+parent {
+					parent = "/private" + parent
+					continue
+				}
+			}
 		}
 		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 			return fmt.Errorf("%w: parent path %q is not a plain directory", ErrInsecurePermissions, parent)

@@ -928,6 +928,48 @@ CREATE TABLE analytics_snapshots (
 CREATE INDEX idx_analytics_snapshots_generated
 	ON analytics_snapshots(generated_at DESC);
 `},
+	{version: 16, sql: `
+CREATE TABLE command_search_rows (
+	command_id TEXT PRIMARY KEY,
+	search_rowid INTEGER NOT NULL UNIQUE
+);
+INSERT INTO command_search_rows(command_id, search_rowid)
+	SELECT entity_key, rowid FROM search_index WHERE entity_type='command';
+
+DROP TRIGGER search_commands_insert;
+DROP TRIGGER search_commands_update;
+DROP TRIGGER search_commands_delete;
+
+CREATE TRIGGER search_commands_insert AFTER INSERT ON commands BEGIN
+	INSERT INTO search_index(entity_type, entity_key, repository, title, context, timestamp, state)
+	VALUES (
+		'command', NEW.id, '',
+		trim(NEW.command_type || ' ' || NEW.target_type || ' ' || NEW.target_id),
+		trim(NEW.reason || ' ' || NEW.actor_id), NEW.created_at, NEW.state
+	);
+	INSERT INTO command_search_rows(command_id, search_rowid)
+		VALUES (NEW.id, last_insert_rowid());
+END;
+CREATE TRIGGER search_commands_update AFTER UPDATE ON commands BEGIN
+	DELETE FROM search_index WHERE rowid=(
+		SELECT search_rowid FROM command_search_rows WHERE command_id=OLD.id
+	);
+	INSERT INTO search_index(entity_type, entity_key, repository, title, context, timestamp, state)
+	VALUES (
+		'command', NEW.id, '',
+		trim(NEW.command_type || ' ' || NEW.target_type || ' ' || NEW.target_id),
+		trim(NEW.reason || ' ' || NEW.actor_id), NEW.created_at, NEW.state
+	);
+	UPDATE command_search_rows SET command_id=NEW.id, search_rowid=last_insert_rowid()
+		WHERE command_id=OLD.id;
+END;
+CREATE TRIGGER search_commands_delete AFTER DELETE ON commands BEGIN
+	DELETE FROM search_index WHERE rowid=(
+		SELECT search_rowid FROM command_search_rows WHERE command_id=OLD.id
+	);
+	DELETE FROM command_search_rows WHERE command_id=OLD.id;
+END;
+`},
 }
 
 func migrate(ctx context.Context, db *sql.DB) error {

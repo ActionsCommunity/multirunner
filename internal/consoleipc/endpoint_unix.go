@@ -24,7 +24,12 @@ func Endpoint(databasePath string) (string, error) {
 		filepath.Dir(absolute),
 		".multirunner-console-"+hex.EncodeToString(digest[:8]),
 	)
-	return filepath.Join(directory, "control.sock"), nil
+	endpoint := filepath.Join(directory, "control.sock")
+	if len(endpoint) >= 104 {
+		directory = filepath.Join("/tmp", ".multirunner-console-"+hex.EncodeToString(digest[:]))
+		endpoint = filepath.Join(directory, "control.sock")
+	}
+	return endpoint, nil
 }
 
 func PrepareEndpointIdentity(string, bool) error {

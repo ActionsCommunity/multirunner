@@ -157,7 +157,15 @@ func validateSecurity(handle windows.Handle) error {
 	if err != nil {
 		return err
 	}
-	if owner == nil || !owner.Equals(current.User.Sid) {
+	ownerMatches := owner != nil && owner.Equals(current.User.Sid)
+	if !ownerMatches && owner != nil && windows.GetCurrentProcessToken().IsElevated() {
+		administrators, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+		if err != nil {
+			return err
+		}
+		ownerMatches = owner.Equals(administrators)
+	}
+	if !ownerMatches {
 		return fmt.Errorf("%w: artifact owner does not match the current account", ErrInsecure)
 	}
 	dacl, _, err := sd.DACL()

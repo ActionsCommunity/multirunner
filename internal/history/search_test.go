@@ -1,10 +1,14 @@
 package history
 
 import (
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/GerardSmit/multirunner/internal/control"
+	"github.com/GerardSmit/multirunner/internal/operations"
 )
 
 func TestSearchIndexesCanonicalHistoryAndAppliesFilters(t *testing.T) {
@@ -125,6 +129,52 @@ func TestSearchRejectsUnboundedInput(t *testing.T) {
 	} {
 		if _, err := store.Search(t.Context(), options); !errors.Is(err, ErrInvalidSearch) {
 			t.Fatalf("Search(%+v) error = %v", options, err)
+		}
+	}
+}
+
+func TestCommandSearchRowsTrackUpdatesAndDeletion(t *testing.T) {
+	store := openTestStore(t)
+	request := control.Request{
+		IdempotencyKey: "search-command", Type: "pool.pause",
+		HostID:     bindCommandEpoch(t, store),
+		TargetType: "pool", TargetID: "linux", ConflictDomain: "pool:linux",
+		Parameters: json.RawMessage(`{}`),
+		ActorKind:  operations.ActorOperator, ActorID: "search-operator",
+	}
+	command, _, err := store.CreateCommand(t.Context(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, reason := range []string{"first-reason", "second-reason"} {
+		if _, err := store.db.ExecContext(t.Context(),
+			`UPDATE commands SET reason=? WHERE id=?`, reason, command.ID); err != nil {
+			t.Fatal(err)
+		}
+		var count int
+		if err := store.db.QueryRowContext(t.Context(), `SELECT COUNT(*)
+			FROM search_index JOIN command_search_rows
+			ON search_index.rowid=command_search_rows.search_rowid
+			WHERE entity_key=? AND context=?`, command.ID, reason+" search-operator",
+		).Scan(&count); err != nil || count != 1 {
+			t.Fatalf("command search mapping count=%d err=%v", count, err)
+		}
+	}
+	for _, table := range []string{"command_transitions", "audit_events"} {
+		if _, err := store.db.ExecContext(t.Context(),
+			`DELETE FROM `+table+` WHERE command_id=?`, command.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.db.ExecContext(t.Context(),
+		`DELETE FROM commands WHERE id=?`, command.ID); err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range []string{"search_index", "command_search_rows"} {
+		var count int
+		if err := store.db.QueryRowContext(t.Context(),
+			`SELECT COUNT(*) FROM `+table).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("%s count after deletion=%d err=%v", table, count, err)
 		}
 	}
 }
