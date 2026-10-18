@@ -9,3 +9,5 @@
 Dockerfile      text eol=lf
 *.Dockerfile    text eol=lf
 images/versions.json text eol=lf
+apps/console/public/** text eol=lf
+internal/consoleui/dist/** text eol=lf
