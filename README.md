@@ -471,7 +471,7 @@ pools:
     workflows: [.github/workflows/sync.yml]
     workflow_event: schedule
     workflow_actor: octocat
-    workflow_ref: refs/heads/main
+    workflow_ref: main              # the run's head_branch, not refs/heads/main
     # host:
     #   runner_dir: D:\multirunner\nightly-sync\runner   # default %LOCALAPPDATA%\multirunner\host\<pool>\runner
     #   state_dir:  D:\multirunner\nightly-sync\state    # records + per-job logs

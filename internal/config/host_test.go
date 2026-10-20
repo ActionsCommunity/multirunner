@@ -13,7 +13,7 @@ func hostConfig(mutate func(p *Pool)) *Config {
 		Pools: []Pool{{
 			Name: "sync", OS: "windows", Backend: "host", Size: 1, WorkFolder: "_work",
 			Repository: "acme/site", Workflows: []string{".github/workflows/sync.yml"},
-			WorkflowEvent: "schedule", WorkflowActor: "octocat", WorkflowRef: "refs/heads/main",
+			WorkflowEvent: "schedule", WorkflowActor: "octocat", WorkflowRef: "main",
 		}},
 	}
 	if mutate != nil {
@@ -74,6 +74,17 @@ func TestHostPoolsCannotShareDirectories(t *testing.T) {
 	c.Pools[1].Host.RunnerDir = `C:\mr\runner2`
 	if err := c.Validate(); err != nil {
 		t.Fatalf("distinct directories should validate: %v", err)
+	}
+}
+
+func TestFullRefWorkflowRefWarns(t *testing.T) {
+	c := hostConfig(func(p *Pool) { p.WorkflowRef = "refs/heads/main" })
+	warnings := strings.Join(c.Warnings(), "\n")
+	if !strings.Contains(warnings, `will never match`) || !strings.Contains(warnings, `"main"`) {
+		t.Fatalf("want a refs/ warning suggesting main, got %q", warnings)
+	}
+	if w := hostConfig(nil).Warnings(); len(w) != 0 {
+		t.Fatalf("branch-name ref should not warn: %v", w)
 	}
 }
 

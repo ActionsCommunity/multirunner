@@ -656,6 +656,11 @@ func (c *Config) Warnings() []string {
 	}
 	for i := range c.Pools {
 		p := &c.Pools[i]
+		if strings.HasPrefix(p.WorkflowRef, "refs/") {
+			w = append(w, fmt.Sprintf(
+				"pool %q: workflow_ref %q will never match; it is compared with the run's head_branch (e.g. %q)",
+				p.Name, p.WorkflowRef, strings.TrimPrefix(strings.TrimPrefix(p.WorkflowRef, "refs/heads/"), "refs/")))
+		}
 		if p.Backend == "qemu" && (p.Image != "" || (p.ImageTier != "" && p.ImageTier != "minimal")) {
 			w = append(w, fmt.Sprintf(
 				"pool %q: backend=qemu ignores image/image_tier (it boots the baked golden image); "+
