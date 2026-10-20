@@ -84,6 +84,19 @@ func TestEnsureImageVerifiesAndExtracts(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(b.runnerRoot(), "bin", "Runner.Listener.dll")); err != nil {
 		t.Fatal(err)
 	}
+	// A partial install (no marker) is redone; a complete one is trusted.
+	if err := os.Remove(filepath.Join(b.runnerRoot(), installedMarker)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(b.runnerRoot(), "stale.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.EnsureImage(context.Background(), ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(b.runnerRoot(), "stale.txt")); !os.IsNotExist(err) {
+		t.Fatal("a partial install should be cleared before re-extracting")
+	}
 	// Installed: a second call does not download again.
 	b.download = func(context.Context, string, string) error { t.Fatal("downloaded twice"); return nil }
 	if err := b.EnsureImage(context.Background(), ""); err != nil {

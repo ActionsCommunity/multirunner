@@ -148,7 +148,8 @@ func (b *Backend) OSType(ctx context.Context) (string, error) { return runtime.G
 // The image reference is ignored: the host has no image.
 func (b *Backend) EnsureImage(ctx context.Context, _ string) error {
 	root := b.runnerRoot()
-	if _, err := os.Stat(filepath.Join(root, "run.cmd")); err == nil {
+	marker := filepath.Join(root, installedMarker)
+	if data, err := os.ReadFile(marker); err == nil && strings.TrimSpace(string(data)) == b.opt.RunnerSHA256 {
 		return nil
 	}
 	if err := os.MkdirAll(b.opt.RunnerDir, 0o700); err != nil {
@@ -173,22 +174,26 @@ func (b *Backend) EnsureImage(ctx context.Context, _ string) error {
 	if got != b.opt.RunnerSHA256 {
 		return fmt.Errorf("runner %s digest mismatch: got %s, want %s", b.opt.RunnerVersion, got, b.opt.RunnerSHA256)
 	}
-	staging, err := os.MkdirTemp(b.opt.RunnerDir, ".extract-")
-	if err != nil {
-		return err
+	// Extract in place and mark the install complete last. Renaming a freshly
+	// extracted tree fails on Windows while antivirus still holds its files.
+	if err := os.RemoveAll(root); err != nil {
+		return fmt.Errorf("clear partial runner install: %w", err)
 	}
-	defer os.RemoveAll(staging)
-	if err := extractZip(archivePath, staging); err != nil {
+	if err := extractZip(archivePath, root); err != nil {
 		return fmt.Errorf("extract runner: %w", err)
 	}
-	if _, err := os.Stat(filepath.Join(staging, "run.cmd")); err != nil {
+	if _, err := os.Stat(filepath.Join(root, "run.cmd")); err != nil {
 		return fmt.Errorf("runner archive has no run.cmd")
 	}
-	if err := os.Rename(staging, root); err != nil {
-		return fmt.Errorf("install runner: %w", err)
+	if err := os.WriteFile(marker, []byte(b.opt.RunnerSHA256+"\n"), 0o600); err != nil {
+		return fmt.Errorf("mark runner installed: %w", err)
 	}
 	return nil
 }
+
+// installedMarker records the verified digest of a complete install, so an
+// interrupted extraction is redone instead of trusted.
+const installedMarker = ".multirunner-installed"
 
 // Launch starts one ephemeral runner from the shared install. Only one job can
 // run at a time per install; a second launch fails instead of sharing it.
