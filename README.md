@@ -451,6 +451,52 @@ Highlights:
   exhausted rearms. A real key/KMS skips time-based evaluation handling, not
   tool-fingerprint checks.
 
+### Windows host runners (no isolation)
+
+`backend: host` runs the runner **directly on this machine, as the user
+multirunner runs as**. There's no container or VM. It's for jobs that must use
+the host itself: its PowerShell, its drives and files, and tools already signed
+in there (for example a deploy that reads local state or a local database).
+
+```yaml
+provisioning: autoscale
+pools:
+  - name: nightly-sync
+    os: windows
+    backend: host
+    labels: [self-hosted, host-sync]
+    # Required: a host job has your full access, so bind the pool to exact
+    # workflows (or opt out with host.allow_unrestricted: true).
+    repository: acme/site
+    workflows: [.github/workflows/sync.yml]
+    workflow_event: schedule
+    workflow_actor: octocat
+    workflow_ref: refs/heads/main
+    # host:
+    #   runner_dir: D:\multirunner\nightly-sync\runner   # default %LOCALAPPDATA%\multirunner\host\<pool>\runner
+    #   state_dir:  D:\multirunner\nightly-sync\state    # records + per-job logs
+    #   runner_version: "2.337.0"                       # with runner_sha256
+```
+
+How it behaves:
+- **Download.** On first start it downloads the pinned `actions/runner` release,
+  verifies its SHA256 and extracts it once per pool.
+- **One job at a time.** Pools are `size: 1`. Each job is an ephemeral JIT
+  runner (`run.cmd --jitconfig`) from that install. Its work folder is deleted
+  afterwards (`host.keep_workspace: true` keeps it for debugging), and its output
+  is kept in `<state_dir>/<runner>.log`.
+- **Kill stops everything.** The runner runs inside a Windows Job Object, so a
+  kill or shutdown also stops the processes the job started. After a crash, the
+  next start finds the leftover runner from its record and stops it, but only
+  if the PID still belongs to that runner.
+- **Credentials.** Jobs inherit the environment and the signed-in tools of
+  multirunner's user. Run multirunner as that user, not as LocalSystem.
+
+Use it only for trusted, allowlisted workflows in a private repository. The
+allowlist accepts one `workflow_event` per pool, so a workflow that runs on both
+`schedule` and `workflow_dispatch` needs two host pools. Each pool gets its
+own directories by default; explicit `runner_dir`/`state_dir` must differ.
+
 ---
 
 ## Self-hosted Actions cache
@@ -687,6 +733,7 @@ internal/config    config schema + loader
 internal/github    JIT client (repo/org/enterprise, PAT/App)
 internal/backend   container backends (Docker/Podman, containerd Windows)
 internal/winvm     QEMU Windows-VM backend + golden bake
+internal/hostrunner Windows host backend (no isolation, Job Object per runner)
 internal/pool      per-OS ephemeral pool + reprovision loop
 internal/scaleset  runner scale-set sessions + lifecycle management
 internal/cache     self-hosted v2 cache server

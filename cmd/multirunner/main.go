@@ -34,6 +34,7 @@ import (
 	"github.com/GerardSmit/multirunner/internal/vmview"
 	"github.com/GerardSmit/multirunner/internal/webhook"
 	"github.com/GerardSmit/multirunner/internal/winsetup"
+	"github.com/GerardSmit/multirunner/internal/hostrunner"
 	"github.com/GerardSmit/multirunner/internal/winvm"
 )
 
@@ -631,6 +632,15 @@ func planRun(w io.Writer, configPath string, installDeps bool) error {
 
 	now := time.Now()
 	for _, pool := range cfg.Pools {
+		if pool.Backend == "host" {
+			access := "allowlisted workflows only"
+			if len(pool.Workflows) == 0 {
+				access = "ANY job routed to its labels (allow_unrestricted)"
+			}
+			fmt.Fprintf(w, "Pool %s: backend=host; capacity=1; runs the runner directly on this machine as the current user, for %s; downloads actions/runner when absent; runner registrations will be created\n",
+				pool.Name, access)
+			continue
+		}
 		if pool.Backend != "qemu" {
 			backendName := pool.Backend
 			if backendName == "" {
@@ -927,6 +937,8 @@ func preparePool(ctx context.Context, pc config.Pool, interactive, installDeps b
 			}
 		case pc.Backend == "containerd":
 			return nil, fmt.Errorf("pool %s: containerd unreachable at %s: %w (install with `multirunner install-containerd`)", pc.Name, pc.Containerd.Address, err)
+		case pc.Backend == "host":
+			return nil, fmt.Errorf("pool %s: host runner unavailable: %w", pc.Name, err)
 		default:
 			return nil, fmt.Errorf("pool %s: cannot reach docker daemon at %s: %w", pc.Name, pc.Docker.Host, err)
 		}
@@ -940,6 +952,13 @@ func preparePool(ctx context.Context, pc config.Pool, interactive, installDeps b
 }
 
 func newBackend(pc config.Pool) (backend.Backend, error) {
+	if pc.Backend == "host" {
+		return hostrunner.NewBackend(hostrunner.Options{
+			Pool: pc.Name, RunnerDir: pc.Host.RunnerDir, StateDir: pc.Host.StateDir,
+			RunnerVersion: pc.Host.RunnerVersion, RunnerSHA256: pc.Host.RunnerSHA256,
+			KeepWorkspace: pc.Host.KeepWorkspace,
+		})
+	}
 	if pc.Backend == "qemu" {
 		return winvm.NewBackend(winvm.Options{
 			Golden: pc.QEMU.Golden, WorkDir: pc.QEMU.WorkDir,
@@ -1372,7 +1391,7 @@ func runRepoChecks(
 // and rootless. Endpoints running the wrong container OS are still shown, marked
 // as such: seeing a Windows daemon is what explains a linux pool failing here.
 func discoveryHint(ctx context.Context, pc config.Pool) string {
-	if pc.Backend == "qemu" || pc.Backend == "containerd" {
+	if pc.Backend == "qemu" || pc.Backend == "containerd" || pc.Backend == "host" {
 		return ""
 	}
 	found := backend.DiscoverDockerHosts(ctx)

@@ -191,12 +191,13 @@ type Cache struct {
 type Pool struct {
 	Name                   string          `yaml:"name"`
 	OS                     string          `yaml:"os"`      // linux | windows
-	Backend                string          `yaml:"backend"` // docker (default) | containerd | qemu
+	Backend                string          `yaml:"backend"` // docker (default) | containerd | qemu | host
 	Size                   int             `yaml:"size"`
 	ImageTier              string          `yaml:"image_tier"`
 	Image                  string          `yaml:"image"`
 	Container              ContainerConfig `yaml:"container"`
 	QEMU                   QEMU            `yaml:"qemu"`
+	Host                   Host            `yaml:"host"`
 	Containerd             Containerd      `yaml:"containerd"`
 	RunnerGroupID          int64           `yaml:"runner_group_id"`
 	Labels                 []string        `yaml:"labels"`
@@ -386,7 +387,7 @@ const maxLocalImageTierLength = 64
 // names no pool and wastes a JIT runner registration. An unknown tier that is
 // valid keeps falling back to a local build — a supported dev workflow.
 func (p Pool) validateImageTier() error {
-	if p.Image != "" || p.Backend == "qemu" {
+	if p.Image != "" || p.Backend == "qemu" || p.Backend == "host" {
 		return nil
 	}
 	tier := p.ImageTier
@@ -435,6 +436,22 @@ type QEMU struct {
 	Licensed      bool     `yaml:"licensed"`        // real key/KMS -> skip eval housekeeping
 	Tools         []string `yaml:"tools"`           // golden selectors: dotnet[:major] | node[:major] | go | buildtools[:line]
 }
+
+// Host configures the host backend, which runs the runner directly on this
+// machine as the user multirunner runs as. Jobs get that user's full access,
+// so a host pool must be bound to an allowlisted workflow tuple unless
+// AllowUnrestricted says otherwise.
+type Host struct {
+	RunnerDir         string `yaml:"runner_dir"`         // extracted runner (default %LOCALAPPDATA%\multirunner\host-runner)
+	StateDir          string `yaml:"state_dir"`          // records + per-job logs (default %LOCALAPPDATA%\multirunner\host-state)
+	RunnerVersion     string `yaml:"runner_version"`     // "" = image manifest version
+	RunnerSHA256      string `yaml:"runner_sha256"`      // required with a non-default runner_version
+	KeepWorkspace     bool   `yaml:"keep_workspace"`     // keep the job work folder (debugging only)
+	AllowUnrestricted bool   `yaml:"allow_unrestricted"` // run any job routed to this pool, not just allowlisted workflows
+}
+
+// knownBackends are the accepted pool backend names; "" means docker.
+var knownBackends = map[string]bool{"": true, "docker": true, "containerd": true, "qemu": true, "host": true}
 
 // Containerd configures the containerd/runhcs Windows-container backend. The
 // runner is launched via nerdctl; isolation auto-detects (process on Server,
@@ -750,7 +767,19 @@ func (c *Config) Validate() error {
 		if p.OS != "linux" && p.OS != "windows" {
 			return fmt.Errorf("pools[%q].os must be linux|windows, got %q", p.Name, p.OS)
 		}
-		if p.Backend == "qemu" {
+		if !knownBackends[p.Backend] {
+			return fmt.Errorf("pools[%q].backend must be docker|containerd|qemu|host, got %q", p.Name, p.Backend)
+		}
+		if p.Backend == "host" {
+			if err := c.validateHostPool(p); err != nil {
+				return err
+			}
+		} else if p.Host != (Host{}) {
+			return fmt.Errorf("pools[%q].host settings require backend: host", p.Name)
+		}
+		if p.Backend == "host" {
+			// No daemon, image or container: validated above.
+		} else if p.Backend == "qemu" {
 			if p.QEMU.Golden == "" {
 				return fmt.Errorf("pools[%q].qemu.golden is required for backend: qemu", p.Name)
 			}
@@ -860,6 +889,25 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	// Host pools run one job at a time per install; two pools on one directory
+	// would run jobs in the same work folder at once.
+	hostDirs := make(map[string]string)
+	for _, p := range c.Pools {
+		if p.Backend != "host" {
+			continue
+		}
+		for _, dir := range []string{p.Host.RunnerDir, p.Host.StateDir} {
+			if dir == "" {
+				continue
+			}
+			key := strings.ToLower(filepath.Clean(dir))
+			if previous, duplicate := hostDirs[key]; duplicate {
+				return fmt.Errorf("pools[%q] and pools[%q] share host directory %q; give each host pool its own", previous, p.Name, dir)
+			}
+			hostDirs[key] = p.Name
+		}
+	}
+
 	sharedWorkspaces := make(map[string]string)
 	for _, p := range c.Pools {
 		if !p.Docker.ShareWorkspace {
@@ -883,6 +931,44 @@ func (c *Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+// validateHostPool keeps the host backend to what it can do safely: one job at a
+// time on a Windows host, with nothing container-shaped configured, and only
+// for allowlisted workflows unless the operator explicitly opts out.
+func (c *Config) validateHostPool(p *Pool) error {
+	switch {
+	case p.OS != "windows":
+		return fmt.Errorf("pools[%q]: backend: host supports os: windows only", p.Name)
+	case p.Size != 1:
+		return fmt.Errorf("pools[%q]: backend: host requires size: 1 (jobs share one runner install)", p.Name)
+	case p.Image != "" || (p.ImageTier != "" && p.ImageTier != "minimal"):
+		return fmt.Errorf("pools[%q]: backend: host has no image; remove image/image_tier", p.Name)
+	case p.Docker != (Docker{}):
+		return fmt.Errorf("pools[%q]: backend: host does not use docker settings", p.Name)
+	case p.Container.configured():
+		return fmt.Errorf("pools[%q]: backend: host does not support container settings", p.Name)
+	case p.ToolCache.Mode != "" && p.ToolCache.Mode != "off":
+		return fmt.Errorf("pools[%q]: backend: host uses the host's tool cache; remove tool_cache", p.Name)
+	case !portableWorkFolder(p.WorkFolder):
+		return fmt.Errorf("pools[%q].work_folder must be one relative directory name for backend: host", p.Name)
+	case p.Host.RunnerVersion != "" && p.Host.RunnerSHA256 == "":
+		return fmt.Errorf("pools[%q].host.runner_sha256 is required with host.runner_version", p.Name)
+	case len(p.Workflows) == 0 && !p.Host.AllowUnrestricted:
+		return fmt.Errorf("pools[%q]: backend: host runs jobs with this user's full access; "+
+			"bind it to repository + workflows (provisioning: autoscale) or set host.allow_unrestricted: true", p.Name)
+	}
+	for _, dir := range []string{p.Host.RunnerDir, p.Host.StateDir} {
+		if dir != "" && !filepath.IsAbs(dir) {
+			return fmt.Errorf("pools[%q].host directories must be absolute paths, got %q", p.Name, dir)
+		}
+	}
+	return nil
+}
+
+func portableWorkFolder(name string) bool {
+	return name != "" && name != "." && name != ".." &&
+		strings.TrimSpace(name) == name && !strings.ContainsAny(name, `/\:`)
 }
 
 func validateContainerConfig(p *Pool) error {

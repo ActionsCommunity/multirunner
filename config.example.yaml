@@ -130,7 +130,7 @@ pools:
   # per-job copy-on-write overlay). Build the golden image first: multirunner bake.
   - name: windows-vm-pool
     os: windows
-    backend: qemu                # docker (default) | qemu
+    backend: qemu                # docker (default) | containerd | qemu | host
     size: 2
     runner_group_id: 1
     labels: [self-hosted, windows, x64]
@@ -163,6 +163,9 @@ pools:
     os: windows
     size: 2
     runner_group_id: 1
+    # backend: host runs the runner directly on this Windows machine as the
+    # current user (no isolation); it requires size: 1 and a workflow allowlist.
+    # See README "Windows host runners".
     # For containerd/runhcs, set backend: containerd and configure this block:
     # backend: containerd
     # containerd:
