@@ -900,7 +900,7 @@ func (c *Config) Validate() error {
 			if dir == "" {
 				continue
 			}
-			key := strings.ToLower(filepath.Clean(dir))
+			key := windowsPathKey(dir)
 			if previous, duplicate := hostDirs[key]; duplicate {
 				return fmt.Errorf("pools[%q] and pools[%q] share host directory %q; give each host pool its own", previous, p.Name, dir)
 			}
@@ -959,11 +959,27 @@ func (c *Config) validateHostPool(p *Pool) error {
 			"bind it to repository + workflows (provisioning: autoscale) or set host.allow_unrestricted: true", p.Name)
 	}
 	for _, dir := range []string{p.Host.RunnerDir, p.Host.StateDir} {
-		if dir != "" && !filepath.IsAbs(dir) {
+		if dir != "" && !windowsAbsPath(dir) {
 			return fmt.Errorf("pools[%q].host directories must be absolute paths, got %q", p.Name, dir)
 		}
 	}
 	return nil
+}
+
+// windowsAbsPath reports whether p is an absolute Windows path (drive or UNC).
+// Host pools are Windows-only, but config is also validated on other OSes,
+// where filepath.IsAbs would reject C:\ paths.
+func windowsAbsPath(p string) bool {
+	if len(p) >= 3 && p[1] == ':' && (p[2] == '\\' || p[2] == '/') &&
+		((p[0] >= 'a' && p[0] <= 'z') || (p[0] >= 'A' && p[0] <= 'Z')) {
+		return true
+	}
+	return strings.HasPrefix(p, `\\`) && len(p) > 2
+}
+
+// windowsPathKey normalizes a Windows path for duplicate detection on any OS.
+func windowsPathKey(p string) string {
+	return strings.ToLower(strings.TrimRight(strings.ReplaceAll(p, "/", `\`), `\`))
 }
 
 func portableWorkFolder(name string) bool {
