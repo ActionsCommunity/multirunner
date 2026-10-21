@@ -481,16 +481,29 @@ pools:
 How it behaves:
 - **Download.** On first start it downloads the pinned `actions/runner` release,
   verifies its SHA256 and extracts it once per pool.
-- **One job at a time.** Pools are `size: 1`. Each job is an ephemeral JIT
-  runner (`run.cmd --jitconfig`) from that install. Its work folder is deleted
-  afterwards (`host.keep_workspace: true` keeps it for debugging), and its output
-  is kept in `<state_dir>/<runner>.log`.
-- **Kill stops everything.** The runner runs inside a Windows Job Object, so a
-  kill or shutdown also stops the processes the job started. After a crash, the
-  next start finds the leftover runner from its record and stops it, but only
-  if the PID still belongs to that runner.
-- **Credentials.** Jobs inherit the environment and the signed-in tools of
-  multirunner's user. Run multirunner as that user, not as LocalSystem.
+- **One job at a time, clean every time.** Pools are `size: 1`. Each job is an
+  ephemeral JIT runner (`run.cmd --jitconfig`) from that install. Before and
+  after every job the install is reset: the runner's `.runner`/`.credentials`
+  files and the work folder are removed (`host.keep_workspace: true` keeps the
+  work folder for debugging), and `_diag` moves to `<state_dir>/<runner>.diag`
+  next to `<runner>.log`. The newest 20 of each are kept.
+- **A runner that never takes a job is a failure.** `run.cmd` exits 0 even when
+  the listener fails to start, so a run whose log never shows `Running job:`
+  counts as a failed launch (backoff, `max_consecutive_failures`).
+- **Kill stops everything.** The runner starts suspended, is placed in a
+  Windows Job Object, and only then resumes, so a kill or shutdown stops every
+  process the job started. Shutdown waits for that cleanup.
+- **Crash recovery.** On startup, a leftover runner from a previous run is
+  stopped if its PID still has the recorded start time (it's never killed on a
+  PID alone), and the install is reset.
+- **Environment.** Jobs inherit the environment and signed-in tools of
+  multirunner's user, except multirunner's own secrets: variables from `.env`,
+  variables referenced as `${VAR}` in the config, any variable holding a
+  resolved secret value, and `MULTIRUNNER_*`.
+- **Not as SYSTEM.** A host pool refuses to start under `NT AUTHORITY\SYSTEM`
+  (the default `multirunner service install` identity) unless
+  `host.allow_local_system: true`. Run multirunner as the user whose tools the
+  jobs need.
 
 Use it only for trusted, allowlisted workflows in a private repository. The
 allowlist accepts one `workflow_event` per pool, so a workflow that runs on both

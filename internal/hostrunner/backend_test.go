@@ -25,10 +25,22 @@ func TestResolveRunnerRequiresDigestForCustomVersion(t *testing.T) {
 }
 
 func TestHostEnvOverridesCaseInsensitively(t *testing.T) {
-	got := hostEnv([]string{"Path=C:\\x", "HOME=h"}, map[string]string{"PATH": "C:\\y"})
+	got := hostEnv([]string{"Path=C:\\x", "HOME=h"}, map[string]string{"PATH": "C:\\y"}, nil, nil)
 	joined := strings.Join(got, "|")
 	if strings.Contains(joined, `Path=C:\x`) || !strings.Contains(joined, `PATH=C:\y`) || !strings.Contains(joined, "HOME=h") {
 		t.Fatalf("hostEnv = %v", got)
+	}
+}
+
+func TestHostEnvStripsSecretsByNameValueAndPrefix(t *testing.T) {
+	got := strings.Join(hostEnv([]string{
+		"github_pat=p1", "COPY=p1", "MULTIRUNNER_X=1", "OK=1",
+	}, map[string]string{"MULTIRUNNER_GIT_MIRROR": "m"}, []string{"GITHUB_PAT"}, []string{"p1"}), "|")
+	if strings.Contains(got, "p1") || strings.Contains(got, "MULTIRUNNER_X") {
+		t.Fatalf("secret leaked: %s", got)
+	}
+	if !strings.Contains(got, "OK=1") || !strings.Contains(got, "MULTIRUNNER_GIT_MIRROR=m") {
+		t.Fatalf("pool env and ordinary vars must survive: %s", got)
 	}
 }
 

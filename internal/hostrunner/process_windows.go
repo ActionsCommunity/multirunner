@@ -21,12 +21,15 @@ func platformProcessOps() processOps { return windowsProcessOps{} }
 
 type jobGroup struct{ job windows.Handle }
 
-// start runs cmd in a new process group and assigns it to a Job Object that
-// kills every process in it when terminated or when multirunner exits. The
-// runner spends seconds booting .NET before it spawns children, so assigning
-// right after Start contains the whole tree in practice.
+var procNtResumeProcess = windows.NewLazySystemDLL("ntdll.dll").NewProc("NtResumeProcess")
+
+// start creates cmd suspended, assigns it to a Job Object that kills every
+// process in it when terminated or when multirunner exits, and only then
+// resumes it. Nothing can run, so nothing can spawn, outside the job.
 func (windowsProcessOps) start(cmd *exec.Cmd) (processGroup, error) {
-	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_NEW_PROCESS_GROUP}
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		CreationFlags: windows.CREATE_NEW_PROCESS_GROUP | windows.CREATE_SUSPENDED,
+	}
 	job, err := windows.CreateJobObject(nil, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create job object: %w", err)
@@ -48,17 +51,39 @@ func (windowsProcessOps) start(cmd *exec.Cmd) (processGroup, error) {
 		_ = windows.CloseHandle(job)
 		return nil, err
 	}
-	process, err := windows.OpenProcess(windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE, false, pid)
+	const processSuspendResume = 0x0800
+	process, err := windows.OpenProcess(
+		windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE|processSuspendResume, false, pid)
 	if err != nil {
+		_ = cmd.Process.Kill()
 		_ = windows.CloseHandle(job)
 		return nil, fmt.Errorf("open runner process: %w", err)
 	}
 	defer windows.CloseHandle(process)
 	if err := windows.AssignProcessToJobObject(job, process); err != nil {
+		_ = windows.TerminateProcess(process, 1)
 		_ = windows.CloseHandle(job)
 		return nil, fmt.Errorf("assign runner to job object: %w", err)
 	}
+	if status, _, _ := procNtResumeProcess.Call(uintptr(process)); status != 0 {
+		_ = windows.TerminateJobObject(job, 1)
+		_ = windows.CloseHandle(job)
+		return nil, fmt.Errorf("resume runner process: NTSTATUS 0x%x", status)
+	}
 	return &jobGroup{job: job}, nil
+}
+
+// runningAsLocalSystem reports whether this process runs as NT AUTHORITY\SYSTEM.
+func runningAsLocalSystem() (bool, error) {
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		return false, err
+	}
+	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	if err != nil {
+		return false, err
+	}
+	return user.User.Sid.Equals(system), nil
 }
 
 func (g *jobGroup) kill() error { return windows.TerminateJobObject(g.job, 1) }

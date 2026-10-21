@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	imageversions "github.com/GerardSmit/multirunner/images"
+	"github.com/GerardSmit/multirunner/internal/hostrunner"
 	"github.com/GerardSmit/multirunner/internal/winvm"
 	"gopkg.in/yaml.v3"
 )
@@ -61,6 +62,10 @@ type Config struct {
 	Metrics      Metrics      `yaml:"metrics"`
 	Pools        []Pool       `yaml:"pools"`
 	Log          Log          `yaml:"log"`
+
+	// secretEnvNames are variables multirunner itself consumes (loaded from
+	// .env or referenced as ${VAR}); see RunnerEnvSecrets.
+	secretEnvNames []string
 }
 
 // Webhook configures the workflow_job webhook receiver (provisioning: webhook).
@@ -448,6 +453,7 @@ type Host struct {
 	RunnerSHA256      string `yaml:"runner_sha256"`      // required with a non-default runner_version
 	KeepWorkspace     bool   `yaml:"keep_workspace"`     // keep the job work folder (debugging only)
 	AllowUnrestricted bool   `yaml:"allow_unrestricted"` // run any job routed to this pool, not just allowlisted workflows
+	AllowLocalSystem  bool   `yaml:"allow_local_system"` // permit jobs to run as NT AUTHORITY\SYSTEM
 }
 
 // knownBackends are the accepted pool backend names; "" means docker.
@@ -505,13 +511,14 @@ func Load(path string) (*Config, error) {
 	}
 	// Load .env (config dir, then CWD) so ${VAR} refs resolve without an explicit
 	// export. Real environment variables always take precedence.
-	loadDotEnv(filepath.Dir(path))
+	dotEnvKeys := loadDotEnv(filepath.Dir(path))
 	var c Config
 	dec := yaml.NewDecoder(strings.NewReader(string(data)))
 	dec.KnownFields(true)
 	if err := dec.Decode(&c); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
+	c.secretEnvNames = append(c.secretEnvNames, dotEnvKeys...)
 	c.resolveSecrets()
 	c.applyDefaults()
 	if err := c.Validate(); err != nil {
@@ -523,11 +530,37 @@ func Load(path string) (*Config, error) {
 // resolveSecrets expands ${VAR} / $VAR references in sensitive fields so secrets
 // can be supplied via environment variables instead of being written to disk.
 func (c *Config) resolveSecrets() {
-	c.Auth.PAT = expandEnvRef(c.Auth.PAT)
-	c.Auth.PrivateKeyPath = expandEnvRef(c.Auth.PrivateKeyPath)
-	c.Auth.TokenPath = expandEnvRef(c.Auth.TokenPath)
-	c.Webhook.Secret = expandEnvRef(c.Webhook.Secret)
-	c.Cache.AccessToken = expandEnvRef(c.Cache.AccessToken)
+	for _, field := range []*string{
+		&c.Auth.PAT, &c.Auth.PrivateKeyPath, &c.Auth.TokenPath,
+		&c.Webhook.Secret, &c.Cache.AccessToken,
+	} {
+		if name := envRefName(*field); name != "" {
+			c.secretEnvNames = append(c.secretEnvNames, name)
+		}
+		*field = expandEnvRef(*field)
+	}
+}
+
+// RunnerEnvSecrets lists what must never reach a runner that inherits
+// multirunner's own environment (the host backend): every variable loaded from
+// .env or referenced as ${VAR} by the config, and the resolved secret values,
+// whatever variable they arrive in.
+func (c *Config) RunnerEnvSecrets() (names, values []string) {
+	names = append(names, c.secretEnvNames...)
+	for _, v := range []string{c.Auth.PAT, c.Webhook.Secret, c.Cache.AccessToken} {
+		if v != "" {
+			values = append(values, v)
+		}
+	}
+	return names, values
+}
+
+// envRefName returns NAME for a "${NAME}" or "$NAME" value, else "".
+func envRefName(v string) string {
+	if !strings.HasPrefix(v, "$") {
+		return ""
+	}
+	return strings.TrimSuffix(strings.TrimPrefix(strings.TrimPrefix(v, "$"), "{"), "}")
 }
 
 // expandEnvRef resolves a value of the form "${NAME}" or "$NAME" to the named
@@ -895,16 +928,23 @@ func (c *Config) Validate() error {
 	}
 
 	// Host pools run one job at a time per install; two pools on one directory
-	// would run jobs in the same work folder at once.
+	// would run jobs in the same work folder at once. Compare the directories
+	// each pool really uses (defaults resolved from the pool name) the way NTFS
+	// does, case-insensitively, so "Nightly" and "nightly" collide too.
 	hostDirs := make(map[string]string)
 	for _, p := range c.Pools {
 		if p.Backend != "host" {
 			continue
 		}
-		for _, dir := range []string{p.Host.RunnerDir, p.Host.StateDir} {
-			if dir == "" {
-				continue
-			}
+		defaultRunner, defaultState := hostrunner.DefaultDirs(p.Name)
+		runnerDir, stateDir := p.Host.RunnerDir, p.Host.StateDir
+		if runnerDir == "" {
+			runnerDir = defaultRunner
+		}
+		if stateDir == "" {
+			stateDir = defaultState
+		}
+		for _, dir := range []string{runnerDir, stateDir} {
 			key := windowsPathKey(dir)
 			if previous, duplicate := hostDirs[key]; duplicate {
 				return fmt.Errorf("pools[%q] and pools[%q] share host directory %q; give each host pool its own", previous, p.Name, dir)

@@ -812,6 +812,15 @@ func runOrchestrator(ctx context.Context, configPath string, interactive, instal
 			continue
 		}
 		backends = append(backends, be)
+		if host, ok := be.(*hostrunner.Backend); ok {
+			// Host jobs inherit multirunner's environment: keep its secrets out,
+			// and recover from a previous run that stopped mid-job.
+			names, values := cfg.RunnerEnvSecrets()
+			host.Configure(names, values, logger.With("pool", pc.Name))
+			if err := host.CleanupOrphans(); err != nil {
+				return fmt.Errorf("pool %s: recover host runner state: %w", pc.Name, err)
+			}
+		}
 
 		env, mounts := poolEnvAndMounts(cfg, pc, sharedEnv, gitMgr, logger)
 		image := pc.ImageRef()
@@ -956,7 +965,7 @@ func newBackend(pc config.Pool) (backend.Backend, error) {
 		return hostrunner.NewBackend(hostrunner.Options{
 			Pool: pc.Name, RunnerDir: pc.Host.RunnerDir, StateDir: pc.Host.StateDir,
 			RunnerVersion: pc.Host.RunnerVersion, RunnerSHA256: pc.Host.RunnerSHA256,
-			KeepWorkspace: pc.Host.KeepWorkspace,
+			KeepWorkspace: pc.Host.KeepWorkspace, AllowLocalSystem: pc.Host.AllowLocalSystem,
 		})
 	}
 	if pc.Backend == "qemu" {

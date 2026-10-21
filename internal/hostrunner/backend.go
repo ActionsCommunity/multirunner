@@ -19,11 +19,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -47,6 +49,16 @@ type Options struct {
 	RunnerSHA256  string
 	// KeepWorkspace keeps the job's work folder after the job (debugging only).
 	KeepWorkspace bool
+	// StripEnvNames and StripEnvValues remove multirunner's own secrets from the
+	// environment the runner (and therefore every job step) inherits: variables
+	// loaded from .env or referenced as ${VAR} in the config, and any variable
+	// whose value is a resolved secret.
+	StripEnvNames  []string
+	StripEnvValues []string
+	// AllowLocalSystem permits running jobs as NT AUTHORITY\SYSTEM.
+	AllowLocalSystem bool
+	// Logger receives cleanup problems that must not fail a finished job.
+	Logger *slog.Logger
 }
 
 // Backend runs one ephemeral runner at a time on the host.
@@ -54,9 +66,11 @@ type Backend struct {
 	opt      Options
 	download func(ctx context.Context, url, dst string) error
 	proc     processOps
+	logger   *slog.Logger
 
-	mu   sync.Mutex
-	busy bool
+	mu     sync.Mutex
+	busy   bool
+	active *hostHandle
 }
 
 var (
@@ -84,19 +98,27 @@ func NewBackend(opt Options) (*Backend, error) {
 	if runtime.GOOS != "windows" {
 		return nil, fmt.Errorf("host backend: supported on Windows only (this host is %s)", runtime.GOOS)
 	}
+	if !opt.AllowLocalSystem {
+		system, err := runningAsLocalSystem()
+		if err != nil {
+			return nil, fmt.Errorf("host backend: identify current user: %w", err)
+		}
+		if system {
+			return nil, fmt.Errorf("host backend: refusing to run jobs as NT AUTHORITY\\SYSTEM " +
+				"(the default `multirunner service install` identity); run multirunner as a normal user, " +
+				"or set host.allow_local_system: true")
+		}
+	}
 	if opt.RunnerDir == "" || opt.StateDir == "" {
 		if !portableBaseName(opt.Pool) {
 			return nil, fmt.Errorf("host backend: pool name %q cannot name a directory; set host.runner_dir and host.state_dir", opt.Pool)
 		}
-		base := os.Getenv("LOCALAPPDATA")
-		if base == "" {
-			base = os.TempDir()
-		}
+		runnerDir, stateDir := DefaultDirs(opt.Pool)
 		if opt.RunnerDir == "" {
-			opt.RunnerDir = filepath.Join(base, "multirunner", "host", opt.Pool, "runner")
+			opt.RunnerDir = runnerDir
 		}
 		if opt.StateDir == "" {
-			opt.StateDir = filepath.Join(base, "multirunner", "host", opt.Pool, "state")
+			opt.StateDir = stateDir
 		}
 	}
 	version, digest, err := resolveRunner(opt.RunnerVersion, opt.RunnerSHA256)
@@ -104,7 +126,33 @@ func NewBackend(opt Options) (*Backend, error) {
 		return nil, fmt.Errorf("host backend: %w", err)
 	}
 	opt.RunnerVersion, opt.RunnerSHA256 = version, digest
-	return &Backend{opt: opt, download: downloadFile, proc: platformProcessOps()}, nil
+	logger := opt.Logger
+	if logger == nil {
+		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
+	return &Backend{opt: opt, download: downloadFile, proc: platformProcessOps(), logger: logger}, nil
+}
+
+// Configure sets what needs the loaded config: the secrets to keep out of the
+// job environment and where to log cleanup problems.
+func (b *Backend) Configure(stripNames, stripValues []string, logger *slog.Logger) {
+	b.opt.StripEnvNames = append([]string(nil), stripNames...)
+	b.opt.StripEnvValues = append([]string(nil), stripValues...)
+	if logger != nil {
+		b.logger = logger
+	}
+}
+
+// DefaultDirs returns a pool's default runner and state directories. Config
+// validation uses it too, so explicit and default directories are compared as
+// the paths they really resolve to.
+func DefaultDirs(pool string) (runnerDir, stateDir string) {
+	base := os.Getenv("LOCALAPPDATA")
+	if base == "" {
+		base = os.TempDir()
+	}
+	root := filepath.Join(base, "multirunner", "host", pool)
+	return filepath.Join(root, "runner"), filepath.Join(root, "state")
 }
 
 func resolveRunner(version, digest string) (string, string, error) {
@@ -238,7 +286,17 @@ func (b *Backend) Launch(ctx context.Context, req backend.LaunchRequest) (backen
 	release := func() {
 		b.mu.Lock()
 		b.busy = false
+		b.active = nil
 		b.mu.Unlock()
+	}
+
+	// Whatever the previous job left (an interrupted runner's hidden
+	// .runner/.credentials, a work folder, diag logs) is cleared first: the
+	// runner cannot start over its own stale state, and a job must never see
+	// the previous one's files.
+	if err := b.resetInstall(root, workFolder, ""); err != nil {
+		release()
+		return nil, fmt.Errorf("host: reset runner install: %w", err)
 	}
 
 	recordPath := filepath.Join(b.opt.StateDir, runnerRecordName(req.Name, req.Ownership))
@@ -263,7 +321,7 @@ func (b *Backend) Launch(ctx context.Context, req backend.LaunchRequest) (backen
 	// --jitconfig makes the runner ephemeral: it takes one job and exits.
 	cmd := exec.Command(filepath.Join(root, "run.cmd"), "--jitconfig", req.EncodedJITConfig)
 	cmd.Dir = root
-	cmd.Env = hostEnv(os.Environ(), req.Env)
+	cmd.Env = hostEnv(os.Environ(), req.Env, b.opt.StripEnvNames, b.opt.StripEnvValues)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	group, err := b.proc.start(cmd)
@@ -278,39 +336,105 @@ func (b *Backend) Launch(ctx context.Context, req backend.LaunchRequest) (backen
 	}
 	record.Started = true
 	record.PID = cmd.Process.Pid
-	record.StartTime, _ = b.proc.startTime(record.PID)
-	if err := writeRunnerRecord(recordPath, record); err != nil {
+	// Recovery only kills a PID whose start time still matches, so a runner
+	// without a known identity is not allowed to run at all.
+	started, err := b.proc.startTime(record.PID)
+	if err == nil && started == 0 {
+		err = errors.New("start time is zero")
+	}
+	if err == nil {
+		record.StartTime = started
+		err = writeRunnerRecord(recordPath, record)
+	}
+	if err != nil {
 		_ = group.kill()
 		_ = cmd.Wait()
 		_ = group.close()
 		_ = logFile.Close()
+		_ = b.resetInstall(root, workFolder, "")
 		return failed(fmt.Errorf("record host runner process: %w", err))
 	}
 
-	cleanup := func() error {
+	// cleanup runs after the runner exits. Its problems are logged, never
+	// returned: they must not turn a finished job into a failure. Anything it
+	// could not remove is retried by the next Launch, which refuses to start
+	// over it.
+	cleanup := func() {
 		defer release()
 		errs := []error{group.close(), logFile.Close()}
-		if !b.opt.KeepWorkspace {
-			errs = append(errs, removeWorkFolder(root, workFolder))
-		}
+		errs = append(errs, b.resetInstall(root, workFolder, req.Name))
 		if err := os.Remove(recordPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 			errs = append(errs, err)
 		}
-		return errors.Join(errs...)
+		if err := errors.Join(errs...); err != nil {
+			b.logger.Warn("host runner cleanup incomplete; the next launch retries it",
+				"runner", req.Name, "err", err)
+		}
+		b.pruneState()
 	}
-	return newHostHandle(cmd, group, filepath.Base(recordPath), cleanup), nil
+	h := newHostHandle(cmd, group, filepath.Base(recordPath), logPath, cleanup)
+	b.mu.Lock()
+	b.active = h
+	b.mu.Unlock()
+	return h, nil
 }
 
-func (b *Backend) Close() error { return nil }
+// Close stops a runner that is still running (shutdown can return before the
+// pool's launch goroutine waits for it) and waits for its cleanup, so a
+// restart never finds a half-used install.
+func (b *Backend) Close() error {
+	b.mu.Lock()
+	h := b.active
+	b.mu.Unlock()
+	if h == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	return h.Kill(ctx)
+}
 
-// hostEnv layers the pool's runner env over the host environment. Later
-// entries win on Windows, but a duplicate key is still ambiguous to tools, so
-// overridden host keys are dropped.
-func hostEnv(base []string, extra map[string]string) []string {
+// CleanupOrphans recovers from a previous multirunner process that stopped
+// mid-job, in every provisioning mode: it stops leftover runners it can prove
+// are its own, then resets the install. Scale-set records are left for the
+// scale-set reconciler, which also releases their registrations.
+func (b *Backend) CleanupOrphans() error {
+	paths, err := filepath.Glob(filepath.Join(b.opt.StateDir, "*.runner.json"))
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, path := range paths {
+		record, err := readRunnerRecord(path)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("read host runner record %s: %w", filepath.Base(path), err))
+			continue
+		}
+		if !record.Ownership.IsZero() {
+			continue
+		}
+		if err := b.removeRunner(context.Background(), path, record); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if len(errs) != 0 {
+		return errors.Join(errs...)
+	}
+	// No live runner remains: clear stale state even without a record.
+	return b.resetInstall(b.runnerRoot(), "_work", "orphan")
+}
+
+// hostEnv layers the pool's runner env over the host environment, minus
+// multirunner's own secrets. Later entries win on Windows, but a duplicate key
+// is still ambiguous to tools, so overridden host keys are dropped.
+func hostEnv(base []string, extra map[string]string, stripNames, stripValues []string) []string {
 	out := make([]string, 0, len(base)+len(extra))
 	for _, kv := range base {
-		key, _, _ := strings.Cut(kv, "=")
+		key, value, _ := strings.Cut(kv, "=")
 		if _, override := lookupFold(extra, key); override && key != "" {
+			continue
+		}
+		if strippedEnv(key, value, stripNames, stripValues) {
 			continue
 		}
 		out = append(out, kv)
@@ -330,20 +454,126 @@ func lookupFold(m map[string]string, key string) (string, bool) {
 	return "", false
 }
 
-func removeWorkFolder(root, workFolder string) error {
-	if !portableBaseName(workFolder) {
-		return fmt.Errorf("refusing to remove work folder %q", workFolder)
+// strippedEnv reports whether a host variable is one of multirunner's own
+// secrets, by name or by value, or multirunner's own namespace.
+func strippedEnv(key, value string, names, values []string) bool {
+	if strings.HasPrefix(strings.ToUpper(key), "MULTIRUNNER_") {
+		return true
 	}
-	path := filepath.Join(root, workFolder)
+	for _, name := range names {
+		if strings.EqualFold(name, key) {
+			return true
+		}
+	}
+	if value != "" {
+		for _, secret := range values {
+			if secret != "" && value == secret {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// runnerStateFiles are what the runner writes into its own root while
+// registered. A clean exit removes them; an interrupted one leaves them hidden,
+// and the next runner then fails with "Access to the path '.runner' is denied".
+var runnerStateFiles = []string{
+	".runner", ".credentials", ".credentials_rsaparams",
+	".runner_migrated", ".credentials_migrated", ".service",
+}
+
+// resetInstall returns the shared install to a clean state: runner state files
+// removed, the work folder removed (unless keep_workspace), and _diag moved
+// into the state dir as <archiveAs>.diag (or deleted when archiveAs is empty)
+// so one job can't read another's diagnostics from the install.
+func (b *Backend) resetInstall(root, workFolder, archiveAs string) error {
+	if !portableBaseName(workFolder) {
+		return fmt.Errorf("refusing to reset work folder %q", workFolder)
+	}
+	var errs []error
+	for _, name := range runnerStateFiles {
+		errs = append(errs, removeForced(filepath.Join(root, name)))
+	}
+	diag := filepath.Join(root, "_diag")
+	if _, err := os.Stat(diag); err == nil {
+		moved := false
+		if archiveAs != "" && portableBaseName(archiveAs) {
+			target := filepath.Join(b.opt.StateDir, archiveAs+".diag")
+			_ = removeTree(target)
+			moved = os.Rename(diag, target) == nil
+		}
+		if !moved {
+			errs = append(errs, removeTree(diag))
+		}
+	}
+	if !b.opt.KeepWorkspace {
+		errs = append(errs, removeTree(filepath.Join(root, workFolder)))
+	}
+	return errors.Join(errs...)
+}
+
+// removeForced deletes one file, clearing the read-only attribute the runner
+// sets on its credential files.
+func removeForced(path string) error {
+	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	_ = os.Chmod(path, 0o600)
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove %s: %w", path, err)
+	}
+	return nil
+}
+
+// removeTree deletes a directory, retrying while antivirus or the indexer still
+// holds files a job just wrote, and clearing read-only files (git objects).
+func removeTree(path string) error {
 	var err error
-	// Antivirus and indexers briefly hold files a job just wrote; retry a little.
 	for attempt := 0; attempt < 5; attempt++ {
 		if err = os.RemoveAll(path); err == nil {
 			return nil
 		}
+		_ = filepath.WalkDir(path, func(p string, _ os.DirEntry, _ error) error {
+			_ = os.Chmod(p, 0o700)
+			return nil
+		})
 		time.Sleep(time.Duration(attempt+1) * 200 * time.Millisecond)
 	}
-	return fmt.Errorf("remove host work folder %s: %w", path, err)
+	return fmt.Errorf("remove %s: %w", path, err)
+}
+
+// stateRetention is how many per-job logs and diag folders the state dir keeps.
+const stateRetention = 20
+
+// pruneState keeps the newest per-job logs and diag folders and deletes the rest.
+func (b *Backend) pruneState() {
+	entries, err := os.ReadDir(b.opt.StateDir)
+	if err != nil {
+		return
+	}
+	type item struct {
+		path string
+		mod  time.Time
+	}
+	var items []item
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".log") && !strings.HasSuffix(e.Name(), ".diag") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		items = append(items, item{filepath.Join(b.opt.StateDir, e.Name()), info.ModTime()})
+	}
+	if len(items) <= stateRetention*2 {
+		return
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].mod.After(items[j].mod) })
+	for _, it := range items[stateRetention*2:] {
+		_ = removeTree(it.path)
+	}
 }
 
 type runnerRecord struct {
@@ -400,30 +630,50 @@ func (b *Backend) RemoveOwnedRunner(ctx context.Context, resourceID string) erro
 	if err != nil {
 		return fmt.Errorf("read host runner record: %w", err)
 	}
+	return b.removeRunner(ctx, recordPath, record)
+}
+
+// removeRunner stops a recorded runner (only when its PID provably still
+// belongs to it), resets the install and deletes the record.
+func (b *Backend) removeRunner(ctx context.Context, recordPath string, record runnerRecord) error {
+	b.mu.Lock()
+	inUse, active := b.busy, b.active
+	b.mu.Unlock()
+	if inUse {
+		// The record may be this process's own running job (a scale-set
+		// reconcile): stop it through its handle, whose cleanup resets the
+		// install and removes the record.
+		if active != nil && active.resourceID == filepath.Base(recordPath) {
+			return active.Kill(ctx)
+		}
+		return fmt.Errorf("host runner %s: install is in use by a running job", record.Name)
+	}
 	if record.PID != 0 {
 		alive, err := b.proc.alive(record.PID)
 		if err != nil {
 			return fmt.Errorf("inspect host runner %d: %w", record.PID, err)
 		}
-		same := alive
-		if alive && record.StartTime != 0 {
-			started, err := b.proc.startTime(record.PID)
-			same = err == nil && started == record.StartTime
-		}
-		if same {
-			if err := b.proc.killTree(record.PID); err != nil {
-				return fmt.Errorf("stop host runner %s: %w", record.Name, err)
+		if alive {
+			if record.StartTime == 0 {
+				return fmt.Errorf("host runner %s: PID %d is alive but its identity was never recorded; "+
+					"refusing to kill it (stop it by hand, then delete %s)", record.Name, record.PID, recordPath)
 			}
-			if err := waitForExit(ctx, record.PID, b.proc.alive); err != nil {
-				return fmt.Errorf("wait for host runner %s: %w", record.Name, err)
+			started, err := b.proc.startTime(record.PID)
+			if err == nil && started == record.StartTime {
+				if err := b.proc.killTree(record.PID); err != nil {
+					return fmt.Errorf("stop host runner %s: %w", record.Name, err)
+				}
+				if err := waitForExit(ctx, record.PID, b.proc.alive); err != nil {
+					return fmt.Errorf("wait for host runner %s: %w", record.Name, err)
+				}
 			}
 		}
 	} else if record.Started {
-		return fmt.Errorf("host runner record %s has no process identity", resourceID)
+		return fmt.Errorf("host runner record %s has no process identity", filepath.Base(recordPath))
 	}
 	var errs []error
-	if record.Root == b.runnerRoot() && !b.opt.KeepWorkspace && record.WorkFolder != "" {
-		errs = append(errs, removeWorkFolder(record.Root, record.WorkFolder))
+	if record.Root == b.runnerRoot() && portableBaseName(record.WorkFolder) {
+		errs = append(errs, b.resetInstall(record.Root, record.WorkFolder, record.Name))
 	}
 	if err := os.Remove(recordPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		errs = append(errs, err)
@@ -594,36 +844,58 @@ type hostHandle struct {
 	cmd        *exec.Cmd
 	group      processGroup
 	resourceID string
+	logPath    string
 
-	done       chan struct{}
-	waitErr    error
-	cleanupErr error
-	killMu     sync.Mutex
+	done    chan struct{}
+	code    int
+	waitErr error
+	killMu  sync.Mutex
 }
 
-func newHostHandle(cmd *exec.Cmd, group processGroup, resourceID string, cleanup func() error) *hostHandle {
-	h := &hostHandle{cmd: cmd, group: group, resourceID: resourceID, done: make(chan struct{})}
+// ranJobMarker is what Runner.Listener prints when it takes a job. run.cmd
+// exits 0 even when the listener never got that far (it failed to configure,
+// or exited with "terminated error"), so the exit code alone can't tell a
+// finished job from a runner that never worked.
+const ranJobMarker = "Running job:"
+
+func newHostHandle(cmd *exec.Cmd, group processGroup, resourceID, logPath string, cleanup func()) *hostHandle {
+	h := &hostHandle{cmd: cmd, group: group, resourceID: resourceID, logPath: logPath, done: make(chan struct{})}
 	go func() {
-		h.waitErr = cmd.Wait()
-		h.cleanupErr = cleanup()
+		err := cmd.Wait()
+		var exitErr *exec.ExitError
+		switch {
+		case err == nil:
+			h.code = 0
+		case errors.As(err, &exitErr):
+			h.code = exitErr.ExitCode()
+		default:
+			h.code, h.waitErr = -1, err
+		}
+		if h.waitErr == nil && h.code == 0 && !logContains(logPath, ranJobMarker) {
+			h.waitErr = fmt.Errorf("runner exited without running a job (see %s)", logPath)
+		}
+		// Cleanup problems are logged by cleanup itself and never change the
+		// job's result.
+		cleanup()
 		close(h.done)
 	}()
 	return h
 }
 
+func logContains(path, marker string) bool {
+	data, err := os.ReadFile(path)
+	return err == nil && strings.Contains(string(data), marker)
+}
+
 func (h *hostHandle) ID() string { return h.resourceID + " pid=" + strconv.Itoa(h.cmd.Process.Pid) }
 
+// Wait returns the runner's exit code. A runner that exited without ever
+// taking a job is an error, so the pool counts it as a failure and backs off
+// instead of re-registering every poll.
 func (h *hostHandle) Wait(ctx context.Context) (int, error) {
 	select {
 	case <-h.done:
-		if h.waitErr != nil {
-			var exitErr *exec.ExitError
-			if errors.As(h.waitErr, &exitErr) {
-				return exitErr.ExitCode(), h.cleanupErr
-			}
-			return -1, errors.Join(h.waitErr, h.cleanupErr)
-		}
-		return 0, h.cleanupErr
+		return h.code, h.waitErr
 	case <-ctx.Done():
 		return -1, ctx.Err()
 	}
@@ -639,20 +911,20 @@ func (h *hostHandle) Kill(ctx context.Context) error {
 	defer h.killMu.Unlock()
 	select {
 	case <-h.done:
-		return h.cleanupErr
+		return nil
 	default:
 	}
 	if err := h.group.kill(); err != nil {
 		select {
 		case <-h.done: // exited (and closed its job) between the check and the kill
-			return h.cleanupErr
+			return nil
 		default:
 			return fmt.Errorf("kill host runner: %w", err)
 		}
 	}
 	select {
 	case <-h.done:
-		return h.cleanupErr
+		return nil
 	case <-ctx.Done():
 		return fmt.Errorf("wait for host runner exit: %w", ctx.Err())
 	}

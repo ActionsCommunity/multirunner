@@ -1,8 +1,12 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/GerardSmit/multirunner/internal/hostrunner"
 )
 
 func hostConfig(mutate func(p *Pool)) *Config {
@@ -74,6 +78,62 @@ func TestHostPoolsCannotShareDirectories(t *testing.T) {
 	c.Pools[1].Host.RunnerDir = `C:\mr\runner2`
 	if err := c.Validate(); err != nil {
 		t.Fatalf("distinct directories should validate: %v", err)
+	}
+}
+
+func TestHostPoolDefaultDirsCollideCaseInsensitively(t *testing.T) {
+	c := hostConfig(func(p *Pool) { p.Name = "Nightly" })
+	second := c.Pools[0]
+	second.Name, second.WorkflowEvent = "nightly", "workflow_dispatch"
+	c.Pools = append(c.Pools, second)
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "share host directory") {
+		t.Fatalf("pool names differing only by case share default dirs; got %v", err)
+	}
+}
+
+func TestExplicitHostDirCollidesWithAnotherPoolsDefault(t *testing.T) {
+	c := hostConfig(nil)
+	runnerDir, _ := hostrunner.DefaultDirs("sync")
+	second := c.Pools[0]
+	second.Name, second.WorkflowEvent = "other", "workflow_dispatch"
+	second.Host.RunnerDir = strings.ToUpper(runnerDir)
+	if !windowsAbsPath(second.Host.RunnerDir) {
+		t.Skip("default dir is not a Windows path on this OS")
+	}
+	c.Pools = append(c.Pools, second)
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "share host directory") {
+		t.Fatalf("explicit dir equal to another pool's default should collide; got %v", err)
+	}
+}
+
+func TestRunnerEnvSecretsCoverDotEnvAndReferences(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("MR_TEST_PAT", "")
+	os.Unsetenv("MR_TEST_PAT")
+	t.Setenv("MR_TEST_EXTRA", "")
+	os.Unsetenv("MR_TEST_EXTRA")
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("MR_TEST_PAT=secret-pat\nMR_TEST_EXTRA=x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := "github: {scope: repo, owner: acme, repo: site}\nauth: {pat: \"${MR_TEST_PAT}\"}\nprovisioning: pool\n" +
+		"pools: [{name: p, os: linux, docker: {host: \"unix:///var/run/docker.sock\"}}]\n"
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names, values := c.RunnerEnvSecrets()
+	joined := strings.Join(names, ",")
+	for _, want := range []string{"MR_TEST_PAT", "MR_TEST_EXTRA"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("names %v missing %s", names, want)
+		}
+	}
+	if len(values) != 1 || values[0] != "secret-pat" {
+		t.Fatalf("values = %v", values)
 	}
 }
 
