@@ -234,8 +234,10 @@ job can access that user's files, drives, credentials, network access, and
 signed-in tools. Use it only for trusted workflows that specifically need the
 host.
 
-Host pools require `os: windows`, `size: 1`, and a single directory name for
-`work_folder`. They reject image, Docker, container, and active `tool_cache`
+Host pools require `os: windows`, `size: 1`, and a safe single directory name
+for `work_folder`; names belonging to the runner install such as `bin`,
+`_diag`, and `run.cmd` are rejected because the work folder is deleted after
+each job. Host pools reject image, Docker, container, and active `tool_cache`
 settings. By default they also require the complete autoscale workflow
 authorization tuple; `host.allow_unrestricted: true` is an explicit opt-out
 that lets any job routed to the pool's labels run with the user's authority.
@@ -267,7 +269,7 @@ pools:
 | `host` field | Effect / default |
 |---|---|
 | `runner_dir` | Verified runner installs, one subdirectory per version. Empty uses `%LOCALAPPDATA%\multirunner\host\<pool>\runner` (or the OS temp directory when `LOCALAPPDATA` is unavailable). |
-| `state_dir` | Ownership/PID records, per-job logs, and archived diagnostics. Empty uses the matching `...\host\<pool>\state` directory. Explicit host directories must be absolute Windows paths and must not collide with another host pool, case-insensitively. |
+| `state_dir` | Ownership/PID records, per-job logs, and archived diagnostics. Empty uses the matching `...\host\<pool>\state` directory. Explicit host runner/state paths must be absolute, case-insensitively distinct after `.`/`..` normalization, and non-overlapping. |
 | `runner_version`, `runner_sha256` | Empty uses the embedded release-manifest version and Windows x64 digest. A custom version requires its 64-hex SHA-256. |
 | `keep_workspace` | `false`. Keeps the work folder after a job for debugging; runner credentials and diagnostics are still reset. |
 | `allow_unrestricted` | `false`. When true, removes the workflow-allowlist requirement; it does not add isolation. |
@@ -280,7 +282,8 @@ multirunner clears the runner registration files and work directory and moves
 directories. Startup recovers interrupted non-scale-set runners only when the
 recorded PID and start time still identify the same process. Jobs inherit the
 user environment except `.env` keys, referenced secret variables, variables
-holding resolved secret values, and `MULTIRUNNER_*`.
+holding resolved secret values, and inherited `MULTIRUNNER_*`. The git-mirror
+integration deliberately injects `MULTIRUNNER_GIT_MIRROR` when enabled.
 
 `multirunner doctor` checks the backend and configured paths without creating
 directories, downloading the runner, or recovering old processes.
@@ -759,7 +762,7 @@ default is applied only while the owning feature is switched on.
 | `pools[].image_tier` | string | `minimal`. A published flavor pulls its tag; an unknown but syntactically valid tier resolves to a local `multirunner/runner-<os>-<tier>:dev` that is never built for you. An unknown tier must be `[a-z0-9]` groups separated by `.`, `_`, or `-`, and at most 64 characters, otherwise config load fails. Not validated when `image` is set or the backend is QEMU/host; host permits only the default `minimal` value. |
 | `pools[].labels` | list of string | Empty. Routing labels. A scale set with empty labels receives its scale-set name as the label. |
 | `pools[].runner_group_id` | integer | `0` becomes `1`. Used by `pool`/`autoscale`; scale sets resolve the group from `runner_group` instead. |
-| `pools[].work_folder` | string | `_work`. Host pools require one portable relative directory name, not a nested path. |
+| `pools[].work_folder` | string | `_work`. Host pools require one portable relative directory name, not a nested path or a runner-install name such as `bin`, `_diag`, or `run.cmd`. |
 | `pools[].name_prefix` | string | `multirunner`. Runner names become `<prefix>-<os>-<random>`. Not used by scale sets. |
 | `pools[].max_consecutive_failures` | integer | `0` becomes `5`. Log threshold only; retries never stop. |
 | `pools[].scale_set` | string | Empty. Required, and unique per pool, when `provisioning: scaleset`; ignored in other modes. |
@@ -782,8 +785,8 @@ default is applied only while the owning feature is switched on.
 | `pools[].containerd.nerdctl` | string | Empty looks up `nerdctl.exe` on `PATH`; backend construction fails when it is not found. |
 | `pools[].containerd.namespace` | string | `multirunner`. |
 | `pools[].containerd.isolation` | string | Empty/`auto` = process on Windows Server, Hyper-V on client. Also `process` or `hyperv`. |
-| `pools[].host.runner_dir` | string | Empty = `%LOCALAPPDATA%\multirunner\host\<pool>\runner` (OS temp fallback). Explicit values must be absolute Windows paths and cannot collide with another host pool's runner/state directory case-insensitively. |
-| `pools[].host.state_dir` | string | Empty = `%LOCALAPPDATA%\multirunner\host\<pool>\state` (OS temp fallback). Holds ownership/PID records, job logs, and archived diagnostics. |
+| `pools[].host.runner_dir` | string | Empty = `%LOCALAPPDATA%\multirunner\host\<pool>\runner` (OS temp fallback). Explicit values must be absolute Windows paths and cannot alias, contain, or be contained by another host runner/state path. |
+| `pools[].host.state_dir` | string | Empty = `%LOCALAPPDATA%\multirunner\host\<pool>\state` (OS temp fallback). Holds ownership/PID records, job logs, and archived diagnostics; it has the same non-overlap rule as `runner_dir`. |
 | `pools[].host.runner_version` | string | Empty uses the embedded manifest runner version. A custom version requires `runner_sha256`. |
 | `pools[].host.runner_sha256` | string | Empty uses the embedded Windows x64 digest for the default version. A custom version requires a 64-hex digest. |
 | `pools[].host.keep_workspace` | bool | `false`. Keeps the job work folder for debugging; runner registration state and diagnostics are still reset. |

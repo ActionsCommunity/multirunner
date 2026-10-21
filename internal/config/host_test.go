@@ -47,8 +47,10 @@ func TestHostPoolValidation(t *testing.T) {
 		{"container", func(p *Pool) { p.Container.CPUs = 2 }, "container settings"},
 		{"tool cache", func(p *Pool) { p.ToolCache.Mode = "shared-volume" }, "tool_cache"},
 		{"nested work folder", func(p *Pool) { p.WorkFolder = `a\b` }, "work_folder"},
+		{"reserved work folder", func(p *Pool) { p.WorkFolder = `bin` }, "work_folder"},
 		{"custom version without digest", func(p *Pool) { p.Host.RunnerVersion = "2.400.0" }, "runner_sha256"},
 		{"relative dir", func(p *Pool) { p.Host.StateDir = "state" }, "absolute"},
+		{"incomplete UNC dir", func(p *Pool) { p.Host.StateDir = `\\server` }, "absolute"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -78,6 +80,42 @@ func TestHostPoolsCannotShareDirectories(t *testing.T) {
 	c.Pools[1].Host.RunnerDir = `C:\mr\runner2`
 	if err := c.Validate(); err != nil {
 		t.Fatalf("distinct directories should validate: %v", err)
+	}
+}
+
+func TestHostDirectoriesCannotAliasOrOverlap(t *testing.T) {
+	tests := []struct {
+		name   string
+		first  string
+		second string
+	}{
+		{"dot segments", `C:\mr\shared`, `c:\MR\other\..\shared`},
+		{"nested", `C:\mr\shared`, `C:\mr\shared\state`},
+		{"trailing dot alias", `C:\mr\shared`, `C:\mr\shared.`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := hostConfig(func(p *Pool) {
+				p.Host.RunnerDir = tc.first
+				p.Host.StateDir = `C:\mr\state-one`
+			})
+			second := c.Pools[0]
+			second.Name, second.WorkflowEvent = "sync-dispatch", "workflow_dispatch"
+			second.Host.RunnerDir = tc.second
+			second.Host.StateDir = `C:\mr\state-two`
+			c.Pools = append(c.Pools, second)
+			if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "share host directory") {
+				t.Fatalf("want overlapping directory error, got %v", err)
+			}
+		})
+	}
+
+	c := hostConfig(func(p *Pool) {
+		p.Host.RunnerDir = `C:\mr\runner`
+		p.Host.StateDir = `C:\mr\runner\state`
+	})
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "share host directory") {
+		t.Fatalf("one pool's runner/state directories must not overlap, got %v", err)
 	}
 }
 

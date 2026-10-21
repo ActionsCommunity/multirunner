@@ -5,10 +5,16 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/GerardSmit/multirunner/internal/backend"
 )
 
 func TestResolveRunnerRequiresDigestForCustomVersion(t *testing.T) {
@@ -65,6 +71,101 @@ func TestPingDoesNotCreateDirectories(t *testing.T) {
 	b.opt.RunnerDir = filepath.Join(file, "runner")
 	if err := b.Ping(context.Background()); err == nil {
 		t.Fatal("Ping should reject a path beneath a file")
+	}
+}
+
+type identityErrorProcessOps struct{ err error }
+
+func (p identityErrorProcessOps) start(*exec.Cmd) (processGroup, error) { return nil, p.err }
+func (identityErrorProcessOps) alive(int) (bool, error)                 { return true, nil }
+func (p identityErrorProcessOps) startTime(int) (int64, error)          { return 0, p.err }
+func (p identityErrorProcessOps) killTree(int) error                    { return p.err }
+
+func TestRemoveOwnedRunnerPreservesRecordWhenIdentityLookupFails(t *testing.T) {
+	dir := t.TempDir()
+	b := &Backend{
+		opt: Options{
+			RunnerDir: filepath.Join(dir, "runner"),
+			StateDir:  filepath.Join(dir, "state"),
+			Pool:      "pool",
+		},
+		proc: identityErrorProcessOps{err: errors.New("access denied")},
+	}
+	if err := os.MkdirAll(b.opt.StateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ownership := backend.RunnerOwnership{
+		Instance: "instance", Target: "acme/site", Pool: "pool", ScaleSetID: 1, RunnerID: 7,
+	}
+	resourceID := runnerRecordName("runner", ownership)
+	recordPath := filepath.Join(b.opt.StateDir, resourceID)
+	if err := writeRunnerRecord(recordPath, runnerRecord{
+		Name: "runner", Ownership: ownership, Root: b.runnerRoot(), WorkFolder: "_work",
+		PID: 1234, StartTime: 5678, Started: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	err := b.RemoveOwnedRunner(context.Background(), resourceID)
+	if err == nil || !strings.Contains(err.Error(), "identify live PID") {
+		t.Fatalf("RemoveOwnedRunner error = %v, want identity lookup failure", err)
+	}
+	if _, err := os.Stat(recordPath); err != nil {
+		t.Fatalf("retry record was removed after an inconclusive identity check: %v", err)
+	}
+}
+
+func TestPruneStateKeepsNewestLogsAndDiagnosticsIndependently(t *testing.T) {
+	stateDir := t.TempDir()
+	b := &Backend{opt: Options{StateDir: stateDir}}
+	for i := 0; i < 25; i++ {
+		path := filepath.Join(stateDir, fmt.Sprintf("job-%02d.log", i))
+		if err := os.WriteFile(path, []byte("log"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		mod := time.Unix(int64(i+1), 0)
+		if err := os.Chtimes(path, mod, mod); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 23; i++ {
+		path := filepath.Join(stateDir, fmt.Sprintf("job-%02d.diag", i))
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		mod := time.Unix(int64(i+1), 0)
+		if err := os.Chtimes(path, mod, mod); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	b.pruneState()
+
+	entries, err := os.ReadDir(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logs, diagnostics := 0, 0
+	for _, entry := range entries {
+		switch {
+		case strings.HasSuffix(entry.Name(), ".log"):
+			logs++
+		case strings.HasSuffix(entry.Name(), ".diag"):
+			diagnostics++
+		}
+	}
+	if logs != stateRetention || diagnostics != stateRetention {
+		t.Fatalf("retained logs=%d diagnostics=%d, want %d each", logs, diagnostics, stateRetention)
+	}
+	for _, path := range []string{"job-00.log", "job-04.log", "job-00.diag", "job-02.diag"} {
+		if _, err := os.Stat(filepath.Join(stateDir, path)); !os.IsNotExist(err) {
+			t.Fatalf("old state %s was not pruned: %v", path, err)
+		}
+	}
+	for _, path := range []string{"job-05.log", "job-24.log", "job-03.diag", "job-22.diag"} {
+		if _, err := os.Stat(filepath.Join(stateDir, path)); err != nil {
+			t.Fatalf("new state %s was pruned: %v", path, err)
+		}
 	}
 }
 
@@ -133,7 +234,31 @@ func TestEnsureImageVerifiesAndExtracts(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(b.runnerRoot(), "stale.txt")); !os.IsNotExist(err) {
 		t.Fatal("a partial install should be cleared before re-extracting")
 	}
-	// Installed: a second call does not download again.
+	// A valid marker with a missing runner binary is repaired rather than trusted.
+	listener := filepath.Join(b.runnerRoot(), "bin", "Runner.Listener.dll")
+	if err := os.Remove(listener); err != nil {
+		t.Fatal(err)
+	}
+	repairs := 0
+	b.download = func(_ context.Context, _ string, dst string) error {
+		repairs++
+		data, err := os.ReadFile(archive)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(dst, data, 0o600)
+	}
+	if err := b.EnsureImage(context.Background(), ""); err != nil {
+		t.Fatal(err)
+	}
+	if repairs != 1 {
+		t.Fatalf("repair downloads = %d, want 1", repairs)
+	}
+	if _, err := os.Stat(listener); err != nil {
+		t.Fatalf("Runner.Listener.dll was not repaired: %v", err)
+	}
+
+	// Complete: another call does not download again.
 	b.download = func(context.Context, string, string) error { t.Fatal("downloaded twice"); return nil }
 	if err := b.EnsureImage(context.Background(), ""); err != nil {
 		t.Fatal(err)

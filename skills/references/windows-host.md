@@ -63,6 +63,8 @@ is removed.
 For `backend: host`, use `os: windows` and `size: 1`, remove image, Docker,
 container, and active tool-cache settings, and bind the pool to an exact
 repository/workflow/event/actor/branch tuple under `provisioning: autoscale`.
+Use non-overlapping runner/state paths and a work-folder name that cannot
+collide with runner-install entries such as `bin`, `_diag`, or `run.cmd`.
 The explicit `host.allow_unrestricted` escape hatch removes that routing gate
 without adding isolation. The default Windows service identity is LocalSystem;
 host startup refuses it unless `host.allow_local_system: true`, so configure

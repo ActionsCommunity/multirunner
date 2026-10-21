@@ -505,7 +505,8 @@ How it behaves:
 - **Environment.** Jobs inherit the environment and signed-in tools of
   multirunner's user, except multirunner's own secrets: variables from `.env`,
   variables referenced as `${VAR}` in the config, any variable holding a
-  resolved secret value, and `MULTIRUNNER_*`.
+  resolved secret value, and inherited `MULTIRUNNER_*`. When the git mirror is
+  enabled, multirunner deliberately adds `MULTIRUNNER_GIT_MIRROR` for the job.
 - **Not as SYSTEM.** A host pool refuses to start under `NT AUTHORITY\SYSTEM`
   (the default `multirunner service install` identity) unless
   `host.allow_local_system: true`. Run multirunner as the user whose tools the
@@ -514,7 +515,9 @@ How it behaves:
 Use it only for trusted, allowlisted workflows in a private repository. The
 allowlist accepts one `workflow_event` per pool, so a workflow that runs on both
 `schedule` and `workflow_dispatch` needs two host pools. Each pool gets its
-own directories by default; explicit `runner_dir`/`state_dir` must differ.
+own directories by default; explicit `runner_dir`/`state_dir` must not alias or
+overlap any other host runner/state path. A custom `work_folder` must also avoid
+runner-install names such as `bin`, `_diag`, and `run.cmd`.
 
 ---
 

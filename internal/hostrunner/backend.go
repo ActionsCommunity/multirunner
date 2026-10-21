@@ -26,7 +26,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -223,7 +222,9 @@ func (b *Backend) EnsureImage(ctx context.Context, _ string) error {
 	root := b.runnerRoot()
 	marker := filepath.Join(root, installedMarker)
 	if data, err := os.ReadFile(marker); err == nil && strings.TrimSpace(string(data)) == b.opt.RunnerSHA256 {
-		return nil
+		if runnerInstallComplete(root) {
+			return nil
+		}
 	}
 	if err := os.MkdirAll(b.opt.RunnerDir, 0o700); err != nil {
 		return err
@@ -255,8 +256,8 @@ func (b *Backend) EnsureImage(ctx context.Context, _ string) error {
 	if err := extractZip(archivePath, root); err != nil {
 		return fmt.Errorf("extract runner: %w", err)
 	}
-	if _, err := os.Stat(filepath.Join(root, "run.cmd")); err != nil {
-		return fmt.Errorf("runner archive has no run.cmd")
+	if !runnerInstallComplete(root) {
+		return fmt.Errorf("runner archive is missing run.cmd or bin/Runner.Listener.dll")
 	}
 	if err := os.WriteFile(marker, []byte(b.opt.RunnerSHA256+"\n"), 0o600); err != nil {
 		return fmt.Errorf("mark runner installed: %w", err)
@@ -290,8 +291,8 @@ func (b *Backend) Launch(ctx context.Context, req backend.LaunchRequest) (backen
 	if workFolder == "" {
 		workFolder = "_work"
 	}
-	if !portableBaseName(workFolder) {
-		return nil, fmt.Errorf("host: work_folder must be one directory name, got %q", workFolder)
+	if !ValidWorkFolder(workFolder) {
+		return nil, fmt.Errorf("host: work_folder must be one safe directory name that does not collide with the runner install, got %q", workFolder)
 	}
 	root := b.runnerRoot()
 	if _, err := os.Stat(filepath.Join(root, "run.cmd")); err != nil {
@@ -388,8 +389,13 @@ func (b *Backend) Launch(ctx context.Context, req backend.LaunchRequest) (backen
 		defer release()
 		errs := []error{group.close(), logFile.Close()}
 		errs = append(errs, b.resetInstall(root, workFolder, req.Name))
-		if err := os.Remove(recordPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-			errs = append(errs, err)
+		// Scale-set ownership records are the durable retry ledger. Keep them
+		// until the scale-set launcher has converged GitHub registration cleanup
+		// and explicitly calls RemoveOwnedRunner.
+		if req.Ownership.IsZero() {
+			if err := os.Remove(recordPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+				errs = append(errs, err)
+			}
 		}
 		if err := errors.Join(errs...); err != nil {
 			b.logger.Warn("host runner cleanup incomplete; the next launch retries it",
@@ -581,23 +587,25 @@ func (b *Backend) pruneState() {
 		path string
 		mod  time.Time
 	}
-	var items []item
-	for _, e := range entries {
-		if !strings.HasSuffix(e.Name(), ".log") && !strings.HasSuffix(e.Name(), ".diag") {
+	for _, suffix := range []string{".log", ".diag"} {
+		var items []item
+		for _, e := range entries {
+			if !strings.HasSuffix(e.Name(), suffix) {
+				continue
+			}
+			info, err := e.Info()
+			if err != nil {
+				continue
+			}
+			items = append(items, item{filepath.Join(b.opt.StateDir, e.Name()), info.ModTime()})
+		}
+		if len(items) <= stateRetention {
 			continue
 		}
-		info, err := e.Info()
-		if err != nil {
-			continue
+		sort.Slice(items, func(i, j int) bool { return items[i].mod.After(items[j].mod) })
+		for _, it := range items[stateRetention:] {
+			_ = removeTree(it.path)
 		}
-		items = append(items, item{filepath.Join(b.opt.StateDir, e.Name()), info.ModTime()})
-	}
-	if len(items) <= stateRetention*2 {
-		return
-	}
-	sort.Slice(items, func(i, j int) bool { return items[i].mod.After(items[j].mod) })
-	for _, it := range items[stateRetention*2:] {
-		_ = removeTree(it.path)
 	}
 }
 
@@ -684,7 +692,13 @@ func (b *Backend) removeRunner(ctx context.Context, recordPath string, record ru
 					"refusing to kill it (stop it by hand, then delete %s)", record.Name, record.PID, recordPath)
 			}
 			started, err := b.proc.startTime(record.PID)
-			if err == nil && started == record.StartTime {
+			if err != nil {
+				return fmt.Errorf("host runner %s: identify live PID %d: %w", record.Name, record.PID, err)
+			}
+			if started == 0 {
+				return fmt.Errorf("host runner %s: live PID %d has no process start time; refusing cleanup", record.Name, record.PID)
+			}
+			if started == record.StartTime {
 				if err := b.proc.killTree(record.PID); err != nil {
 					return fmt.Errorf("stop host runner %s: %w", record.Name, err)
 				}
@@ -765,6 +779,34 @@ func readRunnerRecord(path string) (runnerRecord, error) {
 func portableBaseName(name string) bool {
 	return name != "" && name != "." && name != ".." &&
 		!strings.ContainsAny(name, `/\:`) && !filepath.IsAbs(name) && filepath.VolumeName(name) == ""
+}
+
+// ValidWorkFolder reports whether name is safe to delete beneath a shared
+// actions/runner install after every job.
+func ValidWorkFolder(name string) bool {
+	if !portableBaseName(name) || strings.TrimSpace(name) != name ||
+		strings.HasPrefix(name, ".") || strings.HasSuffix(name, ".") {
+		return false
+	}
+	switch strings.ToLower(name) {
+	case "_diag", "bin", "externals",
+		"config.cmd", "config.sh", "env.cmd", "env.sh",
+		"run.cmd", "run.sh", "run-helper.cmd.template", "run-helper.sh.template",
+		"safe_sleep.sh", "svc.sh", installedMarker:
+		return false
+	default:
+		return true
+	}
+}
+
+func runnerInstallComplete(root string) bool {
+	for _, name := range []string{"run.cmd", filepath.Join("bin", "Runner.Listener.dll")} {
+		info, err := os.Stat(filepath.Join(root, name))
+		if err != nil || info.IsDir() {
+			return false
+		}
+	}
+	return true
 }
 
 func runnerRecordName(name string, ownership backend.RunnerOwnership) string {
@@ -912,7 +954,7 @@ func logContains(path, marker string) bool {
 	return err == nil && strings.Contains(string(data), marker)
 }
 
-func (h *hostHandle) ID() string { return h.resourceID + " pid=" + strconv.Itoa(h.cmd.Process.Pid) }
+func (h *hostHandle) ID() string { return h.resourceID }
 
 // Wait returns the runner's exit code. A runner that exited without ever
 // taking a job is an error, so the pool counts it as a failure and backs off

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strconv"
+	"sync"
 	"syscall"
 	"unsafe"
 
@@ -19,7 +20,10 @@ type windowsProcessOps struct{}
 
 func platformProcessOps() processOps { return windowsProcessOps{} }
 
-type jobGroup struct{ job windows.Handle }
+type jobGroup struct {
+	mu  sync.Mutex
+	job windows.Handle
+}
 
 var procNtResumeProcess = windows.NewLazySystemDLL("ntdll.dll").NewProc("NtResumeProcess")
 
@@ -86,9 +90,18 @@ func runningAsLocalSystem() (bool, error) {
 	return user.User.Sid.Equals(system), nil
 }
 
-func (g *jobGroup) kill() error { return windows.TerminateJobObject(g.job, 1) }
+func (g *jobGroup) kill() error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.job == 0 {
+		return nil
+	}
+	return windows.TerminateJobObject(g.job, 1)
+}
 
 func (g *jobGroup) close() error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	if g.job == 0 {
 		return nil
 	}

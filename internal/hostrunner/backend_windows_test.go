@@ -276,11 +276,47 @@ func TestRemoveOwnedRunnerSkipsReusedPID(t *testing.T) {
 	// Reaching here means the test process was not killed.
 }
 
+func TestOwnedLaunchRetainsExactCleanupRecord(t *testing.T) {
+	b := fakeRunner(t, tookJob+"\r\n"+`ping -n 2 127.0.0.1 >nul & exit /b 0`)
+	ownership := backend.RunnerOwnership{
+		Instance: "instance", Target: "acme/site", Pool: "sync", ScaleSetID: 1, RunnerID: 7,
+	}
+	h, err := b.Launch(context.Background(), backend.LaunchRequest{
+		Name: "job-owned", EncodedJITConfig: "aml0", WorkFolder: "_work", Ownership: ownership,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resourceID := runnerRecordName("job-owned", ownership)
+	if h.ID() != resourceID {
+		t.Fatalf("handle ID = %q, want exact resource ID %q", h.ID(), resourceID)
+	}
+	if code, err := h.Wait(waitCtx(t)); err != nil || code != 0 {
+		t.Fatalf("Wait = %d, %v", code, err)
+	}
+	recordPath := filepath.Join(b.opt.StateDir, resourceID)
+	if !exists(recordPath) {
+		t.Fatal("owned record must remain until scale-set cleanup converges")
+	}
+	owned, err := b.ListOwnedRunners(context.Background(), ownership)
+	if err != nil || len(owned) != 1 || owned[0].ResourceID != resourceID {
+		t.Fatalf("ListOwnedRunners = %+v, %v", owned, err)
+	}
+	if err := b.RemoveOwnedRunner(context.Background(), resourceID); err != nil {
+		t.Fatal(err)
+	}
+	if exists(recordPath) {
+		t.Fatal("explicit owned cleanup did not remove the record")
+	}
+}
+
 func TestLaunchRejectsMountsAndUnsafeNames(t *testing.T) {
 	b := fakeRunner(t, `exit /b 0`)
 	for _, req := range []backend.LaunchRequest{
 		{Name: `..\x`, EncodedJITConfig: "a"},
 		{Name: "ok", EncodedJITConfig: "a", WorkFolder: `..`},
+		{Name: "ok", EncodedJITConfig: "a", WorkFolder: `run.cmd`},
+		{Name: "ok", EncodedJITConfig: "a", WorkFolder: `bin.`},
 		{Name: "ok", EncodedJITConfig: "a", Mounts: []backend.Mount{{Source: "s", Target: "t"}}},
 		{Name: "ok"},
 	} {

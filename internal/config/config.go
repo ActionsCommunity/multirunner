@@ -927,11 +927,16 @@ func (c *Config) Validate() error {
 		}
 	}
 
-	// Host pools run one job at a time per install; two pools on one directory
-	// would run jobs in the same work folder at once. Compare the directories
-	// each pool really uses (defaults resolved from the pool name) the way NTFS
-	// does, case-insensitively, so "Nightly" and "nightly" collide too.
-	hostDirs := make(map[string]string)
+	// Host pools run one job at a time per install. Equal, aliased or nested
+	// runner/state paths can let one pool run over or delete another pool's
+	// state. Compare the directories each pool really uses (defaults resolved
+	// from the pool name) the way NTFS does, case-insensitively.
+	type hostDirUse struct {
+		key  string
+		path string
+		pool string
+	}
+	var hostDirs []hostDirUse
 	for _, p := range c.Pools {
 		if p.Backend != "host" {
 			continue
@@ -946,10 +951,14 @@ func (c *Config) Validate() error {
 		}
 		for _, dir := range []string{runnerDir, stateDir} {
 			key := windowsPathKey(dir)
-			if previous, duplicate := hostDirs[key]; duplicate {
-				return fmt.Errorf("pools[%q] and pools[%q] share host directory %q; give each host pool its own", previous, p.Name, dir)
+			for _, previous := range hostDirs {
+				if windowsPathsOverlap(previous.key, key) {
+					return fmt.Errorf("pools[%q] and pools[%q] share host directory space %q and %q; "+
+						"give each host pool non-overlapping runner_dir/state_dir paths",
+						previous.pool, p.Name, previous.path, dir)
+				}
 			}
-			hostDirs[key] = p.Name
+			hostDirs = append(hostDirs, hostDirUse{key: key, path: dir, pool: p.Name})
 		}
 	}
 
@@ -995,8 +1004,8 @@ func (c *Config) validateHostPool(p *Pool) error {
 		return fmt.Errorf("pools[%q]: backend: host does not support container settings", p.Name)
 	case p.ToolCache.Mode != "" && p.ToolCache.Mode != "off":
 		return fmt.Errorf("pools[%q]: backend: host uses the host's tool cache; remove tool_cache", p.Name)
-	case !portableWorkFolder(p.WorkFolder):
-		return fmt.Errorf("pools[%q].work_folder must be one relative directory name for backend: host", p.Name)
+	case !hostrunner.ValidWorkFolder(p.WorkFolder):
+		return fmt.Errorf("pools[%q].work_folder must be one safe relative directory name that does not collide with the host runner install", p.Name)
 	case p.Host.RunnerVersion != "" && p.Host.RunnerSHA256 == "":
 		return fmt.Errorf("pools[%q].host.runner_sha256 is required with host.runner_version", p.Name)
 	case len(p.Workflows) == 0 && !p.Host.AllowUnrestricted:
@@ -1019,17 +1028,58 @@ func windowsAbsPath(p string) bool {
 		((p[0] >= 'a' && p[0] <= 'z') || (p[0] >= 'A' && p[0] <= 'Z')) {
 		return true
 	}
-	return strings.HasPrefix(p, `\\`) && len(p) > 2
+	if !strings.HasPrefix(p, `\\`) {
+		return false
+	}
+	return len(strings.FieldsFunc(p, func(r rune) bool { return r == '\\' || r == '/' })) >= 2
 }
 
-// windowsPathKey normalizes a Windows path for duplicate detection on any OS.
+// windowsPathKey normalizes a rooted Windows path on any OS, including dot
+// segments that filepath.Clean would not recognize on Unix.
 func windowsPathKey(p string) string {
-	return strings.ToLower(strings.TrimRight(strings.ReplaceAll(p, "/", `\`), `\`))
+	p = strings.ReplaceAll(p, "/", `\`)
+	var prefix string
+	var parts []string
+	switch {
+	case len(p) >= 2 && p[1] == ':':
+		prefix = strings.ToLower(p[:2])
+		parts = strings.Split(strings.TrimLeft(p[2:], `\`), `\`)
+	case strings.HasPrefix(p, `\\`):
+		all := strings.FieldsFunc(p, func(r rune) bool { return r == '\\' })
+		if len(all) >= 2 {
+			prefix = `\\` + strings.ToLower(all[0]) + `\` + strings.ToLower(all[1])
+			parts = all[2:]
+		}
+	default:
+		parts = strings.Split(p, `\`)
+	}
+	clean := make([]string, 0, len(parts))
+	for _, part := range parts {
+		switch part {
+		case "", ".":
+			continue
+		case "..":
+			if len(clean) != 0 {
+				clean = clean[:len(clean)-1]
+			}
+		default:
+			part = strings.ToLower(strings.TrimRight(part, " ."))
+			if part != "" {
+				clean = append(clean, part)
+			}
+		}
+	}
+	if len(clean) == 0 {
+		return prefix
+	}
+	if prefix == "" {
+		return strings.Join(clean, `\`)
+	}
+	return prefix + `\` + strings.Join(clean, `\`)
 }
 
-func portableWorkFolder(name string) bool {
-	return name != "" && name != "." && name != ".." &&
-		strings.TrimSpace(name) == name && !strings.ContainsAny(name, `/\:`)
+func windowsPathsOverlap(a, b string) bool {
+	return a == b || strings.HasPrefix(a, b+`\`) || strings.HasPrefix(b, a+`\`)
 }
 
 func validateContainerConfig(p *Pool) error {
