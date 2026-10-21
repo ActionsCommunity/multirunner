@@ -28,13 +28,13 @@ import (
 	"github.com/GerardSmit/multirunner/internal/ghapp"
 	"github.com/GerardSmit/multirunner/internal/gitcache"
 	"github.com/GerardSmit/multirunner/internal/github"
+	"github.com/GerardSmit/multirunner/internal/hostrunner"
 	"github.com/GerardSmit/multirunner/internal/metrics"
 	"github.com/GerardSmit/multirunner/internal/pool"
 	"github.com/GerardSmit/multirunner/internal/servicehost"
 	"github.com/GerardSmit/multirunner/internal/vmview"
 	"github.com/GerardSmit/multirunner/internal/webhook"
 	"github.com/GerardSmit/multirunner/internal/winsetup"
-	"github.com/GerardSmit/multirunner/internal/hostrunner"
 	"github.com/GerardSmit/multirunner/internal/winvm"
 )
 
@@ -903,21 +903,32 @@ func runQEMUHousekeeping(ctx context.Context, cfg *config.Config, logger *slog.L
 // runAutoscale runs the on-demand scaler (polling) plus an optional webhook
 // receiver (when webhook.listen is set and reachable from GitHub).
 func runAutoscale(ctx context.Context, cfg *config.Config, ghProvider github.ClientProvider, launchers []*pool.Launcher, logger *slog.Logger) error {
-	scaler := autoscale.New(launchers, ghProvider, cfg.GitHub.Scope, cfg.Webhook.PollIntervalSec, logger)
+	scaler := autoscale.New(ctx, launchers, ghProvider, cfg.GitHub.Scope, cfg.Webhook.PollIntervalSec, logger)
+	if err := scaler.EnsureImages(ctx); err != nil {
+		return err
+	}
 	if cfg.Webhook.Listen != "" {
 		if cfg.Webhook.Secret == "" {
 			logger.Warn("webhook listener has no secret; signatures will not be verified")
 		}
 		wh := webhook.New(cfg.Webhook.Listen, cfg.Webhook.Path, cfg.Webhook.Secret, scaler, logger)
+		runCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		errCh := make(chan error, 2)
 		go func() {
-			if err := wh.Start(ctx); err != nil {
-				logger.Error("webhook server error", "err", err)
-			}
+			errCh <- wh.Start(runCtx)
 		}()
+		go func() {
+			errCh <- scaler.RunPrepared(runCtx)
+		}()
+		first := <-errCh
+		cancel()
+		second := <-errCh
+		return errors.Join(first, second)
 	} else if cfg.GitHub.Scope != config.ScopeRepo && cfg.GitHub.Scope != config.ScopeRepos {
 		logger.Warn("autoscale without a webhook on non-repo scope cannot poll queued jobs; set webhook.listen (behind NAT use a tunnel) or use provisioning: pool")
 	}
-	return scaler.Run(ctx)
+	return scaler.RunPrepared(ctx)
 }
 
 // preparePool builds and validates a pool's backend, offering to install a

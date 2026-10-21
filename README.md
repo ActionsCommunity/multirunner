@@ -765,6 +765,30 @@ images/            runner + cacheserver Dockerfiles
 
 ## Tests
 
+Core Go validation:
+
 ```sh
+go vet ./...
 go test ./...
+go test ./testdata/conformance/... -count=1
 ```
+
+Language/toolchain conformance (the same fixtures used by CI):
+
+```sh
+pnpm --dir testdata/conformance/node install --frozen-lockfile
+pnpm --dir testdata/conformance/node test
+
+cd testdata/conformance/python
+uv run --locked python -m unittest discover -s tests
+cd ../../..
+
+dotnet restore testdata/conformance/dotnet/Conformance.slnx --locked-mode
+dotnet build testdata/conformance/dotnet/Conformance.slnx --configuration Release --no-restore
+dotnet test testdata/conformance/dotnet/Conformance.slnx --configuration Release --no-build --no-restore
+```
+
+`go test ./...` does not include packages below `testdata`, so the separate Go
+conformance command is required. Real Docker, QEMU, Windows-container, and
+privileged GitHub runner tests remain environment-gated in
+`.github/workflows/test.yml` and `.github/workflows/e2e-linux.yml`.
