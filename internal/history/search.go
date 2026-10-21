@@ -2,6 +2,7 @@ package history
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"net/url"
@@ -90,11 +91,34 @@ func (s *Store) search(
 			return nil, fmt.Errorf("scan search result: %w", err)
 		}
 		result.Timestamp = millisTime(timestamp)
-		result.Route = searchRoute(result)
 		results = append(results, result)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("search history: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("close search history: %w", err)
+	}
+	for index := range results {
+		result := &results[index]
+		var runID string
+		if result.EntityType == "job" || result.EntityType == "step" {
+			key := result.EntityKey
+			if result.EntityType == "step" {
+				key, _ = splitEntityKey(key)
+			}
+			_, jobID := splitEntityKey(key)
+			err := s.db.QueryRowContext(ctx,
+				`SELECT run_id FROM workflow_jobs WHERE repository=? AND id=?`,
+				result.Repository, jobID).Scan(&runID)
+			if errors.Is(err, sql.ErrNoRows) {
+				continue
+			}
+			if err != nil {
+				return nil, fmt.Errorf("resolve search run: %w", err)
+			}
+		}
+		result.Route = searchRoute(*result, runID)
 	}
 	return results, nil
 }
@@ -138,20 +162,16 @@ func validSearchEntityType(value string) bool {
 	}
 }
 
-func searchRoute(result SearchResult) string {
+func searchRoute(result SearchResult, runID string) string {
 	repository := url.QueryEscape(result.Repository)
 	switch result.EntityType {
 	case "run":
 		_, id := splitEntityKey(result.EntityKey)
 		return "/runs?repository=" + repository + "&run_id=" + url.QueryEscape(id)
 	case "job":
-		_, id := splitEntityKey(result.EntityKey)
-		return "/runs?repository=" + repository + "&job_id=" + url.QueryEscape(id)
+		return "/runs?repository=" + repository + "&run_id=" + url.QueryEscape(runID)
 	case "step":
-		remainder, number := splitEntityKey(result.EntityKey)
-		_, jobID := splitEntityKey(remainder)
-		return "/runs?repository=" + repository + "&job_id=" +
-			url.QueryEscape(jobID) + "&step=" + url.QueryEscape(number)
+		return "/runs?repository=" + repository + "&run_id=" + url.QueryEscape(runID)
 	case "runner":
 		return "/runners?session_id=" + url.QueryEscape(result.EntityKey)
 	case "command":

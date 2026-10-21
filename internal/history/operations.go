@@ -452,7 +452,7 @@ func (s *Store) OperationalSnapshotAt(ctx context.Context, epochID string, maxSe
 	if err != nil {
 		return operations.Snapshot{}, fmt.Errorf("read operational compaction bound: %w", err)
 	}
-	if maxSequence <= compactedThrough {
+	if compactedThrough > 0 && maxSequence <= compactedThrough {
 		return operations.Snapshot{}, fmt.Errorf(
 			"%w: requested=%d compacted_through=%d",
 			ErrHistoryCompacted, maxSequence, compactedThrough)

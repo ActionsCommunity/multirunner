@@ -26,6 +26,7 @@ type fakeAdapter struct {
 	effect         control.EffectResult
 	reconcile      control.ReconcileResult
 	blockUntilDone bool
+	release        <-chan struct{}
 }
 
 func (a *fakeAdapter) Prepare(context.Context, control.Invocation) (json.RawMessage, error) {
@@ -38,7 +39,11 @@ func (a *fakeAdapter) Execute(ctx context.Context, invocation control.Invocation
 	a.lastInvocation = invocation
 	effect := a.effect
 	blockUntilDone := a.blockUntilDone
+	release := a.release
 	a.mu.Unlock()
+	if release != nil {
+		<-release
+	}
 	if blockUntilDone {
 		<-ctx.Done()
 		return control.EffectResult{Disposition: control.EffectUnknown}, ctx.Err()
@@ -147,6 +152,38 @@ func TestExecutorUnknownReconciliationBlocksConflictDomain(t *testing.T) {
 	}
 }
 
+func TestExecutorOperatorRecoveryOnlyReconcilesAndNeverRedispatches(t *testing.T) {
+	store := openControlStore(t)
+	command := queueCommand(t, store, "operator-recovery")
+	adapter := &fakeAdapter{
+		effect:    control.EffectResult{Disposition: control.EffectUnknown},
+		reconcile: control.ReconcileResult{Disposition: control.ReconcileApplied},
+	}
+	executor := newTestExecutor(t, store, adapter, control.ExecutorHooks{})
+	if _, err := executor.RunOnce(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	command = assertCommandState(t, store, command.ID, control.StateUnknownOutcome)
+	_, err := store.TransitionCommand(t.Context(), command.ID, control.Transition{
+		ExpectedState: control.StateUnknownOutcome, To: control.StateReconciling,
+		ActorKind: operations.ActorOperator, ActorID: "operator",
+		FencingToken: command.FencingToken, LeaseOwner: "operator", LeaseDuration: time.Millisecond,
+		Detail: json.RawMessage(`{"reason":"check authoritative completion evidence"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(3 * time.Millisecond)
+	restarted := newTestExecutor(t, store, adapter, control.ExecutorHooks{})
+	if _, err := restarted.RunOnce(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	assertCommandState(t, store, command.ID, control.StateSucceeded)
+	if adapter.executeCount != 1 || adapter.reconcileCount != 1 {
+		t.Fatalf("operator recovery dispatched effect: execute=%d reconcile=%d", adapter.executeCount, adapter.reconcileCount)
+	}
+}
+
 func TestExecutorRecordsUnsupportedCapabilityWithoutEffect(t *testing.T) {
 	store := openControlStore(t)
 	command := queueCommand(t, store, "unsupported")
@@ -213,6 +250,44 @@ func TestExecutorDeadlineDuringEffectRecordsUnknownOutcome(t *testing.T) {
 	})
 }
 
+func TestExecutorDoesNotReconcileWhileTimedOutEffectIsStillStopping(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		deadline := time.Now().Add(100 * time.Millisecond)
+		store := &deadlineStore{command: control.Command{
+			ID: "still-stopping", Type: "pool.reconcile", State: control.StateQueued, TimeoutAt: &deadline,
+		}}
+		release := make(chan struct{})
+		adapter := &fakeAdapter{release: release,
+			effect:    control.EffectResult{Disposition: control.EffectSucceeded},
+			reconcile: control.ReconcileResult{Disposition: control.ReconcileApplied},
+		}
+		executor, err := control.NewExecutor(store, control.AdapterMap{"pool.reconcile": adapter},
+			control.ExecutorOptions{Owner: "executor", Lease: time.Second})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := executor.RunOnce(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		store.command.State = control.StateReconciling
+		if _, err := executor.RunOnce(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		if store.command.State != control.StateUnknownOutcome || adapter.reconcileCount != 0 {
+			t.Fatalf("reconciled before effect stopped: state=%s calls=%d", store.command.State, adapter.reconcileCount)
+		}
+		close(release)
+		synctest.Wait()
+		store.command.State = control.StateReconciling
+		if _, err := executor.RunOnce(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		if store.command.State != control.StateSucceeded || adapter.reconcileCount != 1 || adapter.executeCount != 1 {
+			t.Fatalf("recovery state=%s reconciliation=%d effects=%d", store.command.State, adapter.reconcileCount, adapter.executeCount)
+		}
+	})
+}
+
 type deadlineStore struct {
 	command control.Command
 }
@@ -225,11 +300,17 @@ func (*deadlineStore) ExpireQueuedCommands(context.Context, string) ([]control.C
 	return nil, nil
 }
 
-func (*deadlineStore) ReconcileExpiredCommands(context.Context, string, time.Duration) ([]control.Command, error) {
+func (s *deadlineStore) ReconcileExpiredCommands(context.Context, string, time.Duration) ([]control.Command, error) {
+	if s.command.State == control.StateReconciling {
+		return []control.Command{s.command}, nil
+	}
 	return nil, nil
 }
 
 func (s *deadlineStore) ClaimNextCommand(context.Context, string, time.Duration) (control.Command, error) {
+	if s.command.State != control.StateQueued {
+		return control.Command{}, control.ErrNotFound
+	}
 	s.command.State = control.StateClaimed
 	return s.command, nil
 }

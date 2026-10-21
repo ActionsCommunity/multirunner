@@ -1,6 +1,9 @@
 package control
 
 func CanTransition(from, to State) bool {
+	if from == StateUnknownOutcome {
+		return to == StateReconciling
+	}
 	if !from.Valid() || !to.Valid() || from.Terminal() {
 		return false
 	}

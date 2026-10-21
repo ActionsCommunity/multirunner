@@ -11,6 +11,7 @@ func TestCommandStateTransitions(t *testing.T) {
 		StateClaimed:              {StateRunning, StateReconciling, StateFailed, StateInterrupted, StateUnknownOutcome},
 		StateRunning:              {StateSucceeded, StateFailed, StateCancelled, StateInterrupted, StateReconciling, StateUnknownOutcome},
 		StateReconciling:          {StateReconciling, StateSucceeded, StateFailed, StateInterrupted, StateUnknownOutcome},
+		StateUnknownOutcome:       {StateReconciling},
 	}
 	states := []State{
 		StateReceived, StateValidated, StateAwaitingConfirmation, StateQueued,

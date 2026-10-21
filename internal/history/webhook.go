@@ -2,6 +2,7 @@ package history
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"strings"
 	"time"
@@ -95,14 +96,7 @@ func (o *WebhookObserver) OnWorkflowJob(
 		return
 	}
 	if session.ID != "" {
-		session.Repository = event.Repository
-		session.WorkflowRunID = job.RunID
-		session.RunAttempt = job.RunAttempt
-		session.WorkflowJobID = job.ID
-		session.AttributionSource = source
-		session.AttributionConfidence = confidence
-		session.UpdatedAt = now
-		if err := o.store.UpsertRunnerSession(ctx, session); err != nil {
+		if err := o.store.CorrelateRunnerSession(ctx, record); err != nil {
 			o.logError("correlate history runner session", event, err)
 		}
 	}
@@ -124,15 +118,8 @@ func (o *WebhookObserver) matchSession(ctx context.Context, event webhook.Workfl
 			return RunnerSession{}, "", 0, false, err
 		}
 		for _, session := range sessions {
-			if session.WorkflowJobID != 0 && session.WorkflowJobID == event.WorkflowJob.ID {
-				return session, "exact_job_id", 100, true, nil
-			}
-		}
-		if event.WorkflowJob.RunnerName != "" {
-			for _, session := range sessions {
-				if session.RunnerName == event.WorkflowJob.RunnerName {
-					return session, "exact_runner_name", 100, true, nil
-				}
+			if RunnerSessionMatchesJob(session, event.WorkflowJob.ID, event.WorkflowJob.RunnerName) {
+				return session, "exact_runner_name", 100, true, nil
 			}
 		}
 		if len(sessions) < 1000 {
@@ -147,6 +134,38 @@ func (o *WebhookObserver) matchSession(ctx context.Context, event webhook.Workfl
 		}
 	}
 	return RunnerSession{}, "", 0, false, nil
+}
+
+// RunnerSessionMatchesJob treats provisioning trigger IDs as hints, not proof
+// of assignment. A nameless delivery can only reuse runner-confirmed evidence.
+func RunnerSessionMatchesJob(session RunnerSession, jobID int64, runnerName string) bool {
+	if runnerName != "" {
+		return session.RunnerName == runnerName
+	}
+	return jobID != 0 && session.WorkflowJobID == jobID &&
+		session.AttributionSource == "exact_runner_name" &&
+		session.AttributionConfidence == 100
+}
+
+// CorrelateRunnerSession changes only assignment evidence, so a concurrent
+// lifecycle completion cannot be overwritten by a stale reconciliation copy.
+func (s *Store) CorrelateRunnerSession(ctx context.Context, job WorkflowJob) error {
+	if job.LocalSessionID == "" {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE runner_sessions SET
+		repository=?, workflow_run_id=?, workflow_job_id=?,
+		run_attempt=CASE WHEN ?<>0 THEN ? ELSE run_attempt END,
+		attribution_source=?, attribution_confidence=?
+		WHERE id=? AND (attribution_confidence<=? OR attribution_source='exact_job_id')`,
+		job.Repository, job.RunID, job.ID, job.RunAttempt, job.RunAttempt,
+		job.AttributionSource, job.AttributionConfidence, job.LocalSessionID,
+		job.AttributionConfidence)
+	if err != nil {
+		return fmt.Errorf("correlate runner session: %w", err)
+	}
+	s.invalidateSummaryCache()
+	return nil
 }
 
 func (o *WebhookObserver) logError(message string, event webhook.WorkflowJobEvent, err error) {

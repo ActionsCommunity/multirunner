@@ -29,6 +29,39 @@ type Client struct {
 	repo           string // only for repo scope
 }
 
+var ErrJobInactive = errors.New("workflow job is no longer queued")
+
+// QueuedJobState checks the actual job even when the client manages an
+// organization or enterprise rather than a single repository.
+func (c *Client) QueuedJobState(ctx context.Context, identity QueuedJob) (WorkflowJob, error) {
+	owner, repo, ok := strings.Cut(identity.Repository, "/")
+	if !ok || owner == "" || repo == "" || strings.Contains(repo, "/") || identity.JobID <= 0 {
+		return WorkflowJob{}, errors.New("repository and positive job ID are required")
+	}
+	if c.scope == config.ScopeRepo && !strings.EqualFold(identity.Repository, c.Target()) {
+		return WorkflowJob{}, errors.New("job repository is outside the client scope")
+	}
+	job, _, err := c.gh.Actions.GetWorkflowJobByID(ctx, owner, repo, identity.JobID)
+	if err != nil {
+		var response *github.ErrorResponse
+		if errors.As(err, &response) && response.Response != nil &&
+			(response.Response.StatusCode == http.StatusNotFound || response.Response.StatusCode == http.StatusGone) {
+			return WorkflowJob{}, fmt.Errorf("%w: %v", ErrJobInactive, err)
+		}
+		return WorkflowJob{}, fmt.Errorf("get queued workflow job %d: %w", identity.JobID, err)
+	}
+	if job == nil {
+		return WorkflowJob{}, fmt.Errorf("get queued workflow job %d returned no job", identity.JobID)
+	}
+	current := workflowJobModel(job)
+	if current.ID != identity.JobID || current.RunID != identity.RunID ||
+		(identity.RunAttempt > 0 && current.RunAttempt > 0 && current.RunAttempt != int64(identity.RunAttempt)) ||
+		current.Status != "queued" {
+		return WorkflowJob{}, fmt.Errorf("%w: job %d status %q", ErrJobInactive, identity.JobID, current.Status)
+	}
+	return current, nil
+}
+
 // JITConfigRequest is the input for generate-jitconfig.
 type JITConfigRequest struct {
 	Name          string
@@ -389,7 +422,7 @@ func (c *Client) ResolveQueuedJob(ctx context.Context, repository string, runID 
 		return QueuedJob{}, fmt.Errorf("workflow run %d has no triggering actor", job.RunID)
 	}
 	if resolved.Status != "queued" && resolved.Status != "in_progress" {
-		return QueuedJob{}, fmt.Errorf("workflow run %d is not active: status %q", job.RunID, resolved.Status)
+		return QueuedJob{}, fmt.Errorf("%w: workflow run %d status %q", ErrJobInactive, job.RunID, resolved.Status)
 	}
 	resolved.Client = c
 	resolved.Repository = job.Repository

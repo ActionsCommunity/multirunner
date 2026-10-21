@@ -29,6 +29,7 @@ import {
   getCommand,
   newIdempotencyKey,
   previewCommand,
+  reconcileCommand,
   type CommandPlan,
   type OperatorCommand,
 } from './lib/commands-api'
@@ -50,7 +51,9 @@ import {
 } from './lib/search-api'
 import {
   getRunInspection,
+  getRunnerSession,
   type RunInspection,
+  type RunInspectionSession,
 } from './lib/runs-api'
 import { getJobLog } from './lib/logs-api'
 import {
@@ -184,6 +187,11 @@ function runTargetFromLocation() {
 function alertTargetFromLocation() {
   if (window.location.pathname !== '/alerts') return ''
   return new URLSearchParams(window.location.search).get('alert_id')?.trim() ?? ''
+}
+
+function detailTargetFromLocation(view: 'runners' | 'audit', parameter: string) {
+  if (window.location.pathname !== `/${view}`) return ''
+  return new URLSearchParams(window.location.search).get(parameter)?.trim() ?? ''
 }
 
 const numberFormat = new Intl.NumberFormat()
@@ -376,6 +384,11 @@ function UnknownOutcomeDetails({
   plan?: CommandPlan
   target: string
 }) {
+  const [reason, setReason] = useState('')
+  const [confirmation, setConfirmation] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [result, setResult] = useState<OperatorCommand | null>(null)
+  const [error, setError] = useState('')
   if (command.state !== 'unknown_outcome') return null
   return (
     <section className="unknown-outcome" role="alert">
@@ -404,9 +417,39 @@ function UnknownOutcomeDetails({
         </div>
       </dl>
       <p>
-        Verify the target in Host, Runners, and Audit. Reconcile the underlying
-        runtime or service manually before clearing the blocked command domain.
+        Verify the target in Host, Runners, and Audit, then request a fresh
+        read-only reconciliation. This never retries the effect or clears the
+        domain without authoritative evidence.
       </p>
+      {result ? (
+        <p role="status">
+          Reconciliation requested. <a href={`/audit?command_id=${encodeURIComponent(result.id)}`}>Open current command state</a>.
+          If the outcome is still uncertain, the target remains blocked.
+        </p>
+      ) : (
+        <form onSubmit={(event) => {
+          event.preventDefault()
+          setBusy(true)
+          setError('')
+          void reconcileCommand(command, reason.trim(), confirmation)
+            .then(setResult)
+            .catch((cause: unknown) => setError(cause instanceof Error ? cause.message : 'Command reconciliation failed.'))
+            .finally(() => setBusy(false))
+        }}>
+          <label>
+            Reconciliation reason
+            <input value={reason} maxLength={500} onChange={(event) => setReason(event.target.value)} required />
+          </label>
+          <label>
+            Type reconcile {command.id}
+            <input value={confirmation} onChange={(event) => setConfirmation(event.target.value)} required />
+          </label>
+          <button type="submit" disabled={busy || !command.fencing_token || !reason.trim() || confirmation !== `reconcile ${command.id}`}>
+            {busy ? 'Requesting reconciliation...' : 'Reconcile outcome'}
+          </button>
+          {error ? <p role="alert">{error}</p> : null}
+        </form>
+      )}
     </section>
   )
 }
@@ -579,6 +622,10 @@ function App({ pwaUpdate }: AppProps = {}) {
   const [audit, setAudit] = useState<ViewLoadState<AuditRecord[]>>({
     status: 'idle',
   })
+  const [selectedCommand, setSelectedCommand] =
+    useState<ViewLoadState<OperatorCommand>>({ status: 'idle' })
+  const [selectedSession, setSelectedSession] =
+    useState<ViewLoadState<RunInspectionSession>>({ status: 'idle' })
   const [supportBundleDialog, setSupportBundleDialog] =
     useState<SupportBundleDialogState | null>(null)
   const [backupDialog, setBackupDialog] =
@@ -1251,6 +1298,20 @@ function App({ pwaUpdate }: AppProps = {}) {
           })
       }
     } else if (activeView === 'audit') {
+      const commandID = detailTargetFromLocation('audit', 'command_id')
+      setSelectedCommand({ status: commandID ? 'loading' : 'idle' })
+      if (commandID && isOnline) {
+        void loadRoute(`command:${commandID}`, () => getCommand(commandID))
+          .then((data) => {
+            if (!cancelled) setSelectedCommand({ status: 'ready', data })
+          })
+          .catch((error: unknown) => {
+            if (!cancelled) setSelectedCommand({
+              status: 'error',
+              message: fail(error, 'Command inspection is unavailable.'),
+            })
+          })
+      }
       if (!isOnline) {
         setAudit({
           status: 'degraded',
@@ -1275,6 +1336,26 @@ function App({ pwaUpdate }: AppProps = {}) {
                 message: fail(error, 'Audit history is unavailable.'),
               })
             }
+          })
+      }
+    } else if (activeView === 'runners') {
+      const sessionID = detailTargetFromLocation('runners', 'session_id')
+      setSelectedSession({ status: sessionID ? 'loading' : 'idle' })
+      if (sessionID && !isOnline) {
+        setSelectedSession({
+          status: 'degraded',
+          message: 'Reconnect to inspect the selected runner session.',
+        })
+      } else if (sessionID) {
+        void loadRoute(`session:${sessionID}`, () => getRunnerSession(sessionID))
+          .then((data) => {
+            if (!cancelled) setSelectedSession({ status: 'ready', data })
+          })
+          .catch((error: unknown) => {
+            if (!cancelled) setSelectedSession({
+              status: 'error',
+              message: fail(error, 'Runner session inspection is unavailable.'),
+            })
           })
       }
     } else if (activeView === 'runs') {
@@ -3183,6 +3264,28 @@ function App({ pwaUpdate }: AppProps = {}) {
                     </span>
                   ) : null}
                 </div>
+                {selectedCommand.status === 'loading' && isOnline ? (
+                  <p role="status">Loading selected command…</p>
+                ) : selectedCommand.status === 'error' ? (
+                  <p role="alert">{selectedCommand.message}</p>
+                ) : selectedCommand.status === 'ready' && isOnline ? (
+                  <section aria-label="Selected command">
+                    <h3>Selected command</h3>
+                    <dl className="resource-facts">
+                      <div><dt>ID</dt><dd>{selectedCommand.data?.id}</dd></div>
+                      <div><dt>Action</dt><dd>{eventLabel(selectedCommand.data?.type ?? '')}</dd></div>
+                      <div><dt>State</dt><dd>{selectedCommand.data?.state}</dd></div>
+                      <div><dt>Target</dt><dd>{selectedCommand.data?.target_type}: {selectedCommand.data?.target_id}</dd></div>
+                      <div><dt>Reason</dt><dd>{selectedCommand.data?.reason || '—'}</dd></div>
+                      {selectedCommand.data?.error ? <div><dt>Error</dt><dd>{selectedCommand.data.error}</dd></div> : null}
+                    </dl>
+                    {selectedCommand.data ? <UnknownOutcomeDetails
+                      key={selectedCommand.data.id}
+                      command={selectedCommand.data}
+                      target={`${selectedCommand.data.target_type}: ${selectedCommand.data.target_id}`}
+                    /> : null}
+                  </section>
+                ) : null}
                 {audit.status === 'idle' || audit.status === 'loading' ? (
                   <p className="empty-state" role="status">Loading audit history…</p>
                 ) : audit.status === 'degraded' ? (
@@ -3238,6 +3341,27 @@ function App({ pwaUpdate }: AppProps = {}) {
                 )}
               </section>
             ) : activeView === 'runners' ? (
+              <>
+              {selectedSession.status !== 'idle' ? (
+                <section className="panel operations-module" aria-label="Selected runner session">
+                  <h2>Selected runner session</h2>
+                  {selectedSession.status === 'loading' ? (
+                    <p role="status">Loading selected runner session…</p>
+                  ) : selectedSession.status === 'error' || selectedSession.status === 'degraded' ? (
+                    <p role="alert">{selectedSession.message}</p>
+                  ) : (
+                    <dl className="resource-facts">
+                      <div><dt>ID</dt><dd>{selectedSession.data?.id}</dd></div>
+                      <div><dt>Runner</dt><dd>{selectedSession.data?.runner_name}</dd></div>
+                      <div><dt>Pool</dt><dd>{selectedSession.data?.pool_name}</dd></div>
+                      <div><dt>Target</dt><dd>{selectedSession.data?.target}</dd></div>
+                      <div><dt>State</dt><dd>{selectedSession.data?.status}</dd></div>
+                      <div><dt>Conclusion</dt><dd>{selectedSession.data?.conclusion || '—'}</dd></div>
+                      {selectedSession.data?.error ? <div><dt>Error</dt><dd>{selectedSession.data.error}</dd></div> : null}
+                    </dl>
+                  )}
+                </section>
+              ) : null}
               <RunnerSessions
                 runners={operations.runners}
                 loading={operations.loading}
@@ -3247,6 +3371,7 @@ function App({ pwaUpdate }: AppProps = {}) {
                 eventLabel={eventLabel}
                 formatRelativeTime={formatRelativeTime}
               />
+              </>
             ) : activeView === 'alerts' ? (
               <div className="incident-workspace">
                 <section

@@ -34,6 +34,7 @@ type API interface {
 type Store interface {
 	UpsertWorkflowRun(context.Context, history.WorkflowRun) error
 	UpsertWorkflowJob(context.Context, history.WorkflowJob) error
+	CorrelateRunnerSession(context.Context, history.WorkflowJob) error
 	ListRunnerSessions(context.Context, history.ListOptions) ([]history.RunnerSession, error)
 	SetSyncState(context.Context, history.SyncState) error
 	SyncState(context.Context, string) (history.SyncState, error)
@@ -276,6 +277,9 @@ func (s *Syncer) syncRange(ctx context.Context, repo Repository, from, to time.T
 			if err := s.store.UpsertWorkflowJob(ctx, job); err != nil {
 				return err
 			}
+			if err := s.store.CorrelateRunnerSession(ctx, job); err != nil {
+				return err
+			}
 			report.Jobs++
 		}
 	}
@@ -385,14 +389,18 @@ func (s *Syncer) runnerSessions(ctx context.Context, repository string) (session
 	var afterID string
 	for {
 		items, err := s.store.ListRunnerSessions(ctx, history.ListOptions{
-			Repository: repository, Limit: 1000,
+			Limit:     1000,
 			AfterTime: afterTime, AfterID: afterID,
 		})
 		if err != nil {
 			return sessionIndex{}, err
 		}
 		for _, item := range items {
-			if item.WorkflowJobID != 0 {
+			if item.Repository != "" && item.Repository != repository &&
+				(item.Target == "" || strings.Contains(item.Target, "/")) {
+				continue
+			}
+			if history.RunnerSessionMatchesJob(item, item.WorkflowJobID, "") {
 				index.jobIDs[item.WorkflowJobID] = item
 			}
 			if item.RunnerName != "" {
@@ -476,16 +484,16 @@ type jobAttribution struct {
 }
 
 func (s sessionIndex) match(job ghapi.WorkflowJob) jobAttribution {
-	if session, ok := s.jobIDs[job.ID]; ok {
-		return jobAttribution{
-			kind: attributionExact, source: "exact_job_id", confidence: 100, session: session,
-		}
-	}
 	if job.RunnerName != "" {
 		if session, ok := s.runnerNames[job.RunnerName]; ok {
 			return jobAttribution{
 				kind: attributionExact, source: "exact_runner_name", confidence: 100, session: session,
 			}
+		}
+	} else if session, ok := s.jobIDs[job.ID]; ok &&
+		history.RunnerSessionMatchesJob(session, job.ID, "") {
+		return jobAttribution{
+			kind: attributionExact, source: "exact_runner_name", confidence: 100, session: session,
 		}
 	}
 	return jobAttribution{}

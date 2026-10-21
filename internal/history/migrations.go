@@ -970,6 +970,15 @@ CREATE TRIGGER search_commands_delete AFTER DELETE ON commands BEGIN
 	DELETE FROM command_search_rows WHERE command_id=OLD.id;
 END;
 `},
+	{version: 17, sql: `
+CREATE TABLE command_domain_fences (
+	conflict_domain TEXT PRIMARY KEY,
+	token INTEGER NOT NULL
+);
+INSERT INTO command_domain_fences(conflict_domain, token)
+	SELECT conflict_domain, MAX(fencing_token) FROM commands GROUP BY conflict_domain;
+CREATE INDEX idx_commands_domain_fence ON commands(conflict_domain, fencing_token);
+`},
 }
 
 func migrate(ctx context.Context, db *sql.DB) error {

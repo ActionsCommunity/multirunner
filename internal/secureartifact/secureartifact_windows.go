@@ -50,9 +50,10 @@ func protectRoot(path string) error {
 	}
 	return windows.SetNamedSecurityInfo(
 		path, windows.SE_FILE_OBJECT,
-		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|
+		// Keep the creator owner; Modify-only parents need not grant WRITE_OWNER.
+		windows.DACL_SECURITY_INFORMATION|
 			windows.PROTECTED_DACL_SECURITY_INFORMATION,
-		current.User.Sid, nil, acl, nil,
+		nil, nil, acl, nil,
 	)
 }
 
@@ -153,12 +154,16 @@ func validateSecurity(handle windows.Handle) error {
 	if err != nil {
 		return err
 	}
+	return validateSecurityDescriptor(sd, current.User.Sid, windows.GetCurrentProcessToken().IsElevated())
+}
+
+func validateSecurityDescriptor(sd *windows.SECURITY_DESCRIPTOR, current *windows.SID, elevated bool) error {
 	owner, _, err := sd.Owner()
 	if err != nil {
 		return err
 	}
-	ownerMatches := owner != nil && owner.Equals(current.User.Sid)
-	if !ownerMatches && owner != nil && windows.GetCurrentProcessToken().IsElevated() {
+	ownerMatches := owner != nil && owner.Equals(current)
+	if !ownerMatches && owner != nil && elevated {
 		administrators, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
 		if err != nil {
 			return err
@@ -190,7 +195,7 @@ func validateSecurity(handle windows.Handle) error {
 			return fmt.Errorf("%w: unexpected artifact access entry", ErrInsecure)
 		}
 		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
-		if sid.Equals(current.User.Sid) {
+		if sid.Equals(current) {
 			currentFound = true
 			continue
 		}

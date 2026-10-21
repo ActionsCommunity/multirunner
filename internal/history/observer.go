@@ -2,6 +2,7 @@ package history
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -42,20 +43,13 @@ func (o *LifecycleObserver) ObserveRunnerLifecycle(
 			repository = event.Target
 		}
 		session = RunnerSession{
-			ID:            event.LocalSessionID,
-			RunnerName:    event.RunnerName,
-			PoolName:      event.Pool,
-			Target:        event.Target,
-			Repository:    repository,
-			WorkflowRunID: event.QueuedRunID,
-			RunAttempt:    event.QueuedRunAttempt,
-			WorkflowJobID: event.QueuedJobID,
-			PlannedAt:     event.Timestamp,
-			StartedAt:     event.Timestamp,
-		}
-		if event.QueuedJobID != 0 {
-			session.AttributionSource = "exact_job_id"
-			session.AttributionConfidence = 100
+			ID:         event.LocalSessionID,
+			RunnerName: event.RunnerName,
+			PoolName:   event.Pool,
+			Target:     event.Target,
+			Repository: repository,
+			PlannedAt:  event.Timestamp,
+			StartedAt:  event.Timestamp,
 		}
 	}
 	session.UpdatedAt = event.Timestamp
@@ -78,6 +72,9 @@ func (o *LifecycleObserver) ObserveRunnerLifecycle(
 	case runner.LifecycleStopped:
 		session.Status = "completed"
 		session.Conclusion = "success"
+		if event.Conclusion != "" {
+			session.Conclusion = event.Conclusion
+		}
 		timestamp := event.Timestamp
 		session.CompletedAt = &timestamp
 	case runner.LifecycleFailed:
@@ -96,9 +93,28 @@ func (o *LifecycleObserver) ObserveRunnerLifecycle(
 	}
 	o.mu.Unlock()
 
-	if err := o.store.UpsertRunnerSession(ctx, session); err != nil && o.logger != nil {
+	if err := o.store.persistLifecycleSession(ctx, session); err != nil && o.logger != nil {
 		o.logger.Error("persist runner history", "session_id", event.LocalSessionID, "err", err)
 	}
+}
+
+func (s *Store) persistLifecycleSession(ctx context.Context, session RunnerSession) error {
+	repository := session.Repository
+	// A cached provisioning repository must not replace a confirmed assignment.
+	session.Repository = ""
+	if err := s.UpsertRunnerSession(ctx, session); err != nil {
+		return err
+	}
+	if repository == "" {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE runner_sessions SET repository=?
+		WHERE id=? AND repository=''`, repository, session.ID)
+	if err != nil {
+		return fmt.Errorf("persist runner repository hint: %w", err)
+	}
+	s.invalidateSummaryCache()
+	return nil
 }
 
 var _ runner.LifecycleObserver = (*LifecycleObserver)(nil)

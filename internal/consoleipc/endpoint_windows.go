@@ -58,11 +58,97 @@ func PrepareEndpointIdentity(databasePath string, create bool) error {
 	return nil
 }
 
+// BootstrapEndpointIdentity must precede service secret reads. The operator
+// marker confirms the independent machine binding; it never authenticates itself.
+func BootstrapEndpointIdentity(databasePath string) error {
+	return BootstrapServiceIdentity(databasePath)
+}
+
+// BootstrapServiceIdentity authenticates only the explicitly configured token
+// paths in addition to the console directory, before any OAuth credential read.
+func BootstrapServiceIdentity(databasePath string, tokenPaths ...string) error {
+	return bootstrapServiceIdentity(databasePath, tokenPaths, securefile.BootstrapInstallationOwner,
+		readOperatorSID, securefile.BootstrapCredentialOwner)
+}
+
+func bootstrapServiceIdentity(databasePath string, tokenPaths []string,
+	bootstrap func(string) (string, error), read func(string) (*windows.SID, error),
+	credential func(string, string) error,
+) error {
+	operator, err := bootstrap(filepath.Dir(databasePath))
+	if err != nil || operator == "" {
+		return err
+	}
+	if _, err := readBoundOperator(databasePath, operator, read); err != nil {
+		return err
+	}
+	for _, path := range tokenPaths {
+		if err := credential(path, operator); err != nil {
+			return fmt.Errorf("bootstrap configured OAuth token directory: %w", err)
+		}
+	}
+	return nil
+}
+
+func readBoundOperator(databasePath, operator string, read func(string) (*windows.SID, error)) (*windows.SID, error) {
+	actual, err := read(operatorIdentityPath(databasePath))
+	if err != nil {
+		return nil, err
+	}
+	if actual.String() != operator {
+		return nil, fmt.Errorf("%w: console operator differs from the trusted installation owner", securefile.ErrInsecurePermissions)
+	}
+	return actual, nil
+}
+
+// PrepareServiceIdentity is used only by service install/start, not foreground
+// startup. Unelevated callers cannot install a service and never write HKLM.
+func PrepareServiceIdentity(databasePath string, create bool, tokenPaths ...string) error {
+	if err := BootstrapServiceIdentity(databasePath, tokenPaths...); err != nil {
+		return err
+	}
+	if err := PrepareEndpointIdentity(databasePath, create); err != nil {
+		return err
+	}
+	if !windows.GetCurrentProcessToken().IsElevated() {
+		return nil
+	}
+	current, err := currentUserSID()
+	if err != nil {
+		return err
+	}
+	if current.IsWellKnown(windows.WinLocalSystemSid) {
+		return nil
+	}
+	operator, err := readOperatorSID(operatorIdentityPath(databasePath))
+	if err != nil {
+		return err
+	}
+	if err := securefile.ProvisionInstallationOwner(filepath.Dir(databasePath), operator.String()); err != nil {
+		return err
+	}
+	for _, path := range tokenPaths {
+		if err := securefile.ProvisionCredentialOwner(path, operator.String()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func listenEndpoint(
 	endpoint string, databasePath string,
 ) (net.Listener, func() error, error) {
-	operator, err := readOperatorSID(operatorIdentityPath(databasePath))
-	if errors.Is(err, os.ErrNotExist) {
+	bound, err := securefile.BootstrapInstallationOwner(filepath.Dir(databasePath))
+	if err != nil {
+		return nil, nil, err
+	}
+	var operator *windows.SID
+	if bound != "" {
+		operator, err = readBoundOperator(databasePath, bound, readOperatorSID)
+	} else {
+		operator, err = readOperatorSID(operatorIdentityPath(databasePath))
+	}
+	if bound == "" && errors.Is(err, os.ErrNotExist) {
 		operator, err = currentUserSID()
 	}
 	if err != nil {

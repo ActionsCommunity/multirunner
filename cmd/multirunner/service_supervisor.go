@@ -19,6 +19,7 @@ import (
 	"github.com/GerardSmit/multirunner/internal/buildinfo"
 	"github.com/GerardSmit/multirunner/internal/config"
 	"github.com/GerardSmit/multirunner/internal/consoleauth"
+	"github.com/GerardSmit/multirunner/internal/consoleipc"
 	"github.com/GerardSmit/multirunner/internal/history"
 	"github.com/GerardSmit/multirunner/internal/restore"
 	"github.com/GerardSmit/multirunner/internal/servicehost"
@@ -145,6 +146,9 @@ func superviseServiceWorkerWithHooks(
 	var updateOptions update.ActivationOptions
 	var optionsErr error
 	if cfg.History.Enabled {
+		if err := consoleipc.BootstrapServiceIdentity(cfg.History.DatabasePath, configuredServiceTokenPaths(cfg)...); err != nil {
+			return fmt.Errorf("bootstrap trusted console installation identity: %w", err)
+		}
 		var keyErr error
 		secretPath := consoleauth.SecretPath(cfg.History.DatabasePath)
 		if interactive {

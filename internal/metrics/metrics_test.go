@@ -138,6 +138,24 @@ func TestLegacyMetricsHooksRetainExistingBehavior(t *testing.T) {
 	assertMetric(t, body, `multirunner_reprovision_errors_total{pool="windows"} 1`)
 }
 
+func TestIntentionalStopsDoNotCountAsCompletedOrFailedJobs(t *testing.T) {
+	metrics := New()
+	for _, conclusion := range []string{"terminated", "shutdown", "reconciled"} {
+		metrics.ObserveRunnerLifecycle(t.Context(), runner.LifecycleEvent{
+			Type: runner.LifecycleLaunched, LocalSessionID: conclusion, Pool: "linux",
+		})
+		metrics.ObserveRunnerLifecycle(t.Context(), runner.LifecycleEvent{
+			Type: runner.LifecycleStopped, LocalSessionID: conclusion, Pool: "linux", Conclusion: conclusion,
+		})
+	}
+	body := scrapeMetrics(t, metrics)
+	assertMetric(t, body, `multirunner_runners_active{pool="linux"} 0`)
+	if strings.Contains(body, `multirunner_jobs_total{`) ||
+		strings.Contains(body, `multirunner_reprovision_errors_total{`) {
+		t.Fatalf("intentional stops counted as job results:\n%s", body)
+	}
+}
+
 type historySummaryStub struct {
 	summary history.Summary
 }

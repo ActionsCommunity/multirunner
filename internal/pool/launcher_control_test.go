@@ -27,7 +27,7 @@ func TestLauncherPauseResumeAndDrain(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	active := &activeRunner{cancel: func() {}, done: make(chan struct{})}
+	active := &activeRunner{cancel: func(error) {}, done: make(chan struct{})}
 	launcher.controlMu.Lock()
 	launcher.active["session"] = active
 	launcher.controlMu.Unlock()
@@ -55,7 +55,7 @@ func TestLauncherPauseResumeAndDrain(t *testing.T) {
 
 func TestLauncherTerminateUsesOwnedSessionCancellation(t *testing.T) {
 	launcher := controlTestLauncher()
-	runContext, cancel := context.WithCancel(t.Context())
+	runContext, cancel := context.WithCancelCause(t.Context())
 	active := &activeRunner{cancel: cancel, done: make(chan struct{})}
 	launcher.active["session"] = active
 	go func() {
@@ -89,7 +89,7 @@ func TestLauncherDrainWaitsAcrossProvisioningReservation(t *testing.T) {
 	case <-time.After(10 * time.Millisecond):
 	}
 
-	active := &activeRunner{cancel: func() {}, done: make(chan struct{})}
+	active := &activeRunner{cancel: func(error) {}, done: make(chan struct{})}
 	launcher.controlMu.Lock()
 	launcher.active["session"] = active
 	launcher.provisioning--

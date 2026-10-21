@@ -28,6 +28,11 @@ func TestOperationalHostEpochAndEventJournal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	empty, err := store.OperationalSnapshotAt(ctx, epoch.ID, 0)
+	if err != nil || empty.HostEpoch != epoch.ID ||
+		empty.LastSequence != 0 || len(empty.Runners) != 0 {
+		t.Fatalf("fresh OperationalSnapshotAt = %+v, %v", empty, err)
+	}
 	first, err := store.AppendOperationalEvent(ctx, epoch.ID, operations.EventInput{
 		Type: "runner.planned", EntityType: "runner_session", EntityID: "session-1",
 		Timestamp: started.Add(time.Second), CorrelationID: "corr-1",

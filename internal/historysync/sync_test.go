@@ -96,6 +96,19 @@ func (s *fakeStore) UpsertWorkflowJob(_ context.Context, job history.WorkflowJob
 	return nil
 }
 
+func (s *fakeStore) CorrelateRunnerSession(_ context.Context, job history.WorkflowJob) error {
+	for index := range s.sessions {
+		session := &s.sessions[index]
+		if session.ID != "" && session.ID == job.LocalSessionID {
+			session.Repository, session.WorkflowRunID = job.Repository, job.RunID
+			session.WorkflowJobID, session.RunAttempt = job.ID, job.RunAttempt
+			session.AttributionSource = job.AttributionSource
+			session.AttributionConfidence = job.AttributionConfidence
+		}
+	}
+	return nil
+}
+
 func (s *fakeStore) ListRunnerSessions(_ context.Context, opts history.ListOptions) ([]history.RunnerSession, error) {
 	var filtered []history.RunnerSession
 	for _, session := range s.sessions {
@@ -129,7 +142,7 @@ func (s *fakeStore) SyncState(_ context.Context, key string) (history.SyncState,
 
 func TestPaginationUsesHundredPerPageForRunsAndAllAttemptJobs(t *testing.T) {
 	store := newFakeStore()
-	store.sessions = []history.RunnerSession{{Repository: "o/r", WorkflowJobID: 501}}
+	store.sessions = []history.RunnerSession{{Repository: "o/r", RunnerName: "runner"}}
 	api := &fakeAPI{}
 	api.listRuns = func(_ context.Context, opts ghapi.WorkflowRunListOptions) ([]ghapi.WorkflowRun, ghapi.ResponseMetadata, error) {
 		switch opts.Page {
@@ -257,7 +270,8 @@ func TestBackfillResumeStartsAtFirstUncommittedShard(t *testing.T) {
 func TestExactAndLegacyAttributionAndReruns(t *testing.T) {
 	store := newFakeStore()
 	store.sessions = []history.RunnerSession{
-		{ID: "session-1", Repository: "o/r", WorkflowJobID: 11, RunnerName: "session-runner"},
+		{ID: "session-1", Repository: "o/r", WorkflowJobID: 11, RunnerName: "session-runner",
+			AttributionSource: "exact_runner_name", AttributionConfidence: 100},
 	}
 	api := &fakeAPI{
 		listRuns: func(context.Context, ghapi.WorkflowRunListOptions) ([]ghapi.WorkflowRun, ghapi.ResponseMetadata, error) {
@@ -265,7 +279,7 @@ func TestExactAndLegacyAttributionAndReruns(t *testing.T) {
 		},
 		listJobs: func(context.Context, int64, ghapi.PageOptions) ([]ghapi.WorkflowJob, ghapi.ResponseMetadata, error) {
 			jobs := []ghapi.WorkflowJob{
-				workflowJob(11, 1, "different-name"),
+				workflowJob(11, 1, ""),
 				workflowJob(12, 1, "session-runner"),
 				workflowJob(13, 1, "legacy-v1-abc"),
 				workflowJob(14, 1, "unrelated"),
@@ -289,10 +303,11 @@ func TestExactAndLegacyAttributionAndReruns(t *testing.T) {
 	if _, ok := store.jobs["o/r:14"]; ok {
 		t.Fatal("stored unrelated job")
 	}
-	if got := store.jobs["o/r:11"]; got.AttributionSource != "exact_job_id" ||
+	if got := store.jobs["o/r:11"]; got.AttributionSource != "exact_runner_name" ||
 		got.AttributionConfidence != 100 || got.LocalSessionID == "" {
 		t.Fatalf("job-ID attribution = %+v", got)
 	}
+
 	if got := store.jobs["o/r:12"]; got.AttributionSource != "exact_runner_name" ||
 		got.AttributionConfidence != 100 || got.RunAttempt != 2 {
 		t.Fatalf("runner-name attribution = %+v", got)
@@ -300,6 +315,63 @@ func TestExactAndLegacyAttributionAndReruns(t *testing.T) {
 	if got := store.jobs["o/r:13"]; got.AttributionSource != "inferred_legacy_prefix" ||
 		got.AttributionConfidence != 50 {
 		t.Fatalf("legacy attribution = %+v", got)
+	}
+}
+
+func TestSessionIndexRejectsTriggerHintsAndContradictoryNames(t *testing.T) {
+	hint := history.RunnerSession{
+		ID: "trigger", WorkflowJobID: 20, RunnerName: "trigger-runner",
+		AttributionSource: "exact_job_id", AttributionConfidence: 100,
+	}
+	actual := history.RunnerSession{ID: "actual", RunnerName: "actual-runner"}
+	index := sessionIndex{
+		jobIDs:      map[int64]history.RunnerSession{20: hint},
+		runnerNames: map[string]history.RunnerSession{"trigger-runner": hint, "actual-runner": actual},
+	}
+	for _, name := range []string{"", "unrelated"} {
+		if got := index.match(workflowJob(20, 10, name)); got.kind != attributionNone {
+			t.Fatalf("unconfirmed match for %q = %+v", name, got)
+		}
+	}
+	if got := index.match(workflowJob(20, 10, "actual-runner")); got.session.ID != "actual" ||
+		got.source != "exact_runner_name" {
+		t.Fatalf("runner identity lost to hint: %+v", got)
+	}
+	actual.WorkflowJobID = 20
+	actual.AttributionSource, actual.AttributionConfidence = "exact_runner_name", 100
+	index.jobIDs[20] = actual
+	if got := index.match(workflowJob(20, 10, "")); got.session.ID != "actual" {
+		t.Fatalf("confirmed assignment not retained: %+v", got)
+	}
+	if got := index.match(workflowJob(20, 10, "unrelated")); got.kind != attributionNone {
+		t.Fatalf("confirmed ID overrode contradictory name: %+v", got)
+	}
+}
+
+func TestSyncBackfillsWarmSessionAssignment(t *testing.T) {
+	store := newFakeStore()
+	store.sessions = []history.RunnerSession{{
+		ID: "warm", RunnerName: "warm-runner", Target: "owner", Repository: "o/trigger",
+		Status: "completed", Conclusion: "success", CompletedAt: &testNow,
+	}}
+	api := &fakeAPI{
+		listRuns: func(context.Context, ghapi.WorkflowRunListOptions) ([]ghapi.WorkflowRun, ghapi.ResponseMetadata, error) {
+			return []ghapi.WorkflowRun{workflowRun(1)}, ghapi.ResponseMetadata{}, nil
+		},
+		listJobs: func(context.Context, int64, ghapi.PageOptions) ([]ghapi.WorkflowJob, ghapi.ResponseMetadata, error) {
+			job := workflowJob(20, 1, "warm-runner")
+			job.RunAttempt = 2
+			return []ghapi.WorkflowJob{job}, ghapi.ResponseMetadata{}, nil
+		},
+	}
+	report, err := newTestSyncer(t, store, api, Options{}).Sync(t.Context())
+	if err != nil || report.Degraded {
+		t.Fatalf("Sync = %+v, %v", report, err)
+	}
+	if got := store.sessions[0]; got.WorkflowRunID != 1 || got.WorkflowJobID != 20 ||
+		got.RunAttempt != 2 || got.Repository != "o/r" || got.AttributionSource != "exact_runner_name" ||
+		got.Status != "completed" || got.CompletedAt == nil {
+		t.Fatalf("warm session correlation = %+v", got)
 	}
 }
 

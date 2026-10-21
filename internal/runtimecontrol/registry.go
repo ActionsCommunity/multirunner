@@ -39,6 +39,7 @@ type PoolController interface {
 	Pause()
 	Resume()
 	Paused() bool
+	Drained() bool
 	ActiveSessions() []string
 	Drain(context.Context) error
 	Terminate(context.Context, string) error
@@ -402,7 +403,7 @@ func (a *poolAdapter) Prepare(_ context.Context, invocation control.Invocation) 
 	return poolState(a.controller)
 }
 
-func (a *poolAdapter) Execute(ctx context.Context, invocation control.Invocation) (control.EffectResult, error) {
+func (a *poolAdapter) Execute(_ context.Context, invocation control.Invocation) (control.EffectResult, error) {
 	if err := a.fences.accept(invocation.ConflictDomain, invocation.FencingToken); err != nil {
 		return control.EffectResult{Disposition: control.EffectUnknown}, err
 	}
@@ -412,9 +413,9 @@ func (a *poolAdapter) Execute(ctx context.Context, invocation control.Invocation
 	case CommandPoolResume, CommandPoolCancelDrain:
 		a.controller.Resume()
 	case CommandPoolDrain:
-		if err := a.controller.Drain(ctx); err != nil {
-			return control.EffectResult{Disposition: control.EffectUnknown}, err
-		}
+		a.controller.Pause()
+		outcome, err := poolState(a.controller)
+		return control.EffectResult{Disposition: control.EffectPending, Outcome: outcome}, err
 	default:
 		return control.EffectResult{
 			Disposition: control.EffectFailed,
@@ -430,7 +431,6 @@ func (a *poolAdapter) Reconcile(_ context.Context, invocation control.Invocation
 		return control.ReconcileResult{Disposition: control.ReconcileUnknown}, err
 	}
 	paused := a.controller.Paused()
-	active := len(a.controller.ActiveSessions())
 	result := control.ReconcileResult{}
 	switch a.commandType {
 	case CommandPoolPause:
@@ -447,13 +447,12 @@ func (a *poolAdapter) Reconcile(_ context.Context, invocation control.Invocation
 		}
 	case CommandPoolDrain:
 		switch {
-		case paused && active == 0:
+		case a.controller.Drained():
 			result.Disposition = control.ReconcileApplied
 		case !paused:
 			result.Disposition = control.ReconcileAbsent
 		default:
-			result.Disposition = control.ReconcileUnknown
-			result.Error = "pool is paused but active runners remain"
+			result.Disposition = control.ReconcilePending
 		}
 	default:
 		result.Disposition = control.ReconcileUnknown

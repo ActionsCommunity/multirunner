@@ -3,6 +3,7 @@ package operations
 import (
 	"context"
 	"encoding/json"
+	"strings"
 
 	"github.com/GerardSmit/multirunner/internal/runner"
 )
@@ -25,10 +26,14 @@ func (o *RunnerLifecycleObserver) ObserveRunnerLifecycle(
 	if o == nil || o.journal == nil || event.LocalSessionID == "" {
 		return
 	}
+	repository := event.Repository
+	if repository == "" && strings.Contains(event.Target, "/") {
+		repository = event.Target
+	}
 	payload, err := json.Marshal(map[string]any{
 		"pool":                   event.Pool,
 		"target":                 event.Target,
-		"repository":             event.Repository,
+		"repository":             repository,
 		"runner_name":            event.RunnerName,
 		"queued_run_id":          event.QueuedRunID,
 		"queued_run_attempt":     event.QueuedRunAttempt,
@@ -37,6 +42,7 @@ func (o *RunnerLifecycleObserver) ObserveRunnerLifecycle(
 		"backend_instance_id":    event.BackendInstanceID,
 		"exit_code":              event.ExitCode,
 		"error":                  event.Error,
+		"conclusion":             event.Conclusion,
 	})
 	if err != nil {
 		return

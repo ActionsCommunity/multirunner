@@ -1040,6 +1040,7 @@ func (p *commandTestPool) Name() string             { return p.name }
 func (p *commandTestPool) Pause()                   { p.paused = true }
 func (p *commandTestPool) Resume()                  { p.paused = false }
 func (p *commandTestPool) Paused() bool             { return p.paused }
+func (p *commandTestPool) Drained() bool            { return p.paused && len(p.sessions) == 0 }
 func (p *commandTestPool) ActiveSessions() []string { return append([]string(nil), p.sessions...) }
 func (p *commandTestPool) Drain(context.Context) error {
 	p.paused = true

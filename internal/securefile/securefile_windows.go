@@ -134,11 +134,11 @@ func validateOpenFile(file *os.File) error {
 	if info.FileAttributes&(windows.FILE_ATTRIBUTE_DIRECTORY|windows.FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
 		return fmt.Errorf("%w: secret is not a plain file", ErrInsecurePermissions)
 	}
-	err := validateOpenHandle(windows.Handle(file.Fd()))
+	err := validateOpenHandle(windows.Handle(file.Fd()), file.Name())
 	return err
 }
 
-func validateOpenHandle(handle windows.Handle) error {
+func validateOpenHandle(handle windows.Handle, path string) error {
 	sd, err := windows.GetSecurityInfo(
 		handle, windows.SE_FILE_OBJECT,
 		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
@@ -146,6 +146,15 @@ func validateOpenHandle(handle windows.Handle) error {
 	if err != nil {
 		return fmt.Errorf("read secret security info: %w", err)
 	}
+	system, installation, current, administrators, err := expectedSIDs()
+	if err != nil {
+		return err
+	}
+	installation = installationOwnerForPath(path, current, installation)
+	return validateSecurityDescriptor(sd, system, installation, current, administrators)
+}
+
+func validateSecurityDescriptor(sd *windows.SECURITY_DESCRIPTOR, system, installation, current, administrators *windows.SID) error {
 	control, _, err := sd.Control()
 	if err != nil {
 		return err
@@ -160,15 +169,11 @@ func validateOpenHandle(handle windows.Handle) error {
 	if dacl == nil || dacl.AceCount != 2 {
 		return fmt.Errorf("%w: unexpected DACL", ErrInsecurePermissions)
 	}
-	system, installation, current, administrators, err := expectedSIDs()
-	if err != nil {
-		return err
-	}
 	owner, _, err := sd.Owner()
 	if err != nil {
 		return err
 	}
-	if owner == nil || (!owner.Equals(system) && !owner.Equals(administrators) &&
+	if owner == nil || (!owner.Equals(system) && !owner.Equals(administrators) && !owner.Equals(installation) &&
 		(current.Equals(system) || !owner.Equals(current))) {
 		return fmt.Errorf("%w: owner SID does not match an expected service or installation identity", ErrInsecurePermissions)
 	}
@@ -219,8 +224,10 @@ func applyProtectedDACL(file *os.File) error {
 	}
 	if err := windows.SetNamedSecurityInfo(
 		file.Name(), windows.SE_FILE_OBJECT,
-		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
-		installation, nil, acl, nil,
+		// Preserve the creator owner: changing the DACL needs WRITE_DAC,
+		// whereas setting even the same owner also requires WRITE_OWNER.
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil, nil, acl, nil,
 	); err != nil {
 		return fmt.Errorf("protect secret DACL: %w", err)
 	}
@@ -248,7 +255,9 @@ func protectedDACL(system, installation *windows.SID) (*windows.ACL, error) {
 	return acl, nil
 }
 
-func expectedSIDs() (*windows.SID, *windows.SID, *windows.SID, *windows.SID, error) {
+var expectedSIDs = processSIDs
+
+func processSIDs() (*windows.SID, *windows.SID, *windows.SID, *windows.SID, error) {
 	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
 	if err != nil {
 		return nil, nil, nil, nil, err
@@ -277,6 +286,7 @@ func validateParentChain(path string) error {
 	if err != nil {
 		return err
 	}
+	installation = installationOwnerForPath(path, current, installation)
 	trustedInstaller, err := windows.StringToSid(trustedInstallerSID)
 	if err != nil {
 		return err
@@ -319,10 +329,7 @@ func validateParentChain(path string) error {
 		if err != nil {
 			return err
 		}
-		if owner == nil ||
-			(!owner.Equals(system) && !owner.Equals(installation) &&
-				!owner.Equals(current) && !owner.Equals(administrators) &&
-				!owner.Equals(trustedInstaller)) {
+		if !trustedParentOwner(owner, system, installation, current, administrators, trustedInstaller) {
 			return fmt.Errorf("%w: parent path %q has an unexpected owner SID", ErrInsecurePermissions, parent)
 		}
 		runtime.KeepAlive(sd)
@@ -332,4 +339,9 @@ func validateParentChain(path string) error {
 		}
 		parent = next
 	}
+}
+
+func trustedParentOwner(owner, system, installation, current, administrators, trustedInstaller *windows.SID) bool {
+	return owner != nil && (owner.Equals(system) || owner.Equals(installation) ||
+		owner.Equals(current) || owner.Equals(administrators) || owner.Equals(trustedInstaller))
 }

@@ -58,6 +58,9 @@ func RunOnce(ctx context.Context, gh *github.Client, be backend.Backend, spec Sp
 	}
 	observe(ctx, spec.Observer, event)
 	defer func() {
+		if err != nil && intentionalStop(ctx) != "" && cancellationOnly(err) {
+			code, err = 0, nil
+		}
 		event.Timestamp = time.Now().UTC()
 		event.ExitCode = code
 		event.Error = sanitizeLifecycleError(err)
@@ -65,8 +68,11 @@ func RunOnce(ctx context.Context, gh *github.Client, be backend.Backend, spec Sp
 			event.Type = LifecycleFailed
 		} else {
 			event.Type = LifecycleStopped
+			event.Conclusion = intentionalStop(ctx)
 		}
-		observe(ctx, spec.Observer, event)
+		terminalCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
+		defer cancel()
+		observe(terminalCtx, spec.Observer, event)
 	}()
 
 	jit, err := gh.GenerateJITConfig(ctx, github.JITConfigRequest{
@@ -107,7 +113,9 @@ func RunOnce(ctx context.Context, gh *github.Client, be backend.Backend, spec Sp
 				return -1, errors.Join(launchErr, fmt.Errorf("kill runner: %w", killErr))
 			}
 		}
-		deregister(ctx, gh, jit.Runner.ID, spec.Name, logger)
+		if cleanupErr := deregister(ctx, gh, jit.Runner.ID, spec.Name, logger); cleanupErr != nil {
+			return -1, errors.Join(launchErr, fmt.Errorf("deregister runner: %w", cleanupErr))
+		}
 		return -1, launchErr
 	}
 
@@ -128,7 +136,12 @@ func RunOnce(ctx context.Context, gh *github.Client, be backend.Backend, spec Sp
 			reclaimAfterFailedKill(ctx, gh, jit.Runner.ID, spec.Name, logger)
 			return code, errors.Join(ctx.Err(), fmt.Errorf("kill runner: %w", killErr))
 		}
-		deregister(ctx, gh, jit.Runner.ID, spec.Name, logger)
+		if cleanupErr := deregister(ctx, gh, jit.Runner.ID, spec.Name, logger); cleanupErr != nil {
+			return code, errors.Join(ctx.Err(), fmt.Errorf("deregister runner: %w", cleanupErr))
+		}
+		if waitErr != nil && !cancellationOnly(waitErr) {
+			return code, fmt.Errorf("wait: %w", waitErr)
+		}
 		return code, ctx.Err()
 	}
 	if waitErr != nil {
@@ -167,9 +180,9 @@ func terminate(ctx context.Context, handle backend.RunnerHandle) error {
 // deregister removes a runner registration best-effort. A registration that is
 // already gone is the expected outcome for a runner that completed its job, so
 // that case is not worth a warning.
-func deregister(ctx context.Context, gh *github.Client, runnerID int64, name string, logger *slog.Logger) {
+func deregister(ctx context.Context, gh *github.Client, runnerID int64, name string, logger *slog.Logger) error {
 	if runnerID == 0 {
-		return
+		return nil
 	}
 	detached, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
 	defer cancel()
@@ -181,7 +194,9 @@ func deregister(ctx context.Context, gh *github.Client, runnerID int64, name str
 	case errors.Is(err, github.ErrRunnerNotFound):
 	default:
 		logger.Warn("deregister runner failed", "name", name, "runner_id", runnerID, "err", err)
+		return err
 	}
+	return nil
 }
 
 // reclaimAfterFailedKill decides what to do with the registration of a runner

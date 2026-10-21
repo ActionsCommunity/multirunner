@@ -528,12 +528,15 @@ func prepareServiceConsoleSecret(cfg *config.Config, action string) error {
 	if cfg == nil || !cfg.History.Enabled {
 		return nil
 	}
+	if err := consoleipc.BootstrapServiceIdentity(cfg.History.DatabasePath, configuredServiceTokenPaths(cfg)...); err != nil {
+		return fmt.Errorf("bootstrap trusted console installation identity: %w", err)
+	}
 	secretPath := consoleauth.SecretPath(cfg.History.DatabasePath)
 	if action == "install" {
 		if _, err := consoleauth.EnsureSecret(secretPath); err != nil {
 			return fmt.Errorf("provision console secret before service installation: %w", err)
 		}
-		if err := consoleipc.PrepareEndpointIdentity(cfg.History.DatabasePath, true); err != nil {
+		if err := consoleipc.PrepareServiceIdentity(cfg.History.DatabasePath, true, configuredServiceTokenPaths(cfg)...); err != nil {
 			return fmt.Errorf("provision console operator identity before service installation: %w", err)
 		}
 		return nil
@@ -541,7 +544,7 @@ func prepareServiceConsoleSecret(cfg *config.Config, action string) error {
 	if _, err := consoleauth.LoadSecret(secretPath); err != nil {
 		return fmt.Errorf("validate console secret before service start: %w", err)
 	}
-	if err := consoleipc.PrepareEndpointIdentity(cfg.History.DatabasePath, false); err != nil {
+	if err := consoleipc.PrepareServiceIdentity(cfg.History.DatabasePath, false, configuredServiceTokenPaths(cfg)...); err != nil {
 		return fmt.Errorf("validate console operator identity before service start: %w", err)
 	}
 	return nil
@@ -729,6 +732,11 @@ func runOrchestrator(ctx context.Context, configPath string, interactive, instal
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		return err
+	}
+	if cfg.History.Enabled {
+		if err := consoleipc.BootstrapServiceIdentity(cfg.History.DatabasePath, configuredServiceTokenPaths(cfg)...); err != nil {
+			return fmt.Errorf("bootstrap trusted installation identity before GitHub authentication: %w", err)
+		}
 	}
 	secrets := cfg.SecretValues()
 	logger := newLogger(cfg.Log, output, secrets...)
@@ -1030,6 +1038,7 @@ func runAutoscale(ctx context.Context, cfg *config.Config, ghProvider github.Cli
 			return errors.New("webhook secret is required when the listener is configured")
 		}
 		wh := webhook.New(cfg.Webhook.Listen, cfg.Webhook.Path, cfg.Webhook.Secret, scaler, logger)
+		wh.AddObserver(scaler)
 		wh.AddObserver(historyObserver)
 		go func() {
 			if err := wh.Start(ctx); err != nil {

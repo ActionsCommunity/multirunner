@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/GerardSmit/multirunner/internal/operations"
@@ -38,6 +39,7 @@ const (
 	EffectSucceeded EffectDisposition = "succeeded"
 	EffectFailed    EffectDisposition = "failed"
 	EffectUnknown   EffectDisposition = "unknown"
+	EffectPending   EffectDisposition = "pending"
 )
 
 type EffectResult struct {
@@ -52,6 +54,7 @@ const (
 	ReconcileApplied ReconcileDisposition = "applied"
 	ReconcileAbsent  ReconcileDisposition = "absent"
 	ReconcileUnknown ReconcileDisposition = "unknown"
+	ReconcilePending ReconcileDisposition = "pending"
 )
 
 type ReconcileResult struct {
@@ -96,6 +99,8 @@ type Executor struct {
 	lease        time.Duration
 	pollInterval time.Duration
 	hooks        ExecutorHooks
+	effectMu     sync.Mutex
+	effects      map[string]<-chan struct{}
 }
 
 func NewExecutor(store Store, adapters AdapterResolver, options ExecutorOptions) (*Executor, error) {
@@ -114,7 +119,8 @@ func NewExecutor(store Store, adapters AdapterResolver, options ExecutorOptions)
 	return &Executor{
 		store: store, adapters: adapters, owner: options.Owner,
 		lease: options.Lease, pollInterval: options.PollInterval,
-		hooks: options.Hooks,
+		hooks:   options.Hooks,
+		effects: make(map[string]<-chan struct{}),
 	}, nil
 }
 
@@ -241,6 +247,10 @@ func (e *Executor) execute(ctx context.Context, command Command) error {
 		transition.To = StateFailed
 	case EffectUnknown:
 		transition.To = StateUnknownOutcome
+	case EffectPending:
+		transition.To = StateReconciling
+		transition.LeaseOwner = e.owner
+		transition.LeaseDuration = e.pollInterval
 	default:
 		transition.To = StateUnknownOutcome
 		if transition.Error == "" {
@@ -278,6 +288,26 @@ func (e *Executor) interruptBeforeEffect(
 }
 
 func (e *Executor) reconcile(ctx context.Context, command Command) error {
+	e.effectMu.Lock()
+	done := e.effects[command.ID]
+	if done != nil {
+		select {
+		case <-done:
+			delete(e.effects, command.ID)
+			done = nil
+		default:
+		}
+	}
+	e.effectMu.Unlock()
+	if done != nil {
+		_, err := e.store.TransitionCommand(ctx, command.ID, Transition{
+			ExpectedState: StateReconciling, To: StateUnknownOutcome,
+			ActorKind: operations.ActorSystem, ActorID: e.owner,
+			FencingToken: command.FencingToken,
+			Error:        "previous effect execution is still stopping; its outcome cannot yet be reconciled",
+		})
+		return err
+	}
 	adapter, ok := e.adapters.AdapterFor(command)
 	if !ok {
 		_, err := e.store.TransitionCommand(ctx, command.ID, Transition{
@@ -301,6 +331,15 @@ func (e *Executor) reconcile(ctx context.Context, command Command) error {
 		transition.To = StateInterrupted
 	case ReconcileUnknown:
 		transition.To = StateUnknownOutcome
+	case ReconcilePending:
+		if commandDeadlineExpired(command, time.Now()) {
+			transition.To = StateInterrupted
+			transition.Error = "command deadline expired before the requested state was reached"
+		} else {
+			transition.To = StateReconciling
+			transition.LeaseOwner = e.owner
+			transition.LeaseDuration = e.pollInterval
+		}
 	default:
 		transition.To = StateUnknownOutcome
 		if transition.Error == "" {
@@ -327,7 +366,17 @@ func (e *Executor) executeWithHeartbeat(
 		err    error
 	}
 	results := make(chan result, 1)
+	done := make(chan struct{})
+	e.effectMu.Lock()
+	e.effects[command.ID] = done
+	e.effectMu.Unlock()
 	go func() {
+		defer func() {
+			close(done)
+			e.effectMu.Lock()
+			delete(e.effects, command.ID)
+			e.effectMu.Unlock()
+		}()
 		effect, err := adapter.Execute(effectContext, invocationFor(command))
 		results <- result{effect: effect, err: err}
 	}()
@@ -340,6 +389,9 @@ func (e *Executor) executeWithHeartbeat(
 	for {
 		select {
 		case result := <-results:
+			e.effectMu.Lock()
+			delete(e.effects, command.ID)
+			e.effectMu.Unlock()
 			return result.effect, result.err
 		case <-ctx.Done():
 			return EffectResult{Disposition: EffectUnknown}, ctx.Err()

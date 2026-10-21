@@ -1,11 +1,36 @@
 package operations
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
 	"github.com/GerardSmit/multirunner/internal/runner"
 )
+
+func TestRunnerLifecycleObserverRepositoryFallback(t *testing.T) {
+	for _, test := range []struct{ target, repository, want string }{
+		{"owner/repo", "", "owner/repo"},
+		{"owner", "", ""},
+		{"enterprise", "", ""},
+		{"owner", "owner/actual", "owner/actual"},
+	} {
+		t.Run(test.target+test.repository, func(t *testing.T) {
+			appender := &capturingAppender{}
+			NewRunnerLifecycleObserver(appender).ObserveRunnerLifecycle(t.Context(), runner.LifecycleEvent{
+				Type: runner.LifecyclePlanned, LocalSessionID: "session",
+				Target: test.target, Repository: test.repository,
+			})
+			var payload struct{ Repository string }
+			if len(appender.inputs) != 1 {
+				t.Fatalf("inputs = %+v", appender.inputs)
+			}
+			if err := json.Unmarshal(appender.inputs[0].Payload, &payload); err != nil || payload.Repository != test.want {
+				t.Fatalf("repository = %q, %v; want %q", payload.Repository, err, test.want)
+			}
+		})
+	}
+}
 
 type capturingAppender struct {
 	inputs []EventInput

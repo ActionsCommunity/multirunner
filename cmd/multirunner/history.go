@@ -70,6 +70,7 @@ type historyRuntime struct {
 	authenticator  *consoleauth.Authenticator
 	pairing        *consoleipc.Server
 	databasePath   string
+	runtimeLock    *os.File
 }
 
 func (r *historyRuntime) Close() error {
@@ -120,6 +121,12 @@ func (r *historyRuntime) Close() error {
 		if err := r.store.Close(); err != nil {
 			closeErrors = append(closeErrors, err)
 		}
+	}
+	if r.runtimeLock != nil {
+		if err := r.runtimeLock.Close(); err != nil {
+			closeErrors = append(closeErrors, err)
+		}
+		r.runtimeLock = nil
 	}
 	return errors.Join(closeErrors...)
 }
@@ -387,6 +394,9 @@ func startDegradedConsole(
 		return err
 	}
 	secretPath := consoleauth.SecretPath(cfg.History.DatabasePath)
+	if err := consoleipc.BootstrapEndpointIdentity(cfg.History.DatabasePath); err != nil {
+		return err
+	}
 	secret, err := consoleauth.EnsureSecret(secretPath)
 	if err != nil {
 		return err
@@ -449,7 +459,42 @@ func startDegradedConsole(
 	return nil
 }
 
+// Startup runs before any provisioning or synchronization can write sessions.
+func reconcileStaleRunnerSessions(ctx context.Context, store *history.Store, epochStart time.Time) error {
+	epochStart = epochStart.Truncate(time.Millisecond)
+	for {
+		sessions, err := store.PendingRunnerSessions(ctx, 1000)
+		if err != nil {
+			return err
+		}
+		completed := 0
+		for _, session := range sessions {
+			if !session.StartedAt.Before(epochStart) {
+				continue
+			}
+			if err := store.CompleteRunnerSession(ctx, session.ID, "completed", "interrupted",
+				"host restarted before runner completion was recorded", epochStart); err != nil {
+				return err
+			}
+			completed++
+		}
+		if completed == 0 {
+			return nil
+		}
+	}
+}
+
 func setupPersistentHistory(ctx context.Context, configPath string, cfg *config.Config, provider github.ClientProvider, observability *metrics.Metrics, logger *slog.Logger) (*historyRuntime, error) {
+	runtimeLock, err := history.AcquireRuntimeLock(cfg.History.DatabasePath)
+	if err != nil {
+		return nil, err
+	}
+	owned := false
+	defer func() {
+		if !owned {
+			_ = runtimeLock.Close()
+		}
+	}()
 	store, err := history.Open(ctx, cfg.History.DatabasePath)
 	if err != nil {
 		return nil, err
@@ -465,6 +510,10 @@ func setupPersistentHistory(ctx context.Context, configPath string, cfg *config.
 		return nil, err
 	}
 	secretPath := consoleauth.SecretPath(cfg.History.DatabasePath)
+	if err := consoleipc.BootstrapEndpointIdentity(cfg.History.DatabasePath); err != nil {
+		_ = store.Close()
+		return nil, err
+	}
 	secret, err := consoleauth.EnsureSecret(secretPath)
 	if err != nil {
 		_ = store.Close()
@@ -493,6 +542,10 @@ func setupPersistentHistory(ctx context.Context, configPath string, cfg *config.
 		_ = store.Close()
 		return nil, err
 	}
+	if err := reconcileStaleRunnerSessions(ctx, store, epoch.StartedAt); err != nil {
+		_ = store.Close()
+		return nil, fmt.Errorf("reconcile runner sessions after restart: %w", err)
+	}
 	store.SetCommandEpoch(epoch.ID)
 	journal, err := operations.NewJournal(ctx, store, epoch.ID, operations.JournalOptions{
 		OnAppendError: func(err error) {
@@ -513,6 +566,7 @@ func setupPersistentHistory(ctx context.Context, configPath string, cfg *config.
 		_ = store.Close()
 		return nil, err
 	}
+
 	controls := runtimecontrol.NewRegistry()
 	configureConsoleCapabilityGates(controls, cfg.History.OperationsConsole.Capabilities)
 	bundleService, err := supportbundle.New(supportbundle.Options{
@@ -840,6 +894,8 @@ func setupPersistentHistory(ctx context.Context, configPath string, cfg *config.
 	runtime.listener = listener
 	runtime.handler = handler
 	runtime.authenticator = authenticator
+	runtime.runtimeLock = runtimeLock
+	owned = true
 	return runtime, nil
 }
 

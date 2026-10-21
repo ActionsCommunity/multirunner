@@ -198,6 +198,7 @@ func New(options Options) http.Handler {
 		mux.HandleFunc("POST /api/v1/commands/preview", commandPreviewHandler(options))
 		mux.HandleFunc("POST /api/v1/commands", commandCreateHandler(options))
 		mux.HandleFunc("GET /api/v1/commands/{id}", commandReadHandler(options))
+		mux.HandleFunc("POST /api/v1/commands/{id}/reconcile", commandReconcileHandler(options))
 	}
 	if options.Diagnostics != nil {
 		mux.HandleFunc("GET /api/v1/diagnostics", func(w http.ResponseWriter, r *http.Request) {

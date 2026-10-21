@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"regexp"
 	"strings"
 	"time"
@@ -37,6 +38,34 @@ type LifecycleEvent struct {
 	Timestamp            time.Time
 	ExitCode             int
 	Error                string // Sanitized for durable observation.
+	Conclusion           string // Optional intentional terminal outcome.
+}
+
+var (
+	ErrTerminated = errors.New("runner intentionally terminated")
+	ErrShutdown   = errors.New("runner stopped for host shutdown")
+)
+
+func intentionalStop(ctx context.Context) string {
+	switch {
+	case errors.Is(context.Cause(ctx), ErrTerminated):
+		return "terminated"
+	case errors.Is(context.Cause(ctx), ErrShutdown):
+		return "shutdown"
+	default:
+		return ""
+	}
+}
+
+// cancellationOnly rejects joined cleanup failures even when one cause is cancellation.
+func cancellationOnly(err error) bool {
+	for err != nil {
+		if err == context.Canceled || err == context.DeadlineExceeded {
+			return true
+		}
+		err = errors.Unwrap(err)
+	}
+	return false
 }
 
 // LifecycleObserver receives ordered lifecycle events. Implementations must be
@@ -74,6 +103,7 @@ func sanitizeLifecycleError(err error) string {
 	if err == nil {
 		return ""
 	}
+
 	message := strings.Join(strings.Fields(err.Error()), " ")
 	message = urlSecretPattern.ReplaceAllString(message, "$1?[redacted]")
 	message = secretPattern.ReplaceAllString(message, "$1=[redacted]")
@@ -83,3 +113,6 @@ func sanitizeLifecycleError(err error) string {
 	}
 	return message
 }
+
+// SanitizeLifecycleError bounds and redacts errors before durable observation.
+func SanitizeLifecycleError(err error) string { return sanitizeLifecycleError(err) }

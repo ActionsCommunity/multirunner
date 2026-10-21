@@ -28,6 +28,7 @@ export interface OperatorCommand {
   outcome?: Record<string, unknown>
   created_at: string
   completed_at?: string
+  fencing_token?: number
 }
 
 interface ConsoleSession {
@@ -94,6 +95,25 @@ export function newIdempotencyKey() {
     return globalThis.crypto.randomUUID()
   }
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`
+}
+
+export async function reconcileCommand(
+  command: OperatorCommand,
+  reason: string,
+  confirmation: string,
+): Promise<OperatorCommand> {
+  assertMutationAllowed()
+  const session = await getSession()
+  return requestJSON<OperatorCommand>(
+    `/api/v1/commands/${encodeURIComponent(command.id)}/reconcile`,
+    {
+      method: 'POST',
+      headers: mutationHeaders(session.csrf_token),
+      body: JSON.stringify({ reason, confirmation, fencing_token: command.fencing_token }),
+    },
+    'Command reconciliation failed',
+    { required: ['id', 'type', 'state', 'created_at'] },
+  )
 }
 
 async function getSession(signal?: AbortSignal): Promise<ConsoleSession> {

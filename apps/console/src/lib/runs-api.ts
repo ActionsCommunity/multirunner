@@ -72,6 +72,29 @@ export interface RunInspection {
   runner_sessions: RunInspectionSession[]
 }
 
+export async function getRunnerSession(id: string, signal?: AbortSignal) {
+  let cursor = ''
+  do {
+    const parameters = new URLSearchParams({ limit: '200' })
+    if (cursor) parameters.set('cursor', cursor)
+    const response = await requestJSON<{
+      items: RunInspectionSession[]
+      next_cursor?: string
+    }>(
+      `/api/v1/sessions?${parameters}`,
+      { signal },
+      'Runner session inspection failed',
+      { required: ['items'], arrays: ['items'] },
+    )
+    const session = response.items.find((item) => item.id === id)
+    if (session) return session
+    const next = response.next_cursor ?? ''
+    if (next === cursor) break
+    cursor = next
+  } while (cursor)
+  throw new Error('The selected runner session is no longer available in retained history.')
+}
+
 export function getRunInspection(
   repository: string,
   runID: string,

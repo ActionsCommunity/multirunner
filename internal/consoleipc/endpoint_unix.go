@@ -36,6 +36,18 @@ func PrepareEndpointIdentity(string, bool) error {
 	return nil
 }
 
+func BootstrapEndpointIdentity(string) error {
+	return nil
+}
+
+func BootstrapServiceIdentity(string, ...string) error {
+	return nil
+}
+
+func PrepareServiceIdentity(databasePath string, create bool, _ ...string) error {
+	return PrepareEndpointIdentity(databasePath, create)
+}
+
 func listenEndpoint(endpoint string, _ string) (net.Listener, func() error, error) {
 	directory := filepath.Dir(endpoint)
 	if err := ensurePrivateDirectory(directory); err != nil {

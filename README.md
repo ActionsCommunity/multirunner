@@ -634,8 +634,10 @@ behaviour.
     and scales up.
   - **Webhook** (low-latency) — set `webhook.listen` to receive `workflow_job`
     events (needs a reachable URL; use a tunnel like smee.io / cloudflared).
-    A nonempty `webhook.secret` verifies signatures; an empty one accepts
-    unsigned events and is unsafe on a public listener.
+    A nonempty `webhook.secret` is required whenever `webhook.listen` is set;
+    every delivery must pass signature verification. When migrating an old
+    unsigned listener, configure the same secret in GitHub and Multirunner
+    before enabling the listener, or remove `webhook.listen` and use polling.
 - **`scaleset`** (default) — let GitHub decide. A [runner scale set][scaleset] holds a
   long-poll session open and reports the desired runner count, which is the same
   mechanism actions-runner-controller uses.
@@ -777,9 +779,22 @@ from durable history, bounds and masks the response, sends it with
 written to SQLite, operational events, audit payloads, exports, support
 bundles, backups, service logs, or browser persistent storage.
 
-New jobs can be attributed exactly by queued job ID or persisted runner name.
+New jobs are attributed exactly by GitHub's assigned runner name. Queued job
+IDs that triggered provisioning are only hints: GitHub can assign that job to
+another labels-compatible runner. A delivery without a runner name can reuse
+an already runner-confirmed assignment, but cannot confirm a trigger hint.
 Older jobs can be imported by an explicitly configured runner-name prefix and
 remain marked as inferred.
+
+REST enrichment and backfill enumerate only configured repository-scoped
+targets (`owner/repository`). Organization and enterprise targets are not
+expanded into repositories for REST history synchronization. For those scopes,
+workflow/job history requires a reachable `webhook.listen` endpoint receiving
+the relevant GitHub `workflow_job` deliveries and a matching, nonempty
+`webhook.secret` for signature verification. The console listener remains
+loopback-only; it is not the webhook endpoint. Local runner lifecycle history
+is still recorded without webhooks, but missing deliveries for these scopes
+cannot be repaired by repository REST backfill.
 
 GitHub remains the source for enrichment and backfill. History already deleted
 by GitHub cannot be recovered. As of October 8, 2026, configured GitHub Actions

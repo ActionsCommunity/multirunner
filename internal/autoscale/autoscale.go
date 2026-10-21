@@ -6,7 +6,9 @@ package autoscale
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +22,7 @@ import (
 const (
 	defaultMetadataWorkers = 4
 	metadataQueuePerWorker = 32
+	maxPendingJobs         = 4096
 )
 
 // Scaler launches runners on demand across a set of pool launchers.
@@ -36,6 +39,15 @@ type Scaler struct {
 	metadataOnce    sync.Once
 	metadataWG      sync.WaitGroup
 	resolveMetadata func(context.Context, *github.Client, github.QueuedJob) (github.QueuedJob, error)
+	demandMu        sync.Mutex
+	pending         map[string]github.QueuedJob
+	retryAfter      map[string]time.Time
+	inflight        map[string]struct{}
+	recent          map[string]struct{}
+	recentOrder     []string
+	wake            chan struct{}
+	demandWG        sync.WaitGroup
+	runnerWG        sync.WaitGroup
 }
 
 type state struct {
@@ -67,6 +79,11 @@ func New(launchers []*pool.Launcher, gh github.ClientProvider, scope config.Scop
 		logger: logger.With("component", "autoscale"), baseCtx: context.Background(),
 		metadataWorkers: workers,
 		metadataQueue:   make(chan metadataRequest, workers*metadataQueuePerWorker),
+		pending:         make(map[string]github.QueuedJob),
+		retryAfter:      make(map[string]time.Time),
+		inflight:        make(map[string]struct{}),
+		recent:          make(map[string]struct{}),
+		wake:            make(chan struct{}, 1),
 	}
 	scaler.resolveMetadata = func(
 		ctx context.Context, client *github.Client, job github.QueuedJob,
@@ -80,23 +97,40 @@ func New(launchers []*pool.Launcher, gh github.ClientProvider, scope config.Scop
 // until ctx is cancelled.
 func (s *Scaler) Run(ctx context.Context) error {
 	s.setContext(ctx)
+	defer func() {
+		s.demandMu.Lock()
+		clear(s.pending)
+		clear(s.retryAfter)
+		s.demandMu.Unlock()
+	}()
 	for _, st := range s.states {
 		if err := st.l.EnsureImage(ctx); err != nil {
 			return err
 		}
 	}
 	s.startMetadataWorkers(ctx)
+	s.demandWG.Add(1)
+	go func() {
+		defer s.demandWG.Done()
+		s.demandLoop(ctx)
+	}()
 	s.logger.Info("autoscaler running", "pools", len(s.states), "poll", s.pollEvery.String())
 	if s.pollEvery > 0 {
 		s.reconcile() // initial top-up
-		go s.pollLoop(ctx)
+		s.demandWG.Add(1)
+		go func() {
+			defer s.demandWG.Done()
+			s.pollLoop(ctx)
+		}()
 	}
 	<-ctx.Done()
 	s.metadataWG.Wait()
+	s.demandWG.Wait()
+	s.runnerWG.Wait()
 	return nil
 }
 
-// OnQueued launches one runner for the first matching pool with spare capacity,
+// OnQueued retains demand for the first matching pool with spare capacity,
 // registered to repo ("owner/repo") so the runner can actually serve the job
 // that triggered it. Empty or unmanaged repositories are ignored.
 // Launches use the scaler's long-lived context (NOT the caller's), so a webhook
@@ -140,9 +174,10 @@ func (s *Scaler) OnQueued(event webhook.WorkflowJobEvent) {
 		return
 	case s.metadataQueue <- request:
 	default:
-		s.logger.Warn("ignoring queued job because workflow metadata queue is full",
+		s.logger.Warn("deferring queued job because workflow metadata queue is full",
 			"repo", job.Repository, "run_id", job.RunID,
 			"queue_capacity", cap(s.metadataQueue))
+		s.launchFor(job)
 	}
 }
 
@@ -167,8 +202,11 @@ func (s *Scaler) metadataWorker(ctx context.Context) {
 			resolved, err := s.resolveMetadata(ctx, request.client, request.job)
 			if err != nil {
 				if ctx.Err() == nil {
-					s.logger.Warn("ignoring queued job whose workflow metadata could not be resolved",
+					s.logger.Warn("deferring queued job whose workflow metadata could not be resolved",
 						"repo", request.job.Repository, "run_id", request.job.RunID, "err", err)
+					if !errors.Is(err, github.ErrJobInactive) {
+						s.launchFor(request.job)
+					}
 				}
 				continue
 			}
@@ -193,30 +231,86 @@ func (s *Scaler) context() context.Context {
 	return ctx
 }
 
-// launchFor launches one runner for the first authorized matching pool with
-// spare capacity.
+// launchFor retains authorized demand until a matching pool has spare capacity.
 func (s *Scaler) launchFor(job github.QueuedJob) {
+	eligible := false
 	for _, st := range s.states {
-		if st.l.Allows(job) && labelsMatch(st.l.Labels(), job.Labels) {
-			if s.tryLaunch(st, job) {
-				return
-			}
+		if (st.l.Allows(job) || st.l.RequiresWorkflowMetadata()) && labelsMatch(st.l.Labels(), job.Labels) {
+			eligible = true
+			break
 		}
 	}
-	s.logger.Debug("queued job: no authorized matching pool with spare capacity",
-		"repo", job.Repository, "workflow", job.WorkflowPath,
-		"event", job.Event, "actor", job.Actor, "labels", job.Labels)
+	if !eligible || s.context().Err() != nil {
+		return
+	}
+	key := demandKey(job)
+	s.demandMu.Lock()
+	defer s.demandMu.Unlock()
+	if _, ok := s.pending[key]; ok {
+		return
+	}
+	if _, ok := s.inflight[key]; ok {
+		return
+	}
+	if _, ok := s.recent[key]; ok {
+		return
+	}
+	if len(s.pending) >= maxPendingJobs {
+		s.logger.Warn("queued job demand queue is full", "repo", job.Repository,
+			"job_id", job.JobID, "queue_capacity", maxPendingJobs)
+		return
+	}
+	s.pending[key] = job
+	s.signalDemand()
 }
 
 func (s *Scaler) tryLaunch(st *state, job github.QueuedJob) bool {
+	if s.context().Err() != nil || st.l.Paused() {
+		return false
+	}
 	select {
 	case st.sem <- struct{}{}:
 		target := job.Client.Target()
 		s.logger.Info("scaling up", "pool", st.l.Name(), "target", target)
 		ctx := s.context()
+		key := demandKey(job)
+		s.demandMu.Lock()
+		if _, ok := s.pending[key]; !ok {
+			s.demandMu.Unlock()
+			<-st.sem
+			return false
+		}
+		delete(s.pending, key)
+		delete(s.retryAfter, key)
+		s.inflight[key] = struct{}{}
+		s.demandMu.Unlock()
+		s.runnerWG.Add(1)
 		go func() {
-			defer func() { <-st.sem }()
-			if _, err := st.l.RunJob(ctx, job); err != nil && ctx.Err() == nil {
+			defer s.runnerWG.Done()
+			code, err := st.l.RunJobIfUnpaused(ctx, job)
+			s.demandMu.Lock()
+			delete(s.inflight, key)
+			if ctx.Err() == nil && (err != nil || code != 0) {
+				// Retain failed/paused demand without occupying a runner slot;
+				// failures are paced and revalidated before another attempt.
+				if _, finished := s.recent[key]; !finished {
+					if len(s.pending) < maxPendingJobs {
+						s.pending[key] = job
+						if !errors.Is(err, pool.ErrProvisioningPaused) {
+							s.retryAfter[key] = time.Now().Add(5 * time.Second)
+						}
+					} else {
+						s.logger.Warn("queued job demand queue is full during retry",
+							"repo", job.Repository, "job_id", job.JobID, "queue_capacity", maxPendingJobs)
+					}
+				}
+			} else {
+				s.rememberDemandLocked(key)
+			}
+			s.demandMu.Unlock()
+			<-st.sem
+			s.signalDemand()
+			if err != nil && !errors.Is(err, pool.ErrProvisioningPaused) && ctx.Err() == nil {
 				s.logger.Error("runner failed", "pool", st.l.Name(), "err", err)
 			}
 		}()
@@ -224,6 +318,158 @@ func (s *Scaler) tryLaunch(st *state, job github.QueuedJob) bool {
 	default:
 		return false
 	}
+}
+
+func demandKey(job github.QueuedJob) string {
+	if job.JobID > 0 {
+		return fmt.Sprintf("%s/job/%d", strings.ToLower(job.Repository), job.JobID)
+	}
+	return fmt.Sprintf("%s/%d/%d/%d", strings.ToLower(job.Repository), job.RunID, job.RunAttempt, job.JobID)
+}
+
+func (s *Scaler) signalDemand() {
+	select {
+	case s.wake <- struct{}{}:
+	default:
+	}
+}
+
+func (s *Scaler) rememberDemandLocked(key string) {
+	if _, exists := s.recent[key]; exists {
+		return
+	}
+	s.recent[key] = struct{}{}
+	s.recentOrder = append(s.recentOrder, key)
+	if len(s.recentOrder) > maxPendingJobs {
+		delete(s.recent, s.recentOrder[0])
+		s.recentOrder = s.recentOrder[1:]
+	}
+}
+
+// OnWorkflowJob can be registered as a webhook observer to invalidate delayed
+// demand as soon as GitHub reports that another runner took or finished it.
+func (s *Scaler) OnWorkflowJob(_ context.Context, event webhook.WorkflowJobEvent) {
+	if event.Action != "completed" && event.Action != "in_progress" {
+		return
+	}
+	key := demandKey(github.QueuedJob{Repository: event.Repository,
+		RunID: event.WorkflowJob.RunID, RunAttempt: event.WorkflowJob.RunAttempt, JobID: event.WorkflowJob.ID})
+	s.demandMu.Lock()
+	delete(s.pending, key)
+	delete(s.retryAfter, key)
+	s.rememberDemandLocked(key)
+	s.demandMu.Unlock()
+	s.signalDemand()
+}
+
+func (s *Scaler) demandLoop(ctx context.Context) {
+	// Resume is a launcher-local control; the bounded dispatcher checks it even
+	// in webhook-only mode where no subsequent GitHub delivery is guaranteed.
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-s.wake:
+		case <-ticker.C:
+		}
+		s.dispatchDemand(ctx)
+	}
+}
+
+func (s *Scaler) dispatchDemand(ctx context.Context) {
+	s.demandMu.Lock()
+	keys := make([]string, 0, len(s.pending))
+	for key := range s.pending {
+		keys = append(keys, key)
+	}
+	s.demandMu.Unlock()
+	sort.Strings(keys)
+	for _, key := range keys {
+		if ctx.Err() != nil {
+			return
+		}
+		s.demandMu.Lock()
+		job, exists := s.pending[key]
+		retryAfter := s.retryAfter[key]
+		s.demandMu.Unlock()
+		if !exists || time.Now().Before(retryAfter) {
+			continue
+		}
+		available := false
+		for _, st := range s.states {
+			if !st.l.Paused() && len(st.sem) < cap(st.sem) &&
+				(st.l.Allows(job) || st.l.RequiresWorkflowMetadata()) && labelsMatch(st.l.Labels(), job.Labels) {
+				available = true
+				break
+			}
+		}
+		if available {
+			resolveCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			resolved, err := s.revalidateDemand(resolveCtx, job)
+			cancel()
+			if err != nil {
+				if ctx.Err() == nil {
+					s.logger.Warn("queued demand revalidation failed",
+						"repo", job.Repository, "job_id", job.JobID, "err", err)
+				}
+				s.demandMu.Lock()
+				if errors.Is(err, errDemandInactive) || errors.Is(err, github.ErrJobInactive) {
+					delete(s.pending, key)
+					delete(s.retryAfter, key)
+					s.rememberDemandLocked(key)
+				} else if _, pending := s.pending[key]; pending {
+					s.retryAfter[key] = time.Now().Add(5 * time.Second)
+				}
+				s.demandMu.Unlock()
+				continue
+			}
+			authorized := false
+			for _, st := range s.states {
+				if st.l.Allows(resolved) && labelsMatch(st.l.Labels(), resolved.Labels) {
+					authorized = true
+					if s.tryLaunch(st, resolved) {
+						break
+					}
+				}
+			}
+			if !authorized {
+				s.demandMu.Lock()
+				delete(s.pending, key)
+				delete(s.retryAfter, key)
+				s.rememberDemandLocked(key)
+				s.demandMu.Unlock()
+			}
+		}
+	}
+}
+
+var errDemandInactive = errors.New("job is no longer queued")
+
+func (s *Scaler) revalidateDemand(ctx context.Context, job github.QueuedJob) (github.QueuedJob, error) {
+	resolved, err := s.resolveMetadata(ctx, job.Client, job)
+	if err != nil {
+		return github.QueuedJob{}, err
+	}
+	if resolved.JobStatus != "" && resolved.JobStatus != "queued" {
+		return github.QueuedJob{}, fmt.Errorf("%w: %d (%s)", errDemandInactive, job.JobID, resolved.JobStatus)
+	}
+	if resolved.Status != "" && resolved.Status != "queued" && resolved.Status != "in_progress" {
+		return github.QueuedJob{}, fmt.Errorf("%w: run %d (%s)", errDemandInactive, job.RunID, resolved.Status)
+	}
+	if job.JobID > 0 {
+		current, err := job.Client.QueuedJobState(ctx, job)
+		if err != nil {
+			return github.QueuedJob{}, err
+		}
+		if current.Status != "queued" {
+			return github.QueuedJob{}, fmt.Errorf("%w: %d (%s)", errDemandInactive, job.JobID, current.Status)
+		}
+		resolved.Labels = append([]string(nil), current.Labels...)
+		resolved.JobStatus = current.Status
+	}
+	return resolved, nil
 }
 
 func (s *Scaler) pollLoop(ctx context.Context) {

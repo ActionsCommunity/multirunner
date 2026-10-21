@@ -148,6 +148,16 @@
       },
       "additionalProperties": true
     },
+    "commandReconciliationRequest": {
+      "type": "object",
+      "required": ["reason", "confirmation", "fencing_token"],
+      "properties": {
+        "reason": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "confirmation": { "type": "string", "minLength": 1 },
+        "fencing_token": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
     "diagnosticReport": {
       "type": "object",
       "additionalProperties": true
@@ -381,6 +391,7 @@
     { "method": "POST", "path": "/api/v1/commands/preview", "request": "#/$defs/commandRequest", "response": "#/$defs/commandPlan" },
     { "method": "POST", "path": "/api/v1/commands", "request": "#/$defs/commandRequest", "response": "#/$defs/command" },
     { "method": "GET", "path": "/api/v1/commands/{id}", "response": "#/$defs/command" },
+    { "method": "POST", "path": "/api/v1/commands/{id}/reconcile", "request": "#/$defs/commandReconciliationRequest", "response": "#/$defs/command" },
     { "method": "GET", "path": "/api/v1/diagnostics", "response": "#/$defs/diagnosticReport" },
     { "method": "GET", "path": "/api/v1/configuration", "response": "#/$defs/configurationSnapshot" },
     { "method": "GET", "path": "/api/v1/support-bundles/{id}", "response_media_type": "application/zip" },

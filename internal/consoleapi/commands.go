@@ -153,6 +153,66 @@ func commandReadHandler(options Options) http.HandlerFunc {
 	}
 }
 
+func commandReconcileHandler(options Options) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !validMutationRequest(r, options) {
+			writeError(w, http.StatusForbidden, "csrf_failed", "mutation request origin or CSRF state is invalid")
+			return
+		}
+		if !options.Auth.ValidateRecentPairing(r) {
+			writeStepUpRequired(w)
+			return
+		}
+		var input struct {
+			Reason       string `json:"reason"`
+			Confirmation string `json:"confirmation"`
+			FencingToken int64  `json:"fencing_token"`
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, maxCommandBody)
+		decoder := json.NewDecoder(r.Body)
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&input); err != nil {
+			writeError(w, http.StatusBadRequest, "validation_failed", "reconciliation request is invalid")
+			return
+		}
+		if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+			writeError(w, http.StatusBadRequest, "validation_failed", "request must contain exactly one JSON value")
+			return
+		}
+		id := r.PathValue("id")
+		input.Reason = strings.TrimSpace(input.Reason)
+		if input.Reason == "" || len(input.Reason) > 500 || input.FencingToken < 1 ||
+			input.Confirmation != "reconcile "+id {
+			writeError(w, http.StatusBadRequest, "validation_failed", "reason, current fencing token, and typed reconciliation confirmation are required")
+			return
+		}
+		session, ok := consoleauth.SessionFromContext(r.Context())
+		if !ok {
+			writeError(w, http.StatusUnauthorized, "authentication_required", "authentication is required")
+			return
+		}
+		detail, _ := json.Marshal(map[string]string{
+			"reason": input.Reason, "action": "operator_reconciliation",
+		})
+		command, err := options.Commands.TransitionCommand(r.Context(), id, control.Transition{
+			ExpectedState: control.StateUnknownOutcome, To: control.StateReconciling,
+			ActorKind: operations.ActorOperator, ActorID: session.ActorID,
+			FencingToken: input.FencingToken, Detail: detail,
+			LeaseOwner: "operator-reconciliation", LeaseDuration: time.Millisecond,
+		})
+		switch {
+		case errors.Is(err, control.ErrNotFound):
+			writeError(w, http.StatusNotFound, "not_found", "command was not found")
+		case errors.Is(err, control.ErrStateConflict), errors.Is(err, control.ErrStaleFence):
+			writeError(w, http.StatusConflict, "state_conflict", "command state changed; reload before reconciling")
+		case err != nil:
+			writeError(w, http.StatusServiceUnavailable, "audit_unavailable", "reconciliation intent could not be persisted")
+		default:
+			writeJSON(w, http.StatusAccepted, command)
+		}
+	}
+}
+
 func buildControlRequest(
 	r *http.Request, options Options, input commandRequest, idempotencyKey string,
 ) (control.Request, error) {
@@ -220,7 +280,7 @@ func planCommand(input commandRequest) (commandPlan, error) {
 		if input.TargetType != "pool" || input.TargetID == "" {
 			return commandPlan{}, errors.New("pool drain requires a pool target")
 		}
-		plan.ConflictDomain = "pool:" + input.TargetID
+		plan.ConflictDomain = "pool-drain:" + input.TargetID
 		plan.ConfirmationPhrase = "drain " + input.TargetID
 		plan.ReasonRequired = true
 		plan.Impact = "Pause provisioning and wait for every active runner in this pool to finish."

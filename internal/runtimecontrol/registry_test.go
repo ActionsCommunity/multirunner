@@ -49,6 +49,12 @@ func (p *fakePool) Paused() bool {
 	return p.paused
 }
 
+func (p *fakePool) Drained() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.paused && len(p.sessions) == 0
+}
+
 func (p *fakePool) ActiveSessions() []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()

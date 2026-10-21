@@ -57,11 +57,13 @@ type Launcher struct {
 }
 
 type activeRunner struct {
-	cancel context.CancelFunc
+	cancel context.CancelCauseFunc
 	done   chan struct{}
+	err    error
 }
 
 var ErrRunnerSessionNotFound = errors.New("runner session is not active")
+var ErrProvisioningPaused = errors.New("runner provisioning is paused")
 
 // NewLauncher builds a Launcher.
 func NewLauncher(cfg config.Pool, image string, be backend.Backend, gh github.ClientProvider, env map[string]string, mounts []backend.Mount, logger *slog.Logger, hooks Hooks) *Launcher {
@@ -142,6 +144,15 @@ func (l *Launcher) RunJob(ctx context.Context, job github.QueuedJob) (int, error
 // RunJobWithQueue provisions a fresh JIT runner and attaches any known queued
 // run/job IDs to its lifecycle events.
 func (l *Launcher) RunJobWithQueue(ctx context.Context, job github.QueuedJob, queue QueueIDs) (int, error) {
+	return l.runJob(ctx, job, queue, true)
+}
+
+// RunJobIfUnpaused never waits for resume while holding an autoscale slot.
+func (l *Launcher) RunJobIfUnpaused(ctx context.Context, job github.QueuedJob) (int, error) {
+	return l.runJob(ctx, job, QueueIDs{RunID: job.RunID, JobID: job.JobID}, false)
+}
+
+func (l *Launcher) runJob(ctx context.Context, job github.QueuedJob, queue QueueIDs, wait bool) (int, error) {
 	client := job.Client
 	// Resolve before the OnStart hook so an unusable pool cannot leak an
 	// unmatched start into the metrics.
@@ -158,7 +169,7 @@ func (l *Launcher) RunJobWithQueue(ctx context.Context, job github.QueuedJob, qu
 			l.cfg.Name, target, job.WorkflowPath, job.Event, job.Actor,
 		)
 	}
-	if err := l.reserveProvisioning(ctx); err != nil {
+	if err := l.reserveProvisioningMode(ctx, wait); err != nil {
 		return 0, err
 	}
 	reserved := true
@@ -175,7 +186,15 @@ func (l *Launcher) RunJobWithQueue(ctx context.Context, job github.QueuedJob, qu
 		l.hooks.OnStart(l.cfg.Name)
 	}
 	sessionID := runner.NewLocalSessionID()
-	runContext, cancel := context.WithCancel(ctx)
+	runContext, cancel := context.WithCancelCause(context.WithoutCancel(ctx))
+	stopParent := context.AfterFunc(ctx, func() {
+		cause := context.Cause(ctx)
+		if cause == context.Canceled {
+			cause = runner.ErrShutdown
+		}
+		cancel(cause)
+	})
+	defer stopParent()
 	active := &activeRunner{cancel: cancel, done: make(chan struct{})}
 	l.controlMu.Lock()
 	l.active[sessionID] = active
@@ -184,7 +203,7 @@ func (l *Launcher) RunJobWithQueue(ctx context.Context, job github.QueuedJob, qu
 	l.notifyControlChangeLocked()
 	l.controlMu.Unlock()
 	defer func() {
-		cancel()
+		cancel(nil)
 		l.controlMu.Lock()
 		delete(l.active, sessionID)
 		close(active.done)
@@ -210,7 +229,11 @@ func (l *Launcher) RunJobWithQueue(ctx context.Context, job github.QueuedJob, qu
 		Mounts:           l.mounts,
 		Container:        l.container,
 	}
+	if spec.Repository == "" && client.Scope() == config.ScopeRepo {
+		spec.Repository = client.Target()
+	}
 	code, err := runner.RunOnce(runContext, client, l.be, spec, l.logger.With("target", client.Target()))
+	active.err = err
 	if l.hooks.Observer == nil && l.hooks.OnStop != nil {
 		l.hooks.OnStop(l.cfg.Name, code, err)
 	}
@@ -257,6 +280,13 @@ func (l *Launcher) ActiveSessions() []string {
 	return sessions
 }
 
+// Drained includes runners that reserved provisioning but are not yet registered.
+func (l *Launcher) Drained() bool {
+	l.controlMu.Lock()
+	defer l.controlMu.Unlock()
+	return l.paused && l.provisioning == 0 && len(l.active) == 0
+}
+
 // Drain pauses provisioning and waits for active runner sessions to finish.
 func (l *Launcher) Drain(ctx context.Context) error {
 	l.controlMu.Lock()
@@ -287,7 +317,7 @@ func (l *Launcher) Terminate(ctx context.Context, sessionID string) error {
 	l.controlMu.Lock()
 	active, ok := l.active[sessionID]
 	if ok {
-		active.cancel()
+		active.cancel(runner.ErrTerminated)
 	}
 	l.controlMu.Unlock()
 	if !ok {
@@ -297,13 +327,21 @@ func (l *Launcher) Terminate(ctx context.Context, sessionID string) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-active.done:
-		return nil
+		return active.err
 	}
 }
 
 func (l *Launcher) reserveProvisioning(ctx context.Context) error {
+	return l.reserveProvisioningMode(ctx, true)
+}
+
+func (l *Launcher) reserveProvisioningMode(ctx context.Context, wait bool) error {
 	for {
 		l.controlMu.Lock()
+		if err := ctx.Err(); err != nil {
+			l.controlMu.Unlock()
+			return err
+		}
 		if !l.paused {
 			l.provisioning++
 			l.notifyControlChangeLocked()
@@ -312,6 +350,9 @@ func (l *Launcher) reserveProvisioning(ctx context.Context) error {
 		}
 		changed := l.changed
 		l.controlMu.Unlock()
+		if !wait {
+			return ErrProvisioningPaused
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()

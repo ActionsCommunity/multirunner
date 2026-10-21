@@ -93,14 +93,15 @@ func TestSearchIndexesCanonicalHistoryAndAppliesFilters(t *testing.T) {
 	results, err = store.Search(t.Context(), SearchOptions{
 		Query: "linux", EntityType: "job", Repository: run.Repository,
 	})
-	if err != nil || len(results) != 1 || results[0].Title != "Release verification integration linux" {
+	if err != nil || len(results) != 1 || results[0].Title != "Release verification integration linux" ||
+		results[0].Route != "/runs?repository=actionscommunity%2Fmultirunner&run_id=42" {
 		t.Fatalf("job search = %+v, %v", results, err)
 	}
 	results, err = store.Search(t.Context(), SearchOptions{
 		Query: "searchable", EntityType: "step",
 	})
 	if err != nil || len(results) != 1 ||
-		results[0].Route != "/runs?repository=actionscommunity%2Fmultirunner&job_id=84&step=1" {
+		results[0].Route != "/runs?repository=actionscommunity%2Fmultirunner&run_id=42" {
 		t.Fatalf("step search = %+v, %v", results, err)
 	}
 

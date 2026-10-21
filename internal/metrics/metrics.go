@@ -144,6 +144,9 @@ func (m *Metrics) ObserveRunnerLifecycle(
 			delete(m.launched, event.LocalSessionID)
 			m.active.WithLabelValues(event.Pool).Dec()
 		}
+		if event.Type == runner.LifecycleStopped && event.Conclusion != "" {
+			return
+		}
 		result := "success"
 		if event.Type == runner.LifecycleFailed {
 			result = "error"

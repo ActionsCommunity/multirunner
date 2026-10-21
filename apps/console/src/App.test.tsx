@@ -895,6 +895,105 @@ test('loads a stable correlated run inspection route', async () => {
   ).toBeInTheDocument()
 })
 
+test.each(['job', 'step'])('opens the parent run for a %s search result', async (entityType) => {
+  const baseFetch = globalThis.fetch
+  vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    if (String(input).includes('/api/v1/search?')) {
+      return Promise.resolve(new Response(JSON.stringify({
+        items: [{
+          entity_type: entityType,
+          entity_key: `actionscommunity/multirunner:84${entityType === 'step' ? ':1' : ''}`,
+          title: `${entityType} search target`,
+          context: 'CI',
+          repository: 'actionscommunity/multirunner',
+          timestamp: new Date().toISOString(),
+          state: 'completed',
+          route: '/runs?repository=actionscommunity%2Fmultirunner&run_id=42',
+        }],
+        count: 1,
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    }
+    return baseFetch(input, init)
+  }))
+  const app = render(<App />)
+  fireEvent.click(screen.getByRole('link', { name: 'Runs' }))
+  fireEvent.change(screen.getByLabelText('Search history'), { target: { value: 'target' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Search' }))
+  const link = await screen.findByRole('link', { name: `${entityType} search target` })
+  expect(link).toHaveAttribute('href', '/runs?repository=actionscommunity%2Fmultirunner&run_id=42')
+  const route = link.getAttribute('href')!
+  app.unmount()
+  window.history.replaceState(null, '', route)
+  render(<App />)
+  expect(await screen.findByText('Verify console foundation')).toBeInTheDocument()
+  expect(screen.getByText('Run tests')).toBeInTheDocument()
+})
+
+test('inspects an archived runner session beyond the first page without replacing live actions', async () => {
+  const baseFetch = globalThis.fetch
+  vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input)
+    if (url.includes('/api/v1/sessions?')) {
+      const secondPage = url.includes('cursor=next-page')
+      return Promise.resolve(new Response(JSON.stringify({
+        items: secondPage ? [{
+          id: 'archived-session', runner_name: 'archived-runner', pool_name: 'old-pool',
+          target: 'owner/repo', status: 'completed', conclusion: 'failure',
+          error: 'Archived lifecycle error',
+        }] : [{ id: 'different-session', runner_name: 'other-runner' }],
+        next_cursor: secondPage ? '' : 'next-page',
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    }
+    return baseFetch(input, init)
+  }))
+  window.history.replaceState(null, '', '/runners?session_id=archived-session')
+  render(<App />)
+  const detail = await screen.findByRole('region', { name: 'Selected runner session' })
+  expect(await within(detail).findByText('archived-runner')).toBeInTheDocument()
+  expect(within(detail).getByText('archived-session')).toBeInTheDocument()
+  expect(within(detail).getByText('Archived lifecycle error')).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Terminate' })).toBeInTheDocument()
+  expect(globalThis.fetch).toHaveBeenCalledWith(
+    '/api/v1/sessions?limit=200&cursor=next-page', expect.anything(),
+  )
+})
+
+test('reports a missing runner deep link instead of displaying a different session', async () => {
+  const baseFetch = globalThis.fetch
+  vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    if (String(input).includes('/api/v1/sessions?')) {
+      return Promise.resolve(new Response(JSON.stringify({ items: [], next_cursor: '' }), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      }))
+    }
+    return baseFetch(input, init)
+  }))
+  window.history.replaceState(null, '', '/runners?session_id=expired-session')
+  render(<App />)
+  expect(await screen.findByText(/selected runner session is no longer available/)).toBeInTheDocument()
+})
+
+test('loads the selected command from its deep link even when absent from the audit page', async () => {
+  const baseFetch = globalThis.fetch
+  vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    if (String(input).endsWith('/api/v1/commands/archived-command')) {
+      return Promise.resolve(new Response(JSON.stringify({
+        id: 'archived-command', type: 'pool.pause', state: 'succeeded',
+        target_type: 'pool', target_id: 'old-pool', reason: 'Archived maintenance',
+        created_at: new Date().toISOString(),
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    }
+    return baseFetch(input, init)
+  }))
+  render(<App />)
+  window.history.pushState(null, '', '/audit?command_id=archived-command')
+  window.dispatchEvent(new PopStateEvent('popstate'))
+  const detail = await screen.findByRole('region', { name: 'Selected command' })
+  expect(within(detail).getByText('archived-command')).toBeInTheDocument()
+  expect(within(detail).getByText('Archived maintenance')).toBeInTheDocument()
+  expect(screen.getByRole('table', { name: 'Operations audit history' })).toBeInTheDocument()
+})
+
 test('fetches searches and discards a transient masked job log', async () => {
   window.history.replaceState(
     null,
@@ -917,6 +1016,49 @@ test('fetches searches and discards a transient masked job log', async () => {
     screen.getByRole('button', { name: 'Close and discard' }),
   )
   expect(screen.queryByText(/masked \*\*\*/)).not.toBeInTheDocument()
+})
+
+test('reconciles an unknown outcome with typed confirmation and a fresh fence', async () => {
+  const baseFetch = globalThis.fetch
+  const command = {
+    id: 'uncertain-command', type: 'pool.pause', state: 'unknown_outcome',
+    target_type: 'pool', target_id: 'linux', reason: 'Maintenance',
+    fencing_token: 7, created_at: new Date().toISOString(),
+  }
+  const reconcile = vi.fn()
+  vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input)
+    if (url.endsWith('/api/v1/commands/uncertain-command/reconcile')) {
+      reconcile(init)
+      return Promise.resolve(new Response(JSON.stringify({ ...command, state: 'reconciling', fencing_token: 8 }), {
+        status: 202, headers: { 'Content-Type': 'application/json' },
+      }))
+    }
+    if (url.endsWith('/api/v1/commands/uncertain-command')) {
+      return Promise.resolve(new Response(JSON.stringify(command), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      }))
+    }
+    return baseFetch(input, init)
+  }))
+  window.history.replaceState(null, '', '/audit?command_id=uncertain-command')
+  render(<App />)
+  const detail = await screen.findByRole('region', { name: 'Selected command' })
+  const button = within(detail).getByRole('button', { name: 'Reconcile outcome' })
+  expect(button).toBeDisabled()
+  fireEvent.change(within(detail).getByLabelText('Reconciliation reason'), { target: { value: 'Verify runtime state' } })
+  fireEvent.change(within(detail).getByLabelText('Type reconcile uncertain-command'), { target: { value: 'reconcile uncertain-command' } })
+  expect(button).toBeEnabled()
+  fireEvent.click(button)
+  const link = await within(detail).findByRole('link', { name: 'Open current command state' })
+  expect(link).toHaveAttribute('href', '/audit?command_id=uncertain-command')
+  expect(reconcile).toHaveBeenCalledOnce()
+  const request = reconcile.mock.calls[0][0] as RequestInit
+  expect(request.method).toBe('POST')
+  expect(JSON.parse(String(request.body))).toEqual({
+    reason: 'Verify runtime state', confirmation: 'reconcile uncertain-command', fencing_token: 7,
+  })
+  expect(new Headers(request.headers).get('X-CSRF-Token')).toBe('csrf-test')
 })
 
 test('previews and queues a guarded runner command', async () => {

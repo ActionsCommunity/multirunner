@@ -263,11 +263,41 @@ func (s *Store) TransitionCommand(ctx context.Context, id string, transition con
 	if err != nil {
 		return control.Command{}, err
 	}
+	events := []operations.Event{event}
+	if command.State == control.StateSucceeded &&
+		(command.Type == "pool.cancel_drain" || command.Type == "pool.resume") {
+		var drainID string
+		var state control.State
+		var token int64
+		err := tx.QueryRowContext(ctx, `SELECT id, state, fencing_token FROM commands
+			WHERE command_type='pool.drain' AND target_id=? AND host_id=?
+			  AND state IN ('queued', 'reconciling') AND created_at<=?
+			ORDER BY created_at LIMIT 1`,
+			command.TargetID, command.HostID, timeMillis(command.CreatedAt)).Scan(&drainID, &state, &token)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return control.Command{}, fmt.Errorf("find cancelled pool drain: %w", err)
+		}
+		if err == nil {
+			detail, _ := json.Marshal(map[string]string{"cancelled_by_command": command.ID})
+			_, drainEvent, err := transitionCommand(ctx, tx, s.commandEpochID(), drainID, control.Transition{
+				ExpectedState: state, To: control.StateInterrupted,
+				ActorKind: command.ActorKind, ActorID: command.ActorID,
+				FencingToken: token, Detail: detail,
+				Error: "drain cancelled by an operator resume command",
+			}, nowUTC())
+			if err != nil {
+				return control.Command{}, err
+			}
+			events = append(events, drainEvent)
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return control.Command{}, fmt.Errorf("commit command transition: %w", err)
 	}
-	if event.ID != "" {
-		s.notifyOperationalEvent(event)
+	for _, event := range events {
+		if event.ID != "" {
+			s.notifyOperationalEvent(event)
+		}
 	}
 	return command, nil
 }
@@ -619,8 +649,18 @@ func transitionCommand(
 	if !transition.ActorKind.Valid() || strings.TrimSpace(transition.ActorID) == "" {
 		return control.Command{}, operations.Event{}, errors.New("transition actor kind and ID are required")
 	}
+	if command.State == control.StateUnknownOutcome {
+		var detail struct {
+			Reason string `json:"reason"`
+		}
+		if transition.ActorKind != operations.ActorOperator ||
+			json.Unmarshal(transition.Detail, &detail) != nil ||
+			strings.TrimSpace(detail.Reason) == "" || len(detail.Reason) > 500 {
+			return control.Command{}, operations.Event{}, errors.New("unknown outcome reconciliation requires an operator and a reason")
+		}
+	}
 	if command.State == control.StateClaimed || command.State == control.StateRunning ||
-		command.State == control.StateReconciling {
+		command.State == control.StateReconciling || command.State == control.StateUnknownOutcome {
 		if transition.FencingToken != command.FencingToken {
 			return control.Command{}, operations.Event{}, control.ErrStaleFence
 		}
@@ -642,6 +682,7 @@ func transitionCommand(
 		}
 	}
 	from := command.State
+	previousFence := command.FencingToken
 	command.State = transition.To
 	command.Error = transition.Error
 	switch transition.To {
@@ -657,7 +698,10 @@ func transitionCommand(
 		command.LeaseExpiresAt = timePointerUTC(now.Add(transition.LeaseDuration))
 		command.HeartbeatAt = timePointerUTC(now)
 		command.Attempt++
-		command.FencingToken++
+		command.FencingToken, err = allocateCommandFence(ctx, tx, command.ConflictDomain)
+		if err != nil {
+			return control.Command{}, operations.Event{}, fmt.Errorf("allocate conflict domain fence: %w", err)
+		}
 	case control.StateRunning:
 		if command.StartedAt == nil {
 			command.StartedAt = timePointerUTC(now)
@@ -671,7 +715,11 @@ func transitionCommand(
 		command.LeaseExpiresAt = timePointerUTC(now.Add(transition.LeaseDuration))
 		command.HeartbeatAt = timePointerUTC(now)
 		command.Attempt++
-		command.FencingToken++
+		command.FencingToken, err = allocateCommandFence(ctx, tx, command.ConflictDomain)
+		if err != nil {
+			return control.Command{}, operations.Event{}, fmt.Errorf("allocate reconciliation fence: %w", err)
+		}
+		command.CompletedAt = nil
 	}
 	if transition.To.Terminal() {
 		command.CompletedAt = timePointerUTC(now)
@@ -688,7 +736,7 @@ func transitionCommand(
 		nullableTime(command.CompletedAt), nullableJSON(command.BeforeState),
 		nullableJSON(command.Outcome), command.Error, command.LeaseOwner,
 		nullableTime(command.LeaseExpiresAt), command.Attempt, command.FencingToken,
-		command.ID, from, command.FencingToken-fenceIncrement(transition.To))
+		command.ID, from, previousFence)
 	if err != nil {
 		return control.Command{}, operations.Event{}, fmt.Errorf("update command transition: %w", err)
 	}
@@ -705,6 +753,7 @@ func transitionCommand(
 	}
 	auditPayload, _ := json.Marshal(map[string]any{
 		"from": from, "to": transition.To, "fencing_token": command.FencingToken,
+		"detail": json.RawMessage(detail),
 	})
 	if err := recordCommandAudit(ctx, tx, command, transition.ActorKind, transition.ActorID,
 		"command.transitioned", auditPayload); err != nil {
@@ -851,9 +900,12 @@ func timePointerUTC(value time.Time) *time.Time {
 	return &result
 }
 
-func fenceIncrement(state control.State) int64 {
-	if state == control.StateClaimed || state == control.StateReconciling {
-		return 1
-	}
-	return 0
+func allocateCommandFence(ctx context.Context, tx *sql.Tx, domain string) (int64, error) {
+	var token int64
+	err := tx.QueryRowContext(ctx, `INSERT INTO command_domain_fences(conflict_domain, token)
+		VALUES (?, (SELECT COALESCE(MAX(fencing_token), 0) + 1 FROM commands WHERE conflict_domain=?))
+		ON CONFLICT(conflict_domain) DO UPDATE SET token=MAX(
+			command_domain_fences.token + 1, excluded.token
+		) RETURNING token`, domain, domain).Scan(&token)
+	return token, err
 }
