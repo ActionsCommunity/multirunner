@@ -38,6 +38,9 @@ func fakeRunner(t *testing.T, script string) *Backend {
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.MkdirAll(b.opt.StateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(root, "run.cmd"), []byte("@echo off\r\n"+script+"\r\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}

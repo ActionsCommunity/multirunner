@@ -10,6 +10,7 @@ Use this reference after the shared host assessment.
 | Windows containers | `docker` or omitted | Use an existing Windows Docker daemon. A local named pipe may use `isolation: auto`; remote daemons require `process` or `hyperv`. |
 | Linux containers | `docker` or omitted | Point `docker.host` at a reachable Docker-compatible Linux daemon, such as a WSL2 engine. Doctor must report daemon OS `linux`. |
 | Windows virtual machines | `qemu` | Use appropriately licensed Windows Server media, including supported evaluation media, and an x86-64 QEMU guest when containers don't meet workload requirements. |
+| Windows host process | `host` | Use only for trusted, narrowly allowlisted jobs that must access the current user's local drives, shells, credentials, or signed-in tools. There is no container or VM isolation. |
 
 Windows Server normally supports process isolation. Windows client editions need
 Hyper-V isolation. `auto` detects this only for a local Windows daemon.
@@ -20,6 +21,10 @@ Check the Windows edition, architecture, free disk and memory, virtualization
 support, service state, and the configured runtime endpoint. Locate `docker`,
 `nerdctl.exe`, or `qemu-system-x86_64` without installing anything. Run
 `multirunner doctor --config <path>` only after reviewing the redacted config.
+For a host pool, also inspect the service/current-user identity, workflow
+authorization tuple, resolved runner/state directories, free disk, and whether
+another pool uses either directory case-insensitively. `doctor` does not create
+the directories, download the runner, or recover an interrupted process.
 
 Run `multirunner install-containerd --dry-run` or
 `multirunner install-windows-daemon --dry-run --data-root <path>` first. Review
@@ -54,6 +59,16 @@ For `backend: containerd`, set `containerd.address`, `containerd.nerdctl`,
 validation also requires a nonempty `docker.host` even though the containerd
 backend ignores it; retain a clearly labelled placeholder until that constraint
 is removed.
+
+For `backend: host`, use `os: windows` and `size: 1`, remove image, Docker,
+container, and active tool-cache settings, and bind the pool to an exact
+repository/workflow/event/actor/branch tuple under `provisioning: autoscale`.
+The explicit `host.allow_unrestricted` escape hatch removes that routing gate
+without adding isolation. The default Windows service identity is LocalSystem;
+host startup refuses it unless `host.allow_local_system: true`, so configure
+the service to run as the intended user instead. A real start may download the
+verified runner and recover a recorded interrupted process; preview authority
+with `run --dry-run` first.
 
 For health and troubleshooting, compare the pool `os`, backend, endpoint,
 isolation, host edition, and image OS. Don't switch container modes or services

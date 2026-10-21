@@ -447,8 +447,8 @@ type QEMU struct {
 // so a host pool must be bound to an allowlisted workflow tuple unless
 // AllowUnrestricted says otherwise.
 type Host struct {
-	RunnerDir         string `yaml:"runner_dir"`         // extracted runner (default %LOCALAPPDATA%\multirunner\host-runner)
-	StateDir          string `yaml:"state_dir"`          // records + per-job logs (default %LOCALAPPDATA%\multirunner\host-state)
+	RunnerDir         string `yaml:"runner_dir"`         // extracted runner (default %LOCALAPPDATA%\multirunner\host\<pool>\runner)
+	StateDir          string `yaml:"state_dir"`          // records + per-job logs (default %LOCALAPPDATA%\multirunner\host\<pool>\state)
 	RunnerVersion     string `yaml:"runner_version"`     // "" = image manifest version
 	RunnerSHA256      string `yaml:"runner_sha256"`      // required with a non-default runner_version
 	KeepWorkspace     bool   `yaml:"keep_workspace"`     // keep the job work folder (debugging only)

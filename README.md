@@ -4,10 +4,11 @@
 
 A GitHub Actions self-hosted runner executes **one job at a time**. To run jobs in
 parallel you normally stand up several runners by hand and babysit them.
-multirunner does it for you: it keeps a pool of **fresh, throwaway runners**
-ready, hands each one a single job, then tears it down and replaces it with a
-clean one. It also bundles a **local Actions cache** and a **local git mirror**
-so your jobs stop re-downloading the same gigabytes from GitHub on every run.
+multirunner does it for you: it keeps a pool of **fresh, single-job runner
+registrations** ready, hands each one a job, then replaces the registration and
+resets the backend state. It also bundles a **local Actions cache** and a
+**local git mirror** so your jobs stop re-downloading the same gigabytes from
+GitHub on every run.
 
 One small binary. One config file. No Kubernetes, no control plane.
 
@@ -15,10 +16,12 @@ One small binary. One config file. No Kubernetes, no control plane.
 
 ## Why
 
-- **Real parallelism** — N isolated runners on one host, each on its own fresh
-  registration. Queue 10 jobs, run 10 at once.
-- **Clean every time** — each job gets a pristine, ephemeral environment (a
-  container or a VM). No state leaks between jobs.
+- **Real parallelism** — N runner slots on one host, each with a fresh
+  registration. Container and VM slots are isolated; direct-host pools are
+  explicitly not.
+- **Clean every time** — container and VM jobs get a pristine environment; a
+  direct-host pool resets runner credentials, workspace, and diagnostics
+  between trusted jobs.
 - **Fast** — a self-hosted Actions cache keeps `actions/cache` on your host, and
   a git mirror makes `actions/checkout` fetch only the new commits instead of
   full-cloning every time.
@@ -32,6 +35,7 @@ One small binary. One config file. No Kubernetes, no control plane.
 | **Linux runners** | Docker **or** Podman (docker-compatible API). |
 | **Windows runners (containers)** | Native Windows containers via **containerd + runhcs** — no Docker Desktop. |
 | **Windows runners in QEMU VMs** | Run Windows from a baked golden image on Linux, Windows, or macOS. |
+| **Windows runners on the host** | Run trusted, allowlisted jobs directly as the current Windows user when they need local drives, shells, or signed-in tools. |
 | **Mix Linux + Windows** | Multiple pools, different OSes, one orchestrator. |
 | **Self-hosted Actions cache** | Built-in v2 cache server — `actions/cache` stays on your host. |
 | **Git mirror cache** | Local bare mirror; `actions/checkout` fetches only the delta. |
@@ -45,6 +49,8 @@ including real toolchains (`actions/checkout`, `actions/setup-dotnet`,
 `dotnet build`) and `actions/cache` save/restore against the local server.
 Windows container images receive build and smoke checks in CI. Integration jobs
 for containerd and QEMU are included for suitable self-hosted infrastructure.
+The Windows host backend has regression coverage for process containment,
+crash recovery, workspace cleanup, and secret filtering.
 
 ---
 
@@ -54,8 +60,8 @@ In `pool` and `autoscale` modes, multirunner:
 
 1. Calls GitHub's `generate-jitconfig` (repo / repos / org / enterprise scope) for a
    single-use registration.
-2. Launches a clean runner, either a container or a VM, that runs the **stock GitHub
-   runner** with that JIT config.
+2. Launches the **stock GitHub runner** with that JIT config in a container, a
+   VM, or (for an explicitly selected Windows host pool) directly on the host.
 3. The runner takes exactly one job, then deregisters itself (ephemeral).
 4. multirunner notices it exited and immediately starts a fresh one.
 

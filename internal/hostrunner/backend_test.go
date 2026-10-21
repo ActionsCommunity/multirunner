@@ -44,6 +44,30 @@ func TestHostEnvStripsSecretsByNameValueAndPrefix(t *testing.T) {
 	}
 }
 
+func TestPingDoesNotCreateDirectories(t *testing.T) {
+	base := t.TempDir()
+	parent := filepath.Join(base, "missing")
+	b := &Backend{opt: Options{
+		RunnerDir: filepath.Join(parent, "runner"),
+		StateDir:  filepath.Join(parent, "state"),
+	}}
+	if err := b.Ping(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(parent); !os.IsNotExist(err) {
+		t.Fatalf("Ping created %s or returned an unexpected error: %v", parent, err)
+	}
+
+	file := filepath.Join(base, "not-a-directory")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	b.opt.RunnerDir = filepath.Join(file, "runner")
+	if err := b.Ping(context.Background()); err == nil {
+		t.Fatal("Ping should reject a path beneath a file")
+	}
+}
+
 func zipWith(t *testing.T, files map[string]string) (string, string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "runner.zip")

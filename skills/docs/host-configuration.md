@@ -72,22 +72,22 @@ Every `pools[]` entry needs a unique `name` and `os: linux` or `os: windows`.
 
 | Field | Effect / default |
 |---|---|
-| `backend` | Omit or use `docker` for the Docker-compatible backend; `containerd` is the Windows runhcs backend; `qemu` is the Windows VM backend. Only the latter two are special values; do not rely on an unknown value falling through to Docker behavior. |
-| `size` | Concurrent slots: warm capacity in `pool`, active-per-pool cap in `autoscale`, and maximum concurrent runners in `scaleset`. `0` becomes `1`; lower values are rejected. Account for RAM, disk, and image/overlay capacity per slot. A fixed `repos` pool needs enough slots to cover its repositories. |
+| `backend` | Omit or use `docker` for the Docker-compatible backend; `containerd` is Windows runhcs, `qemu` is a Windows VM, and `host` runs directly as the current Windows user. Unknown values are rejected. |
+| `size` | Concurrent slots: warm capacity in `pool`, active-per-pool cap in `autoscale`, and maximum concurrent runners in `scaleset`. `0` becomes `1`; lower values are rejected. `backend: host` requires exactly `1`. Account for RAM, disk, and image/overlay capacity per slot. A fixed `repos` pool needs enough slots to cover its repositories. |
 | `labels` | Runner routing labels; set labels that workflows actually request. Autoscale picks the first YAML-order pool with all requested labels and spare capacity, so put broad fallback pools last. |
 | `runner_group_id` | Numeric GitHub runner group for `pool`/`autoscale`; `0` becomes `1`. It is not used by scale sets. |
 | `work_folder` | Runner work directory; `_work` by default. |
 | `name_prefix` | Prefix for `pool`/`autoscale` ephemeral runner names; `multirunner` by default. Scale sets use their own `mr-scaleset-*` names. |
 | `max_consecutive_failures` | `pool`/`autoscale` failure-log threshold; `0` becomes `5`. It is not a circuit breaker: slots continue exponential retry. A negative value is accepted and makes the extra "hit max consecutive failures" message log from the first failure. Scale-set runners do not use it. |
 | `scale_set`, `runner_group` | Scale-set-only fields. `scale_set` is required and unique per pool; empty `runner_group` selects GitHub's default group. Startup can create or update this remote GitHub state, including labels. |
-| `image`, `image_tier` | Container image selection for the Docker and containerd backends; see [Images and tiers](#images-and-tiers). Ignored by `backend: qemu`. |
+| `image`, `image_tier` | Container image selection for Docker and containerd; see [Images and tiers](#images-and-tiers). QEMU ignores them. Host pools have no image and reject explicit image settings other than the default `minimal` tier. |
 | `repository`, `workflows`, `workflow_event`, `workflow_actor`, `workflow_ref` | Optional autoscale authorization tuple. The launcher refuses to register that pool when repository or active workflow-run metadata differs. |
-| `docker`, `containerd`, `qemu` | Backend blocks. Only the block matching `backend` is read at launch, except `docker.host`, which is validated for every non-QEMU pool. |
+| `docker`, `containerd`, `qemu`, `host` | Backend blocks. Only the block matching `backend` is accepted. `docker.host` is required for Docker and containerd, but not QEMU or host. |
 | `tool_cache` | See [Tool cache and Docker socket](#tool-cache-and-docker-socket). |
 
-`docker.host` is required for every non-QEMU pool by current validation. It is
-the endpoint used by Docker-compatible backends, with one containerd exception
-called out below.
+`docker.host` is required for Docker and containerd pools. It is the endpoint
+used by Docker-compatible backends, with one containerd exception called out
+below. QEMU and host pools do not use it.
 
 ## Images and tiers
 
@@ -100,6 +100,7 @@ are pulled automatically:
 | Linux | `minimal`, `native-build`, `node`, `dotnet`, `rust`, `go` |
 | Windows containers | `minimal`, `node`, `dotnet`, `buildtools`, `buildtools:<manifest-line>` |
 | QEMU Windows VM | None; bake tools into the golden with `qemu.tools`. |
+| Windows host | None; jobs use tools installed for the current Windows user. |
 
 The unqualified Windows `buildtools` tier follows the current manifest default;
 the available `buildtools:<line>` values come from the release manifest
@@ -225,6 +226,68 @@ For cache URLs using a hostname, nerdctl cannot add a host alias on Windows.
 multirunner instead rewrites the URL to the Windows NAT gateway when it launches
 the container.
 
+## Windows host runner
+
+`backend: host` runs the stock Actions runner directly on the Windows machine
+as the user running multirunner. It provides no container or VM isolation: a
+job can access that user's files, drives, credentials, network access, and
+signed-in tools. Use it only for trusted workflows that specifically need the
+host.
+
+Host pools require `os: windows`, `size: 1`, and a single directory name for
+`work_folder`. They reject image, Docker, container, and active `tool_cache`
+settings. By default they also require the complete autoscale workflow
+authorization tuple; `host.allow_unrestricted: true` is an explicit opt-out
+that lets any job routed to the pool's labels run with the user's authority.
+
+```yaml
+github:
+  scope: repo
+  owner: my-org
+  repo: my-repo
+
+provisioning: autoscale
+
+pools:
+  - name: trusted-host
+    os: windows
+    backend: host
+    size: 1
+    labels: [self-hosted, windows, trusted-host]
+    repository: my-org/my-repo
+    workflows: [.github/workflows/trusted-host.yml]
+    workflow_event: workflow_dispatch
+    workflow_actor: octocat
+    workflow_ref: main
+    host:
+      runner_dir: 'D:\multirunner\trusted-host\runner'
+      state_dir: 'D:\multirunner\trusted-host\state'
+```
+
+| `host` field | Effect / default |
+|---|---|
+| `runner_dir` | Verified runner installs, one subdirectory per version. Empty uses `%LOCALAPPDATA%\multirunner\host\<pool>\runner` (or the OS temp directory when `LOCALAPPDATA` is unavailable). |
+| `state_dir` | Ownership/PID records, per-job logs, and archived diagnostics. Empty uses the matching `...\host\<pool>\state` directory. Explicit host directories must be absolute Windows paths and must not collide with another host pool, case-insensitively. |
+| `runner_version`, `runner_sha256` | Empty uses the embedded release-manifest version and Windows x64 digest. A custom version requires its 64-hex SHA-256. |
+| `keep_workspace` | `false`. Keeps the work folder after a job for debugging; runner credentials and diagnostics are still reset. |
+| `allow_unrestricted` | `false`. When true, removes the workflow-allowlist requirement; it does not add isolation. |
+| `allow_local_system` | `false`. When false, startup refuses `NT AUTHORITY\SYSTEM`, the default identity of `multirunner service install`. Prefer configuring the service to run as the intended user instead of opting in. |
+
+The first real startup downloads the pinned `actions/runner` archive, verifies
+its SHA-256, and installs it once per pool. Before and after every job,
+multirunner clears the runner registration files and work directory and moves
+`_diag` under `state_dir`; it keeps the newest 20 job logs and diagnostic
+directories. Startup recovers interrupted non-scale-set runners only when the
+recorded PID and start time still identify the same process. Jobs inherit the
+user environment except `.env` keys, referenced secret variables, variables
+holding resolved secret values, and `MULTIRUNNER_*`.
+
+`multirunner doctor` checks the backend and configured paths without creating
+directories, downloading the runner, or recovering old processes.
+`multirunner run --dry-run` reports the direct-host authority and whether the
+pool is allowlisted or unrestricted. A real run performs recovery and any
+needed verified download.
+
 ## QEMU Windows VM
 
 QEMU is a **Windows guest backend by design**. Configure `os: windows`; the
@@ -299,7 +362,9 @@ pools:
 | `readonly` | `false` by default; set `true` to prevent jobs from changing the shared cache. |
 
 The target is `/opt/hostedtoolcache` for Linux and
-`C:\hostedtoolcache\windows` for Windows. QEMU ignores this mount.
+`C:\hostedtoolcache\windows` for Windows containers. QEMU ignores this mount;
+host pools reject an active tool-cache configuration because they already use
+the host's installed tools.
 
 `docker.enable_dind: true` mounts `/var/run/docker.sock` into the runner at the
 same path. It is Docker socket passthrough, not an embedded daemon. Access is
@@ -489,6 +554,7 @@ are diagnostic interfaces, not normal host configuration.
 | `cache.storage: minio` | Do not configure it; filesystem is the only supported storage. |
 | `docker.windows_dind` | Treat as inert; no Windows DinD mode is implemented. |
 | QEMU `image`, `image_tier`, and mounts | Bake tools; use `dotgit-cache` for VM checkout acceleration. |
+| Host backend under the default Windows service identity | Configure the service to run as the intended user. Do not set `host.allow_local_system` unless SYSTEM-level workflow execution is explicitly accepted. |
 | Unknown `image_tier` | Build/preload the generated local `:dev` image yourself. |
 | QEMU pool OS | Use `os: windows`; QEMU is a Windows backend by intent. |
 
@@ -586,6 +652,35 @@ pools:
       isolation: auto
 ```
 
+### `provisioning: autoscale` — Windows host runner
+
+This backend has no isolation. The authorization tuple below binds it to one
+trusted workflow, event, actor, branch, and repository.
+
+```yaml
+github:
+  scope: repo
+  owner: my-org
+  repo: my-repo
+
+auth:
+  pat: "${GITHUB_PAT}"
+
+provisioning: autoscale
+
+pools:
+  - name: trusted-host
+    os: windows
+    backend: host
+    size: 1
+    labels: [self-hosted, windows, trusted-host]
+    repository: my-org/my-repo
+    workflows: [.github/workflows/trusted-host.yml]
+    workflow_event: workflow_dispatch
+    workflow_actor: octocat
+    workflow_ref: main
+```
+
 ### QEMU Windows VM on a Linux host
 
 `backend: qemu` requires `qemu.golden` and takes no `docker.host`.
@@ -658,13 +753,13 @@ default is applied only while the owning feature is switched on.
 | `pools` | list | At least one entry is required. |
 | `pools[].name` | string | Required, unique across pools. |
 | `pools[].os` | string | Required, `linux` or `windows`. |
-| `pools[].backend` | string | Empty = `docker`. Also `containerd` (Windows) and `qemu` (Windows VM). Any other value falls through to Docker behavior; do not rely on that. |
-| `pools[].size` | integer | `0` becomes `1`; negative is rejected. |
-| `pools[].image` | string | Empty. Wins over `image_tier`. Ignored by `qemu`. |
-| `pools[].image_tier` | string | `minimal`. A published flavor pulls its tag; an unknown but syntactically valid tier resolves to a local `multirunner/runner-<os>-<tier>:dev` that is never built for you. An unknown tier must be `[a-z0-9]` groups separated by `.`, `_`, or `-`, and at most 64 characters, otherwise config load fails. Not validated when `image` is set or `backend: qemu`. |
+| `pools[].backend` | string | Empty = `docker`. Also `containerd` (Windows), `qemu` (Windows VM), and `host` (direct Windows host execution). Any other value is rejected. |
+| `pools[].size` | integer | `0` becomes `1`; negative is rejected. Host pools require exactly `1`. |
+| `pools[].image` | string | Empty. Wins over `image_tier`. Ignored by QEMU and rejected by host pools. |
+| `pools[].image_tier` | string | `minimal`. A published flavor pulls its tag; an unknown but syntactically valid tier resolves to a local `multirunner/runner-<os>-<tier>:dev` that is never built for you. An unknown tier must be `[a-z0-9]` groups separated by `.`, `_`, or `-`, and at most 64 characters, otherwise config load fails. Not validated when `image` is set or the backend is QEMU/host; host permits only the default `minimal` value. |
 | `pools[].labels` | list of string | Empty. Routing labels. A scale set with empty labels receives its scale-set name as the label. |
 | `pools[].runner_group_id` | integer | `0` becomes `1`. Used by `pool`/`autoscale`; scale sets resolve the group from `runner_group` instead. |
-| `pools[].work_folder` | string | `_work`. |
+| `pools[].work_folder` | string | `_work`. Host pools require one portable relative directory name, not a nested path. |
 | `pools[].name_prefix` | string | `multirunner`. Runner names become `<prefix>-<os>-<random>`. Not used by scale sets. |
 | `pools[].max_consecutive_failures` | integer | `0` becomes `5`. Log threshold only; retries never stop. |
 | `pools[].scale_set` | string | Empty. Required, and unique per pool, when `provisioning: scaleset`; ignored in other modes. |
@@ -674,19 +769,26 @@ default is applied only while the owning feature is switched on.
 | `pools[].workflow_event` | string | Empty. Exact workflow-run event required when `workflows` is configured. |
 | `pools[].workflow_actor` | string | Empty. GitHub login that must be the workflow run's `triggering_actor`. Missing metadata is rejected. |
 | `pools[].workflow_ref` | string | Empty. Exact `head_branch` required when `workflows` is configured, normally the protected default branch. |
-| `pools[].docker.host` | string | Required nonempty for every pool whose `backend` is not `qemu`, including `containerd`, which ignores the value. |
+| `pools[].docker.host` | string | Required nonempty for Docker and containerd pools. Containerd ignores the value. QEMU and host pools do not use it. |
 | `pools[].docker.tls.ca`, `cert`, `key` | string | Empty. Docker-backend mutual-TLS client files; all three are required together and require a `tcp://` Docker host. |
 | `pools[].docker.enable_dind` | bool | `false`. `true` mounts `/var/run/docker.sock` into the runner at the same path. Linux container backends. |
 | `pools[].docker.share_workspace` | bool | `false`. Shares `/home/runner/<work_folder>` with Docker action containers. Requires `enable_dind`, the Linux Docker backend, and `size: 1`; pools on one daemon must use distinct work folders. |
 | `pools[].docker.isolation` | string | Empty/`auto`, `process`, or `hyperv`. Windows Docker backend only. `auto` requires a verified-local `npipe://` host and otherwise fails backend construction. Unused on Linux. |
 | `pools[].docker.windows_dind` | string | Parsed but never read. Inert. |
-| `pools[].tool_cache.mode` | string | Empty or `off` = no mount. Only `shared-volume` mounts, and only with a nonempty `volume`. |
+| `pools[].tool_cache.mode` | string | Empty or `off` = no mount. Only `shared-volume` mounts, and only with a nonempty `volume`. Host pools reject an active mode. |
 | `pools[].tool_cache.volume` | string | Empty = no mount. Named volume. |
 | `pools[].tool_cache.readonly` | bool | `false`. |
 | `pools[].containerd.address` | string | `\\.\pipe\containerd-containerd`. |
 | `pools[].containerd.nerdctl` | string | Empty looks up `nerdctl.exe` on `PATH`; backend construction fails when it is not found. |
 | `pools[].containerd.namespace` | string | `multirunner`. |
 | `pools[].containerd.isolation` | string | Empty/`auto` = process on Windows Server, Hyper-V on client. Also `process` or `hyperv`. |
+| `pools[].host.runner_dir` | string | Empty = `%LOCALAPPDATA%\multirunner\host\<pool>\runner` (OS temp fallback). Explicit values must be absolute Windows paths and cannot collide with another host pool's runner/state directory case-insensitively. |
+| `pools[].host.state_dir` | string | Empty = `%LOCALAPPDATA%\multirunner\host\<pool>\state` (OS temp fallback). Holds ownership/PID records, job logs, and archived diagnostics. |
+| `pools[].host.runner_version` | string | Empty uses the embedded manifest runner version. A custom version requires `runner_sha256`. |
+| `pools[].host.runner_sha256` | string | Empty uses the embedded Windows x64 digest for the default version. A custom version requires a 64-hex digest. |
+| `pools[].host.keep_workspace` | bool | `false`. Keeps the job work folder for debugging; runner registration state and diagnostics are still reset. |
+| `pools[].host.allow_unrestricted` | bool | `false`. When false, a host pool requires the complete autoscale workflow authorization tuple. When true, any job routed to its labels can run with the multirunner user's authority. |
+| `pools[].host.allow_local_system` | bool | `false`. When false, backend construction rejects `NT AUTHORITY\SYSTEM`. |
 | `pools[].qemu.golden` | string | Required for `backend: qemu`. Path to the baked qcow2. |
 | `pools[].qemu.work_dir` | string | Empty = `<OS temp dir>/multirunner-vm`, shared by every QEMU pool that omits it. Use a dedicated directory per pool. |
 | `pools[].qemu.mem_mb` | integer | `0` or lower becomes `4096`. |

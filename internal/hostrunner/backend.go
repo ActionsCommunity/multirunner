@@ -179,14 +179,39 @@ func (b *Backend) runnerRoot() string {
 	return filepath.Join(b.opt.RunnerDir, b.opt.RunnerVersion)
 }
 
-// Ping checks the runner and state directories are usable.
+// Ping checks that the runner and state directory paths are reachable without
+// creating them. doctor relies on backend pings being read-only; startup creates
+// the runner directory in EnsureImage and the state directory in Launch.
 func (b *Backend) Ping(ctx context.Context) error {
 	for _, dir := range []string{b.opt.RunnerDir, b.opt.StateDir} {
-		if err := os.MkdirAll(dir, 0o700); err != nil {
+		if err := reachableDirectoryPath(dir); err != nil {
 			return fmt.Errorf("host backend directory %s: %w", dir, err)
 		}
 	}
 	return nil
+}
+
+// reachableDirectoryPath accepts an existing directory or a path whose nearest
+// existing ancestor is a directory.
+func reachableDirectoryPath(path string) error {
+	current := path
+	for {
+		info, err := os.Stat(current)
+		if err == nil {
+			if !info.IsDir() {
+				return fmt.Errorf("%s is not a directory", current)
+			}
+			return nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return err
+		}
+		current = parent
+	}
 }
 
 // OSType is the host OS; it always matches a validated host pool.
