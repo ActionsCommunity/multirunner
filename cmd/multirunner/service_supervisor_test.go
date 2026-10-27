@@ -12,8 +12,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kardianos/service"
+
 	"github.com/GerardSmit/multirunner/internal/config"
+	"github.com/GerardSmit/multirunner/internal/consoleauth"
+	"github.com/GerardSmit/multirunner/internal/history"
+	"github.com/GerardSmit/multirunner/internal/restore"
 	"github.com/GerardSmit/multirunner/internal/servicehost"
+	"github.com/GerardSmit/multirunner/internal/update"
 )
 
 const (
@@ -236,6 +242,317 @@ func TestSuperviseServiceWorkerStopsAtCrashLoopBudgetBeforeConfigLoad(t *testing
 	}
 }
 
+func TestSuperviseServiceWorkerRollsBackFailedRestoreAndRelaunches(t *testing.T) {
+	configPath := writeRestoreSupervisorConfig(t)
+	runCount := 0
+	rollbackCount := 0
+	err := superviseServiceWorkerWithHooks(
+		t.Context(), configPath, true, false, &recordingServiceLogger{},
+		restoreSupervisorHooks{
+			activate: func(
+				context.Context, restore.ActivationOptions,
+			) (restore.Handoff, bool, error) {
+				return restore.Handoff{ID: "restore-1"}, true, nil
+			},
+			rollback: func(
+				context.Context, restore.ActivationOptions, string, time.Time,
+			) (restore.Handoff, bool, error) {
+				rollbackCount++
+				return restore.Handoff{ID: "restore-1"}, rollbackCount == 2, nil
+			},
+			run: func(context.Context, serviceProcessSpec, service.Logger) error {
+				runCount++
+				if runCount == 1 {
+					return errors.New("restored worker failed startup")
+				}
+				return nil
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runCount != 2 || rollbackCount != 2 {
+		t.Fatalf("runs=%d rollbacks=%d, want 2 each", runCount, rollbackCount)
+	}
+}
+
+func TestSuperviseServiceWorkerRecoversUnconfirmedRestoreBeforeLaunch(t *testing.T) {
+	configPath := writeRestoreSupervisorConfig(t)
+	runCount := 0
+	activateCount := 0
+	rollbackCount := 0
+	err := superviseServiceWorkerWithHooks(
+		t.Context(), configPath, true, false, &recordingServiceLogger{},
+		restoreSupervisorHooks{
+			activate: func(
+				context.Context, restore.ActivationOptions,
+			) (restore.Handoff, bool, error) {
+				activateCount++
+				return restore.Handoff{State: restore.StateRolledBack}, false, nil
+			},
+			rollback: func(
+				context.Context, restore.ActivationOptions, string, time.Time,
+			) (restore.Handoff, bool, error) {
+				rollbackCount++
+				return restore.Handoff{
+					ID: "restore-1", State: restore.StateRolledBack,
+				}, true, nil
+			},
+			run: func(context.Context, serviceProcessSpec, service.Logger) error {
+				runCount++
+				return nil
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runCount != 1 || rollbackCount != 1 || activateCount != 1 {
+		t.Fatalf("runs=%d rollbacks=%d activations=%d, want 1 each",
+			runCount, rollbackCount, activateCount)
+	}
+}
+
+func TestSuperviseServiceWorkerRollsBackFailedUpdateToPreviousWorker(t *testing.T) {
+	configPath := writeRestoreSupervisorConfig(t)
+	newWorker := filepath.Join(t.TempDir(), "new-worker.exe")
+	oldWorker := filepath.Join(t.TempDir(), "old-worker.exe")
+	var paths []string
+	updateRollbackCalls := 0
+	err := superviseServiceWorkerWithHooks(
+		t.Context(), configPath, true, false, &recordingServiceLogger{},
+		restoreSupervisorHooks{
+			activate: func(
+				context.Context, restore.ActivationOptions,
+			) (restore.Handoff, bool, error) {
+				return restore.Handoff{}, false, nil
+			},
+			rollback: func(
+				context.Context, restore.ActivationOptions, string, time.Time,
+			) (restore.Handoff, bool, error) {
+				return restore.Handoff{}, false, nil
+			},
+			activateUpdate: func(
+				context.Context, update.ActivationOptions,
+			) (update.Handoff, string, bool, error) {
+				return update.Handoff{ID: "update-1"}, newWorker, true, nil
+			},
+			rollbackUpdate: func(
+				update.ActivationOptions, string, time.Time,
+			) (update.Handoff, string, bool, error) {
+				updateRollbackCalls++
+				if updateRollbackCalls == 1 {
+					return update.Handoff{}, oldWorker, false, nil
+				}
+				return update.Handoff{ID: "update-1"}, oldWorker, true, nil
+			},
+			openUpdate: func(
+				update.ActivationOptions, string,
+			) (*os.File, bool, error) {
+				return nil, false, nil
+			},
+			run: func(_ context.Context, spec serviceProcessSpec, _ service.Logger) error {
+				paths = append(paths, spec.path)
+				if len(paths) == 1 {
+					return errors.New("updated worker failed startup")
+				}
+				return nil
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(paths, "|") != newWorker+"|"+oldWorker {
+		t.Fatalf("worker paths = %v", paths)
+	}
+}
+
+func TestSuperviseServiceWorkerDoesNotApplyUpdateWhenCapabilityDisabled(t *testing.T) {
+	configPath := writeRestoreSupervisorConfigWithUpdateApply(t, false)
+	activateCalls := 0
+	runCalls := 0
+	err := superviseServiceWorkerWithHooks(
+		t.Context(), configPath, true, false, &recordingServiceLogger{},
+		restoreSupervisorHooks{
+			activateUpdate: func(
+				context.Context, update.ActivationOptions,
+			) (update.Handoff, string, bool, error) {
+				activateCalls++
+				return update.Handoff{}, "", false, nil
+			},
+			run: func(context.Context, serviceProcessSpec, service.Logger) error {
+				runCalls++
+				return nil
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if activateCalls != 0 || runCalls != 1 {
+		t.Fatalf("update activations=%d worker runs=%d, want 0 and 1",
+			activateCalls, runCalls)
+	}
+}
+
+func TestSuperviseServiceWorkerRejectsSimultaneousRestoreAndUpdate(t *testing.T) {
+	configPath := writeRestoreSupervisorConfig(t)
+	activations := 0
+	runs := 0
+	err := superviseServiceWorkerWithHooks(
+		t.Context(), configPath, true, false, &recordingServiceLogger{},
+		restoreSupervisorHooks{
+			rollback: func(
+				context.Context, restore.ActivationOptions, string, time.Time,
+			) (restore.Handoff, bool, error) {
+				return restore.Handoff{}, false, nil
+			},
+			rollbackUpdate: func(
+				update.ActivationOptions, string, time.Time,
+			) (update.Handoff, string, bool, error) {
+				return update.Handoff{}, "", false, nil
+			},
+			hasRestore: func(string, []byte) (bool, error) {
+				return true, nil
+			},
+			hasUpdate: func(string, []byte) (bool, error) {
+				return true, nil
+			},
+			activate: func(
+				context.Context, restore.ActivationOptions,
+			) (restore.Handoff, bool, error) {
+				activations++
+				return restore.Handoff{}, false, nil
+			},
+			activateUpdate: func(
+				context.Context, update.ActivationOptions,
+			) (update.Handoff, string, bool, error) {
+				activations++
+				return update.Handoff{}, "", false, nil
+			},
+			run: func(context.Context, serviceProcessSpec, service.Logger) error {
+				runs++
+				return nil
+			},
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "staged restore and application update conflict") {
+		t.Fatalf("simultaneous activation error = %v", err)
+	}
+	if activations != 0 || runs != 0 {
+		t.Fatalf("activations=%d runs=%d, want zero", activations, runs)
+	}
+}
+
+func TestSuperviseServiceWorkerPreservesRestorePrecedence(t *testing.T) {
+	configPath := writeRestoreSupervisorConfig(t)
+	updateActivations := 0
+	err := superviseServiceWorkerWithHooks(
+		t.Context(), configPath, true, false, &recordingServiceLogger{},
+		restoreSupervisorHooks{
+			activate: func(
+				context.Context, restore.ActivationOptions,
+			) (restore.Handoff, bool, error) {
+				return restore.Handoff{ID: "restore-1"}, true, nil
+			},
+			rollback: func(
+				context.Context, restore.ActivationOptions, string, time.Time,
+			) (restore.Handoff, bool, error) {
+				return restore.Handoff{}, false, nil
+			},
+			activateUpdate: func(
+				context.Context, update.ActivationOptions,
+			) (update.Handoff, string, bool, error) {
+				updateActivations++
+				return update.Handoff{}, "", false, nil
+			},
+			rollbackUpdate: func(
+				update.ActivationOptions, string, time.Time,
+			) (update.Handoff, string, bool, error) {
+				return update.Handoff{}, "", false, nil
+			},
+			run: func(context.Context, serviceProcessSpec, service.Logger) error {
+				return nil
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updateActivations != 0 {
+		t.Fatalf("update activations = %d, want 0", updateActivations)
+	}
+}
+
+func TestUpdateDatabaseBackupRoundTrip(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "history.db")
+	store, err := history.Open(t.Context(), databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, err := store.EnsureOperationalHost(t.Context(), "installation-1", "host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.StartHostEpoch(t.Context(), host.ID, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	backupPath := filepath.Join(t.TempDir(), "pre-update.db")
+	validation, err := createUpdateDatabaseBackup(
+		t.Context(), databasePath, backupPath,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if validation.QuickCheck != "ok" ||
+		validation.SchemaVersion != history.CurrentSchemaVersion() ||
+		validation.HostID != host.ID {
+		t.Fatalf("backup validation = %+v", validation)
+	}
+
+	store, err = history.Open(t.Context(), databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetSyncState(t.Context(), history.SyncState{
+		Key: "after-backup", Cursor: "mutated",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := restoreUpdateDatabaseBackup(
+		t.Context(), mustOpenFile(t, backupPath), databasePath,
+	); err != nil {
+		t.Fatal(err)
+	}
+	store, err = history.Open(t.Context(), databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := store.SyncState(t.Context(), "after-backup"); !errors.Is(err, history.ErrNotFound) {
+		t.Fatalf("post-backup mutation survived restore: %v", err)
+	}
+}
+
+func mustOpenFile(t *testing.T, path string) *os.File {
+	t.Helper()
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = file.Close() })
+	return file
+}
+
 func TestWithoutServiceWorkerEnvironmentPreventsRecursiveMarkers(t *testing.T) {
 	environment := []string{
 		"PATH=value",
@@ -398,6 +715,44 @@ func containsString(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func writeRestoreSupervisorConfig(t *testing.T) string {
+	return writeRestoreSupervisorConfigWithUpdateApply(t, true)
+}
+
+func writeRestoreSupervisorConfigWithUpdateApply(t *testing.T, updateApply bool) string {
+	t.Helper()
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	databasePath := filepath.Join(dir, "history.db")
+	configData := fmt.Sprintf(`github:
+  scope: repo
+  owner: example
+  repo: project
+auth:
+  pat: configured-pat-value
+history:
+  enabled: true
+  database: %q
+  listen: 127.0.0.1:8081
+  operations_console:
+    capabilities:
+      update_apply: %t
+pools:
+  - name: linux
+    os: linux
+    size: 1
+    docker:
+      host: unix:///var/run/docker.sock
+`, databasePath, updateApply)
+	if err := os.WriteFile(configPath, []byte(configData), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := consoleauth.EnsureSecret(consoleauth.SecretPath(databasePath)); err != nil {
+		t.Fatal(err)
+	}
+	return configPath
 }
 
 func waitForHelperReady(t *testing.T, logger *recordingServiceLogger) {

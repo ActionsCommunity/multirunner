@@ -5,14 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/netip"
 	"sort"
 
 	cerrdefs "github.com/containerd/errdefs"
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/filters"
-	imagetypes "github.com/docker/docker/api/types/image"
-	"github.com/docker/docker/api/types/mount"
-	"github.com/docker/docker/client"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/mount"
+	"github.com/moby/moby/client"
 )
 
 // DockerTLSConfig identifies the mutual-TLS client files for one Docker daemon.
@@ -45,7 +44,7 @@ func newDockerBackend(name, host string, isolation container.Isolation, tls Dock
 	if tlsOpt != nil {
 		opts = append(opts, tlsOpt)
 	}
-	cli, err := client.NewClientWithOpts(opts...)
+	cli, err := client.New(opts...)
 	if err != nil {
 		return nil, fmt.Errorf("docker client (%s): %w", host, err)
 	}
@@ -65,18 +64,18 @@ func dockerTLSClientOption(tls DockerTLSConfig) (client.Opt, error) {
 func (b *dockerBackend) Name() string { return b.name }
 
 func (b *dockerBackend) Ping(ctx context.Context) error {
-	if _, err := b.cli.Ping(ctx); err != nil {
+	if _, err := b.cli.Ping(ctx, client.PingOptions{NegotiateAPIVersion: true}); err != nil {
 		return fmt.Errorf("ping %s: %w", b.name, err)
 	}
 	return nil
 }
 
 func (b *dockerBackend) OSType(ctx context.Context) (string, error) {
-	info, err := b.cli.Info(ctx)
+	info, err := b.cli.Info(ctx, client.InfoOptions{})
 	if err != nil {
 		return "", fmt.Errorf("daemon info %s: %w", b.name, err)
 	}
-	return info.OSType, nil
+	return info.Info.OSType, nil
 }
 
 func (b *dockerBackend) EnsureImage(ctx context.Context, imageRef string) error {
@@ -86,7 +85,7 @@ func (b *dockerBackend) EnsureImage(ctx context.Context, imageRef string) error 
 	if !b.autoPull {
 		return fmt.Errorf("image %s not present and auto-pull disabled", imageRef)
 	}
-	rc, err := b.cli.ImagePull(ctx, imageRef, imagetypes.PullOptions{})
+	rc, err := b.cli.ImagePull(ctx, imageRef, client.ImagePullOptions{})
 	if err != nil {
 		return fmt.Errorf("pull %s: %w", imageRef, err)
 	}
@@ -115,7 +114,9 @@ func (b *dockerBackend) Launch(ctx context.Context, req LaunchRequest) (RunnerHa
 		id:       req.Name,
 		preserve: !req.Ownership.IsZero(),
 	}
-	created, err := b.cli.ContainerCreate(ctx, cfg, host, nil, nil, req.Name)
+	created, err := b.cli.ContainerCreate(ctx, client.ContainerCreateOptions{
+		Config: cfg, HostConfig: host, Name: req.Name,
+	})
 	if err != nil {
 		// A lost create response can still leave a container behind. Docker APIs
 		// accept the deterministic name anywhere an ID is accepted, so return a
@@ -123,7 +124,7 @@ func (b *dockerBackend) Launch(ctx context.Context, req LaunchRequest) (RunnerHa
 		return handle, fmt.Errorf("create container %s: %w", req.Name, err)
 	}
 	handle.id = created.ID
-	if err := b.cli.ContainerStart(ctx, created.ID, container.StartOptions{}); err != nil {
+	if _, err := b.cli.ContainerStart(ctx, created.ID, client.ContainerStartOptions{}); err != nil {
 		// The daemon may have started the container before the response was lost.
 		// Return its handle so the lifecycle owner can terminate it with a
 		// detached cleanup context before deleting the GitHub registration.
@@ -135,6 +136,17 @@ func (b *dockerBackend) Launch(ctx context.Context, req LaunchRequest) (RunnerHa
 func (b *dockerBackend) launchConfigs(req LaunchRequest) (*container.Config, *container.HostConfig, error) {
 	if err := req.validateContainerSettings(); err != nil {
 		return nil, nil, fmt.Errorf("container %s settings: %w", req.Name, err)
+	}
+	var dns []netip.Addr
+	if len(req.Container.DNS) > 0 {
+		dns = make([]netip.Addr, 0, len(req.Container.DNS))
+	}
+	for _, server := range req.Container.DNS {
+		addr, err := netip.ParseAddr(server)
+		if err != nil {
+			return nil, nil, fmt.Errorf("container %s DNS server %q: %w", req.Name, server, err)
+		}
+		dns = append(dns, addr)
 	}
 	isWindows := b.name == "docker-windows"
 	if isWindows && req.Container.MemorySwapBytes != 0 {
@@ -170,7 +182,7 @@ func (b *dockerBackend) launchConfigs(req LaunchRequest) (*container.Config, *co
 		// deregistration succeeds. Pool launchers still remove it through Kill.
 		AutoRemove: req.Ownership.IsZero(),
 		Mounts:     toDockerMounts(req.Mounts),
-		DNS:        append([]string(nil), req.Container.DNS...),
+		DNS:        dns,
 	}
 	host.Memory = req.Container.MemoryBytes
 	host.MemorySwap = req.Container.MemorySwapBytes
@@ -197,14 +209,15 @@ func (b *dockerBackend) ListOwnedRunners(ctx context.Context, ownership RunnerOw
 		return nil, fmt.Errorf("docker: complete runner ownership is required")
 	}
 	labels := reconciliationLabels(ownership)
-	args := filters.NewArgs()
+	args := make(client.Filters)
 	for key, value := range labels {
 		args.Add("label", key+"="+value)
 	}
-	containers, err := b.cli.ContainerList(ctx, container.ListOptions{All: true, Filters: args})
+	result, err := b.cli.ContainerList(ctx, client.ContainerListOptions{All: true, Filters: args})
 	if err != nil {
 		return nil, fmt.Errorf("list owned containers: %w", err)
 	}
+	containers := result.Items
 	owned := make([]OwnedRunner, 0, len(containers))
 	for _, candidate := range containers {
 		if !labelsMatch(candidate.Labels, labels) {
@@ -218,7 +231,7 @@ func (b *dockerBackend) ListOwnedRunners(ctx context.Context, ownership RunnerOw
 }
 
 func (b *dockerBackend) RemoveOwnedRunner(ctx context.Context, resourceID string) error {
-	err := b.cli.ContainerRemove(ctx, resourceID, container.RemoveOptions{Force: true})
+	_, err := b.cli.ContainerRemove(ctx, resourceID, client.ContainerRemoveOptions{Force: true})
 	if cerrdefs.IsNotFound(err) {
 		return nil
 	}
@@ -264,11 +277,13 @@ type dockerHandle struct {
 func (h *dockerHandle) ID() string { return h.id }
 
 func (h *dockerHandle) Wait(ctx context.Context) (int, error) {
-	statusCh, errCh := h.cli.ContainerWait(ctx, h.id, container.WaitConditionNotRunning)
+	wait := h.cli.ContainerWait(ctx, h.id, client.ContainerWaitOptions{
+		Condition: container.WaitConditionNotRunning,
+	})
 	select {
-	case err := <-errCh:
+	case err := <-wait.Error:
 		return -1, err
-	case st := <-statusCh:
+	case st := <-wait.Result:
 		if st.Error != nil {
 			return int(st.StatusCode), fmt.Errorf("container wait error: %s", st.Error.Message)
 		}
@@ -279,7 +294,7 @@ func (h *dockerHandle) Wait(ctx context.Context) (int, error) {
 }
 
 func (h *dockerHandle) Logs(ctx context.Context) (io.ReadCloser, error) {
-	return h.cli.ContainerLogs(ctx, h.id, container.LogsOptions{
+	return h.cli.ContainerLogs(ctx, h.id, client.ContainerLogsOptions{
 		ShowStdout: true,
 		ShowStderr: true,
 		Follow:     true,
@@ -287,14 +302,14 @@ func (h *dockerHandle) Logs(ctx context.Context) (io.ReadCloser, error) {
 }
 
 func (h *dockerHandle) Kill(ctx context.Context) error {
-	stopErr := h.cli.ContainerStop(ctx, h.id, container.StopOptions{})
+	_, stopErr := h.cli.ContainerStop(ctx, h.id, client.ContainerStopOptions{})
 	if cerrdefs.IsNotFound(stopErr) {
 		stopErr = nil
 	}
 	if h.preserve {
 		return stopErr
 	}
-	removeErr := h.cli.ContainerRemove(ctx, h.id, container.RemoveOptions{Force: true})
+	_, removeErr := h.cli.ContainerRemove(ctx, h.id, client.ContainerRemoveOptions{Force: true})
 	if cerrdefs.IsNotFound(removeErr) {
 		removeErr = nil
 	}

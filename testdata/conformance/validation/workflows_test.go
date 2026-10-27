@@ -196,6 +196,87 @@ func TestWorkflowsRejectKnownActionTagObjectPins(t *testing.T) {
 	}
 }
 
+func TestReleaseSigningWorkflowIsolatesPrivateKeys(t *testing.T) {
+	t.Parallel()
+	content := string(readProjectFile(t, ".github", "workflows", "release-sign.yml"))
+	for _, job := range []string{
+		"  authorize:", "  prepare-signing-request:", "  sign:",
+		"  verify-final:", "  publish:",
+	} {
+		if !strings.Contains(content, job) {
+			t.Fatalf("release-sign.yml is missing job %q", strings.TrimSpace(job))
+		}
+	}
+
+	sign := workflowSection(t, content, "  sign:", "  verify-final:")
+	for _, forbidden := range []string{
+		"actions/checkout@", "actions/setup-go@", "actions/setup-node@",
+		"actions/cache@", "pnpm/action-setup@", "go run ", "node ", "npm ", "pnpm ",
+		"./cmd/", "./scripts/", "uses: ./", "cache:", "contents: write",
+	} {
+		if strings.Contains(sign, forbidden) {
+			t.Errorf("key-bearing sign job contains forbidden capability %q", forbidden)
+		}
+	}
+	for _, required := range []string{
+		"environment: release-signing",
+		"contents: read",
+		"Independently validate request before exposing keys",
+		"openssl pkeyutl -sign -rawin",
+		"MULTIRUNNER_TUF_TIMESTAMP_PRIVATE_KEY_PEM",
+		"MULTIRUNNER_TUF_SNAPSHOT_PRIVATE_KEY_PEM",
+		"MULTIRUNNER_TUF_TARGETS_PRIVATE_KEY_PEM",
+		"run-id: ${{ needs.authorize.outputs.source-run-id }}",
+		"actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333",
+		"actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9",
+	} {
+		if !strings.Contains(sign, required) {
+			t.Errorf("key-bearing sign job is missing %q", required)
+		}
+	}
+	for lineNumber, line := range strings.Split(sign, "\n") {
+		if strings.Contains(line, "uses:") &&
+			!strings.Contains(line, "actions/download-artifact@") &&
+			!strings.Contains(line, "actions/upload-artifact@") {
+			t.Errorf("sign job line %d invokes a non-artifact action: %s",
+				lineNumber+1, strings.TrimSpace(line))
+		}
+	}
+
+	beforeSign := workflowSection(t, content, "  authorize:", "  sign:")
+	afterSign := workflowSection(t, content, "  verify-final:", "")
+	if strings.Contains(beforeSign, "PRIVATE_KEY_PEM") ||
+		strings.Contains(afterSign, "PRIVATE_KEY_PEM") {
+		t.Fatal("private signing keys escape the isolated sign job")
+	}
+	publish := workflowSection(t, content, "  publish:", "")
+	if !strings.Contains(publish, "contents: write") ||
+		strings.Contains(publish, "environment: release-signing") ||
+		strings.Contains(publish, "secrets.MULTIRUNNER_TUF") {
+		t.Fatal("publish job must be no-key and independently contents:write")
+	}
+}
+
+func TestReleaseBuildProducesBoundUnsignedSigningRequest(t *testing.T) {
+	t.Parallel()
+	content := string(readProjectFile(t, ".github", "workflows", "release.yml"))
+	for _, required := range []string{
+		"go run ./cmd/update-repository prepare",
+		"-source-run-id \"$GITHUB_RUN_ID\"",
+		"-metadata-version \"$GITHUB_RUN_ID\"",
+		"-commit \"$GITHUB_SHA\"",
+		"name: multirunner-update-signing-request",
+		"actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9",
+	} {
+		if !strings.Contains(content, required) {
+			t.Errorf("release.yml is missing unsigned request binding %q", required)
+		}
+	}
+	if strings.Contains(content, "PRIVATE_KEY") {
+		t.Fatal("release-build must not receive a signing private key")
+	}
+}
+
 func TestConformanceMatrixCoversIssueRequirements(t *testing.T) {
 	t.Parallel()
 	main := string(readProjectFile(t, ".github", "workflows", "e2e-linux.yml"))
@@ -306,4 +387,20 @@ func projectRoot(t *testing.T) string {
 		t.Fatal("resolve validation source path")
 	}
 	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", ".."))
+}
+
+func workflowSection(t *testing.T, content, start, end string) string {
+	t.Helper()
+	startIndex := strings.Index(content, start)
+	if startIndex < 0 {
+		t.Fatalf("workflow section %q not found", strings.TrimSpace(start))
+	}
+	if end == "" {
+		return content[startIndex:]
+	}
+	endIndex := strings.Index(content[startIndex+len(start):], end)
+	if endIndex < 0 {
+		t.Fatalf("workflow section terminator %q not found", strings.TrimSpace(end))
+	}
+	return content[startIndex : startIndex+len(start)+endIndex]
 }

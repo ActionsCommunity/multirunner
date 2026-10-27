@@ -38,6 +38,7 @@ One small binary. One config file. No Kubernetes, no control plane.
 | **Autoscaling** | Keep N warm, scale on demand (polling or webhook), or let GitHub drive capacity through runner scale sets. |
 | **Runs as a service** | Windows SCM, Linux systemd, macOS launchd. |
 | **Metrics** | Prometheus endpoint + health check. |
+| **Run history** | Optional SQLite-backed localhost dashboard with handled jobs, steps, repositories, pools, and GitHub links. |
 | **Housekeeping** | Cache + mirror garbage collection, automatic. |
 
 The Linux Docker backend is validated end-to-end against a real GitHub repo,
@@ -67,8 +68,106 @@ so jobs behave exactly as on GitHub-hosted runners.
 
 ## Install
 
-Download a binary for your OS/arch from the
-[Releases](../../releases) page, or clone the repository and build from source:
+Open a terminal and paste the command for your platform. The installer
+downloads the latest GitHub release for your OS and architecture, verifies it
+against the release's `SHA256SUMS.txt`, checks its version, and installs it.
+An existing binary is kept as `multirunner.previous` (`multirunner.exe.previous`
+on Windows).
+
+**Linux and macOS** (installs to `/usr/local/bin`):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ActionsCommunity/multirunner/main/scripts/install.sh | sudo sh -s -- --install-dir /usr/local/bin
+```
+
+To install for the current user only (into `~/.local/bin`, no `sudo`):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ActionsCommunity/multirunner/main/scripts/install.sh | sh
+```
+
+**Windows** (PowerShell; installs to `%LOCALAPPDATA%\Programs\Multirunner` and
+adds it to your user `PATH`):
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/ActionsCommunity/multirunner/main/scripts/install.ps1)))
+```
+
+Open a new terminal afterward and confirm the install:
+
+```sh
+multirunner --version
+```
+
+Pin a release or choose a destination by passing options to the same command:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ActionsCommunity/multirunner/main/scripts/install.sh | sudo sh -s -- --version v1.2.3 --install-dir /usr/local/bin
+```
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/ActionsCommunity/multirunner/main/scripts/install.ps1))) -Version v1.2.3 -InstallDir C:\Tools\Multirunner
+```
+
+Installer sources:
+[`scripts/install.sh`](https://github.com/ActionsCommunity/multirunner/blob/main/scripts/install.sh)
+and
+[`scripts/install.ps1`](https://github.com/ActionsCommunity/multirunner/blob/main/scripts/install.ps1).
+To review a script before running it, download it (`curl -fsSLo install.sh <url>`
+or `irm <url> -OutFile install.ps1`), read it, then run the local file with the
+same options.
+
+### Set up with the CLI
+
+After installing, use the CLI to connect to GitHub, write the config, and
+install the background service. Replace `owner/repo` with your repository, or
+use `--org my-org` for organization runners.
+
+**Linux and macOS:**
+
+```sh
+sudo mkdir -p /etc/multirunner
+# 1. Authorize GitHub (device flow); creates the config with GitHub settings.
+sudo multirunner connect --repo owner/repo --config /etc/multirunner/config.yaml
+# 2. Print a recommended pools: block, then add it to the config.
+sudo multirunner detect --repo owner/repo --config /etc/multirunner/config.yaml
+sudoedit /etc/multirunner/config.yaml
+# 3. Check Docker/Podman and GitHub access.
+sudo multirunner doctor --config /etc/multirunner/config.yaml
+# 4. Preview, then install and start the service.
+sudo multirunner run --config /etc/multirunner/config.yaml --dry-run
+sudo multirunner service install --config /etc/multirunner/config.yaml
+sudo multirunner service start
+```
+
+**Windows** (elevated PowerShell):
+
+```powershell
+New-Item -ItemType Directory -Force C:\multirunner | Out-Null
+# 1. Authorize GitHub (device flow); creates the config with GitHub settings.
+multirunner connect --repo owner/repo --config C:\multirunner\config.yaml
+# 2. Print a recommended pools: block, then add it to the config.
+multirunner detect --repo owner/repo --os windows --config C:\multirunner\config.yaml
+notepad C:\multirunner\config.yaml
+# 3. Check container daemons and GitHub access.
+multirunner doctor --config C:\multirunner\config.yaml
+# 4. Preview, then install and start the service.
+multirunner run --config C:\multirunner\config.yaml --dry-run
+multirunner service install --config C:\multirunner\config.yaml
+multirunner service start
+```
+
+Your runners then appear under **Settings → Actions → Runners**. See
+[Quick start](#quick-start-linux) for a minimal hand-written config,
+[Backends](#backends) for Docker, Podman, Windows containers, and QEMU, and
+[Run as a service](#run-as-a-service) for service management. Commands that
+change the system accept `--dry-run` to preview first.
+
+### Other install options
+
+Download a binary and `SHA256SUMS.txt` from the
+[Releases](https://github.com/ActionsCommunity/multirunner/releases) page and
+verify/install them manually, or build from source:
 
 ```sh
 git clone https://github.com/ActionsCommunity/multirunner.git
@@ -135,6 +234,7 @@ workspace or local marketplace when installing it for Codex. The root
 
 - [CLI reference](skills/docs/cli-reference.md)
 - [Host configuration reference](skills/docs/host-configuration.md)
+- [Operations Console operator runbook](docs/operations-console/operator-runbook.md)
 - [Container build runners](skills/docs/container-build-runners.md)
 - [QEMU Windows guide](skills/docs/qemu-windows.md)
 
@@ -534,8 +634,10 @@ behaviour.
     and scales up.
   - **Webhook** (low-latency) — set `webhook.listen` to receive `workflow_job`
     events (needs a reachable URL; use a tunnel like smee.io / cloudflared).
-    A nonempty `webhook.secret` verifies signatures; an empty one accepts
-    unsigned events and is unsafe on a public listener.
+    A nonempty `webhook.secret` is required whenever `webhook.listen` is set;
+    every delivery must pass signature verification. When migrating an old
+    unsigned listener, configure the same secret in GitHub and Multirunner
+    before enabling the listener, or remove `webhook.listen` and use polling.
 - **`scaleset`** (default) — let GitHub decide. A [runner scale set][scaleset] holds a
   long-poll session open and reports the desired runner count, which is the same
   mechanism actions-runner-controller uses.
@@ -616,6 +718,13 @@ multirunner service start
 
 `service uninstall` removes it.
 
+When upgrading an existing Windows installation, run `multirunner service start`
+from an elevated terminal once. It records you as the console operator, so
+`multirunner console` works from a normal terminal, and the service tightens a
+console secret written by an earlier release. Running `multirunner` in the
+foreground with the config an installed service is already running is refused,
+because both would compete for the same runners.
+
 On Windows, `connect` restricts credentials to your account and LocalSystem,
 the default service identity. Service token refresh preserves your access.
 For a custom service account, grant that account access to the credentials.
@@ -633,6 +742,69 @@ Set `metrics.listen` (e.g. `127.0.0.1:9090`) to expose:
 
 ---
 
+## Durable run history
+
+Multirunner can retain metadata for the GitHub Actions jobs handled by one host
+and serve an authenticated local Operations Console. The feature is disabled
+by default:
+
+```yaml
+history:
+  enabled: true
+  database: "C:/ProgramData/multirunner/history.db"
+  listen: "127.0.0.1:9092"
+  sync_interval_sec: 300
+  backfill: all_available
+  retention_days: -1
+  legacy_runner_prefixes:
+    - multirunner-linux-
+```
+
+The listener must be loopback-only. Open the console with
+`multirunner console`. The CLI requests a short-lived, single-use pairing token
+from the running daemon over a protected local IPC channel, opens the fixed
+console URL, and prints the token in the initiating terminal. Enter that token
+in the browser to create a protected local session. The CLI never reads the
+installation secret, and the token is never placed in the browser URL or
+launcher arguments. Ordinary console and API requests require the authenticated
+session. On Windows, service installation records the installing operator's
+SID and the daemon restricts its pairing pipe to that identity, LocalSystem,
+and Administrators. On Unix-like hosts, the pairing socket is owner-only.
+
+`retention_days: -1` keeps imported metadata indefinitely. Workflow artifacts
+and job-log content are not persisted. An authenticated operator may explicitly
+request a transient GitHub job log in the browser. The server resolves the job
+from durable history, bounds and masks the response, sends it with
+`Cache-Control: no-store`, and records only access metadata. Log bytes are not
+written to SQLite, operational events, audit payloads, exports, support
+bundles, backups, service logs, or browser persistent storage.
+
+New jobs are attributed exactly by GitHub's assigned runner name. Queued job
+IDs that triggered provisioning are only hints: GitHub can assign that job to
+another labels-compatible runner. A delivery without a runner name can reuse
+an already runner-confirmed assignment, but cannot confirm a trigger hint.
+Older jobs can be imported by an explicitly configured runner-name prefix and
+remain marked as inferred.
+
+REST enrichment and backfill enumerate only configured repository-scoped
+targets (`owner/repository`). Organization and enterprise targets are not
+expanded into repositories for REST history synchronization. For those scopes,
+workflow/job history requires a reachable `webhook.listen` endpoint receiving
+the relevant GitHub `workflow_job` deliveries and a matching, nonempty
+`webhook.secret` for signature verification. The console listener remains
+loopback-only; it is not the webhook endpoint. Local runner lifecycle history
+is still recorded without webhooks, but missing deliveries for these scopes
+cannot be repaired by repository REST backfill.
+
+GitHub remains the source for enrichment and backfill. History already deleted
+by GitHub cannot be recovered. As of October 8, 2026, configured GitHub Actions
+retention also applies to workflow runs and related data; public repositories
+can retain up to 90 days and private repositories up to 400 days. Multirunner
+therefore reconciles periodically and stores imported metadata locally before
+GitHub retention removes it.
+
+---
+
 ## CLI
 
 Built with cobra — `multirunner <command> --help` for details; `--config` is global.
@@ -644,6 +816,7 @@ Hidden `_` developer helpers are excluded.
 ```text
 multirunner [run]                   run the orchestrator (default)
 multirunner connect --org <org>     create + install a GitHub App, write auth to config
+multirunner console                 open the local Operations Console
 multirunner doctor                  check daemons + container mode, no runners
 multirunner detect                  scan a repo, recommend image flavors + pools
 multirunner bake                    build a golden Windows VM image (qemu backend)
@@ -652,6 +825,11 @@ multirunner install-windows-daemon  install the Windows Docker daemon (elevates)
 multirunner service ...             install | uninstall | start | stop | restart
 multirunner completion <shell>      shell completion script
 ```
+
+If the config file does not exist, `multirunner` (or `multirunner run`) on a
+terminal offers guided setup: it asks where to write the config, runs the same
+flow as `multirunner connect`, and then offers to start the runners. Off a
+terminal it exits and prints the `connect` command to run instead.
 
 ---
 

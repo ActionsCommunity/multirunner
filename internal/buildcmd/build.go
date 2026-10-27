@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/GerardSmit/multirunner/internal/buildinfo"
+	"github.com/GerardSmit/multirunner/internal/update"
 )
 
 const targetPackage = "./cmd/multirunner"
@@ -30,6 +31,7 @@ type Options struct {
 	GOOS       string
 	GOARCH     string
 	AllowDirty bool
+	UpdateRoot string
 }
 
 type commands struct {
@@ -67,6 +69,8 @@ func build(ctx context.Context, opts Options, command commands) error {
 		}
 	} else if commit == "" {
 		commit = sourceCommit
+	} else if !strings.EqualFold(commit, sourceCommit) {
+		return fmt.Errorf("explicit commit %s does not match source checkout %s", commit, sourceCommit)
 	}
 	if !commitPattern.MatchString(commit) {
 		return fmt.Errorf("commit must be a full 40 or 64 character hexadecimal object ID")
@@ -100,6 +104,22 @@ func build(ctx context.Context, opts Options, command commands) error {
 		"-X", buildinfo.VersionVariable + "=" + version,
 		"-X", buildinfo.CommitVariable + "=" + commit,
 	}, " ")
+	if opts.UpdateRoot != "" {
+		rootPath := opts.UpdateRoot
+		if !filepath.IsAbs(rootPath) {
+			rootPath = filepath.Join(directory, rootPath)
+		}
+		root, err := os.ReadFile(rootPath)
+		if err != nil {
+			return fmt.Errorf("read update trust root: %w", err)
+		}
+		encodedRoot, err := update.EncodeEmbeddedRoot(root)
+		if err != nil {
+			return fmt.Errorf("validate update trust root: %w", err)
+		}
+		ldflags += " -X " + update.EmbeddedRootVariable + "=" +
+			encodedRoot
+	}
 	args := []string{"build", "-trimpath", "-ldflags", ldflags, "-o", output, targetPackage}
 	env := setEnv(os.Environ(), "CGO_ENABLED", "0")
 	env = setEnv(env, "GOOS", goos)

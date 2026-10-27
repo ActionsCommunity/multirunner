@@ -519,7 +519,14 @@ func runDeviceConnect(cfgPath string, f connectFlags, in io.Reader, out io.Write
 	}
 	// Only an org target has to be an organization: the repository App is
 	// installed on whichever account owns the repo, personal or org.
-	inst, err := selectInstallation(installs, owner, df.baseURL, df.appSlug, f.repo == "", p, interactive)
+	inst, err := selectInstallation(installs, installationSelectionOptions{
+		Owner:               owner,
+		BaseURL:             df.baseURL,
+		AppSlug:             df.appSlug,
+		RequireOrganization: f.repo == "",
+		Prompt:              p,
+		Interactive:         interactive,
+	})
 	if err != nil {
 		return err
 	}
@@ -748,23 +755,34 @@ func writeConnectSuccess(w io.Writer, cfgPath, keyOut, webhookSecretPath, webhoo
 // match one. With no target, a single installation is taken silently and several
 // are offered as a list, because GitHub already knows the valid answers and the
 // user should not have to type one.
-func selectInstallation(installs []ghapp.Installation, owner, baseURL, appSlug string, requireOrg bool, p *prompt, interactive bool) (ghapp.Installation, error) {
-	installURL := installNewURL(installs, baseURL, appSlug)
+type installationSelectionOptions struct {
+	Owner               string
+	BaseURL             string
+	AppSlug             string
+	RequireOrganization bool
+	Prompt              *prompt
+	Interactive         bool
+}
 
-	if owner != "" {
-		inst, _, ok := ghapp.MatchInstallation(installs, owner)
+func selectInstallation(
+	installs []ghapp.Installation, options installationSelectionOptions,
+) (ghapp.Installation, error) {
+	installURL := installNewURL(installs, options.BaseURL, options.AppSlug)
+
+	if options.Owner != "" {
+		inst, _, ok := ghapp.MatchInstallation(installs, options.Owner)
 		if !ok {
 			return ghapp.Installation{}, fmt.Errorf("authorized, but the Multirunner Connect App is not installed on %q.\n"+
-				"Install it, then re-run `multirunner connect`:\n  %s", owner, installURL)
+				"Install it, then re-run `multirunner connect`:\n  %s", options.Owner, installURL)
 		}
 		// A personal-account installation carries no
 		// organization_self_hosted_runners permission, so it cannot register org
 		// runners however it was named. A repository target has no such
 		// requirement: its App is installed wherever the repo lives.
-		if requireOrg && !inst.IsOrg {
+		if options.RequireOrganization && !inst.IsOrg {
 			return ghapp.Installation{}, fmt.Errorf("%q is a personal account, not an organization.\n"+
 				"The shared App can only manage organization runners; install it on an organization,\n"+
-				"or use `multirunner connect --own-app` for a personal repository:\n  %s", owner, installURL)
+				"or use `multirunner connect --own-app` for a personal repository:\n  %s", options.Owner, installURL)
 		}
 		return inst, nil
 	}
@@ -783,7 +801,7 @@ func selectInstallation(installs []ghapp.Installation, owner, baseURL, appSlug s
 			"Install it, then re-run `multirunner connect`:\n  %s", installURL)
 	case len(orgs) == 1:
 		return orgs[0], nil
-	case !interactive:
+	case !options.Interactive:
 		names := make([]string, len(orgs))
 		for i, in := range orgs {
 			names[i] = in.Account
@@ -792,12 +810,12 @@ func selectInstallation(installs []ghapp.Installation, owner, baseURL, appSlug s
 			len(orgs), strings.Join(names, ", "))
 	}
 
-	fmt.Fprintln(p.out, "\nThe App is installed on these organizations:")
+	fmt.Fprintln(options.Prompt.out, "\nThe App is installed on these organizations:")
 	for i, in := range orgs {
-		fmt.Fprintf(p.out, "  %d) %s\n", i+1, in.Account)
+		fmt.Fprintf(options.Prompt.out, "  %d) %s\n", i+1, in.Account)
 	}
 	for {
-		answer := p.line(fmt.Sprintf("Which organization should multirunner use? [1-%d]: ", len(orgs)))
+		answer := options.Prompt.line(fmt.Sprintf("Which organization should multirunner use? [1-%d]: ", len(orgs)))
 		if n, err := strconv.Atoi(answer); err == nil && n >= 1 && n <= len(orgs) {
 			return orgs[n-1], nil
 		}
@@ -806,7 +824,7 @@ func selectInstallation(installs []ghapp.Installation, owner, baseURL, appSlug s
 				return in, nil
 			}
 		}
-		fmt.Fprintf(p.out, "  enter a number between 1 and %d, or the organization name\n", len(orgs))
+		fmt.Fprintf(options.Prompt.out, "  enter a number between 1 and %d, or the organization name\n", len(orgs))
 	}
 }
 

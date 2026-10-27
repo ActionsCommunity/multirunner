@@ -34,6 +34,7 @@ optional braces) as the variable name, and only for:
 - `auth.token_path`
 - `webhook.secret`
 - `cache.access_token`
+- `history.notifications.webhooks[].secret`
 
 An unset referenced variable becomes empty and may then fail validation. Other
 configuration fields, including ordinary paths, are passed through as written;
@@ -101,6 +102,22 @@ stats the golden file (no `MR:GOLDEN_OK`, metadata, accelerator, or disk
 check) without cleaning `qemu.work_dir`; orphan cleanup occurs only when the
 orchestrator starts. It does not hash `qemu.bake_iso`; `run --dry-run` and
 real startup do.
+
+### `console`
+
+```text
+multirunner console [--no-browser] [--config <path>]
+```
+
+`console` requires `history.enabled` and requests a short-lived, single-use
+pairing token from the running daemon over its protected local IPC endpoint.
+The daemon remains the sole owner of the protected installation secret. The
+command prints the token and opens the fixed loopback console URL in the
+default browser.
+`--no-browser` prints the URL and token without launching a browser. Enter the
+token in the console pairing form. The token is sensitive until exchanged and
+must not be copied into logs or shared channels; it is never included in the
+browser URL or launcher arguments.
 
 ### `connect`
 
@@ -484,9 +501,10 @@ persistent and therefore accepted everywhere; `--help` likewise.
 
 | Command | Own flags (default) | Loads config |
 | --- | --- | --- |
-| `multirunner` (root, = `run`) | `--install-deps` (false), `--dry-run` (false), `--version`/`-v` (prints the fixed string `0.1.0-dev`; not a release identifier) | yes |
+| `multirunner` (root, = `run`) | `--install-deps` (false), `--dry-run` (false), `--version`/`-v` (prints embedded version and commit; provenance-aware builds inject both, while a plain development build may report `dev (commit unknown)`) | yes |
 | `run` | `--install-deps` (false), `--dry-run` (false) | yes |
 | `doctor` | none | yes |
+| `console` | `--no-browser` (false) | yes |
 | `connect` | `--org` (empty), `--repo` (empty), `--own-app` (false), `--name` (`multirunner`), `--port` (`0`), `--key-out` (empty => `<config dir>/multirunner-app.private-key.pem`), `--webhook-url` (empty), `--detect` (false), `--device` (false), `--non-interactive` (false), `--dry-run` (false); the `--name`/`--port`/`--key-out`/`--webhook-url`/`--detect` flags apply only with `--own-app` | reads it leniently (device flow, or to shape the manifest with `--own-app`), then rewrites the YAML target sections |
 | `detect` | `--path` (`.`), `--repo` (empty), `--os` (`linux`) | only with `--repo` |
 | `bake` | `--iso`, `--iso-sha256`, `--golden`, `--disk-gb` (`40`), `--mem-mb` (`4096`), `--cpus` (`2`), `--accel` (empty=auto), `--runner-version` (`2.337.0`), `--runner-sha256`, `--tools` (empty), `--licensed` (false), `--vnc` (`127.0.0.1:0`), `--vnc-web` (`127.0.0.1:8090`), `--dry-run` (false), `--prepare-only` (false) | no |
@@ -519,7 +537,8 @@ identically; the same is true of `--install-deps`.
   `work_dir` followed by its reachability preflight. One unreachable pool
   aborts startup for every pool.
 - Treat `run`, `connect`, both Windows installers, `service` actions, `bake`,
-  and the companion binaries as state-changing operations.
+  and the companion binaries as state-changing operations. `console` requests
+  sensitive single-use authentication material but does not alter runner state.
 - Keep private keys, PATs, webhook secrets, cache path tokens, JIT blobs, and
   VNC endpoints out of terminal history, logs, and untrusted networks.
 - In autoscale mode, pass `connect --webhook-url <public https URL>` to subscribe

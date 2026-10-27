@@ -2,10 +2,11 @@ package backend
 
 import (
 	"math"
+	"net/netip"
 	"strings"
 	"testing"
 
-	"github.com/docker/docker/api/types/container"
+	"github.com/moby/moby/api/types/container"
 )
 
 func TestDockerLaunchConfigsLinuxControls(t *testing.T) {
@@ -32,7 +33,9 @@ func TestDockerLaunchConfigsLinuxControls(t *testing.T) {
 	if host.Memory != req.Container.MemoryBytes || host.MemorySwap != req.Container.MemorySwapBytes {
 		t.Errorf("memory resources = %d/%d, want %d/%d", host.Memory, host.MemorySwap, req.Container.MemoryBytes, req.Container.MemorySwapBytes)
 	}
-	if len(host.DNS) != 2 || host.DNS[0] != "1.1.1.1" || host.DNS[1] != "2001:db8::1" {
+	if len(host.DNS) != 2 ||
+		host.DNS[0] != netip.MustParseAddr("1.1.1.1") ||
+		host.DNS[1] != netip.MustParseAddr("2001:db8::1") {
 		t.Errorf("DNS = %v", host.DNS)
 	}
 }
@@ -58,7 +61,7 @@ func TestDockerLaunchConfigsWindowsControls(t *testing.T) {
 	if host.Memory != req.Container.MemoryBytes || host.MemorySwap != 0 {
 		t.Errorf("memory resources = %d/%d", host.Memory, host.MemorySwap)
 	}
-	if len(host.DNS) != 1 || host.DNS[0] != "10.0.0.10" {
+	if len(host.DNS) != 1 || host.DNS[0] != netip.MustParseAddr("10.0.0.10") {
 		t.Errorf("DNS = %v", host.DNS)
 	}
 	if host.Isolation != container.IsolationProcess {

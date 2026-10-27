@@ -15,6 +15,7 @@ import (
 	"github.com/GerardSmit/multirunner/internal/backend"
 	"github.com/GerardSmit/multirunner/internal/config"
 	"github.com/GerardSmit/multirunner/internal/github"
+	"github.com/GerardSmit/multirunner/internal/runner"
 )
 
 type failImageBackend struct{}
@@ -263,6 +264,44 @@ func TestRunOneOnWithoutAnyClientFailsCleanly(t *testing.T) {
 	}
 	if starts != 0 || stops != 0 {
 		t.Errorf("hooks fired start=%d stop=%d, want 0/0 for a launch that never began", starts, stops)
+	}
+}
+
+func TestRunJobWithQueueGeneratesSessionAndRunnerIdentityBeforeLaunch(t *testing.T) {
+	srv := successfulJITServer(t)
+	client := testClient(t, srv.URL, "repo")
+	be := &captureBackend{}
+	var events []runner.LifecycleEvent
+	l := NewLauncher(
+		config.Pool{Name: "linux", OS: "linux", Size: 1, NamePrefix: "mr"},
+		"img", be, &countingProvider{next: client}, nil, nil,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Hooks{Observer: runner.LifecycleObserverFunc(func(_ context.Context, event runner.LifecycleEvent) {
+			events = append(events, event)
+		})},
+	)
+
+	if _, err := l.RunJobWithQueue(context.Background(), github.QueuedJob{
+		Client: client, Repository: "o/repo",
+	}, QueueIDs{RunID: 111, JobID: 222}); err != nil {
+		t.Fatalf("RunJobWithQueue: %v", err)
+	}
+	if len(events) != 4 {
+		t.Fatalf("events = %+v, want four lifecycle events", events)
+	}
+	planned := events[0]
+	if planned.Type != runner.LifecyclePlanned || planned.LocalSessionID == "" ||
+		planned.RunnerName == "" || planned.Pool != "linux" || planned.Target != "o/repo" ||
+		planned.QueuedRunID != 111 || planned.QueuedJobID != 222 {
+		t.Errorf("planned event metadata = %+v", planned)
+	}
+	if be.request.Name != planned.RunnerName {
+		t.Errorf("backend runner name = %q, planned name = %q", be.request.Name, planned.RunnerName)
+	}
+	for i, event := range events {
+		if event.LocalSessionID != planned.LocalSessionID || event.RunnerName != planned.RunnerName {
+			t.Errorf("event %d changed local identity: %+v", i, event)
+		}
 	}
 }
 

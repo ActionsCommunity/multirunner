@@ -28,13 +28,14 @@ func TestParseArgsPreservesExplicitValues(t *testing.T) {
 		"-o", "output with spaces/multirunner",
 		"-goos", "linux",
 		"-goarch", "arm64",
+		"-update-root", "root.json",
 		"-allow-dirty",
 	}, io.Discard)
 	if err != nil {
 		t.Fatalf("parseArgs: %v", err)
 	}
 	if opts.Version != "v1.2.3" || opts.Commit != testCommit ||
-		opts.Output != "output with spaces/multirunner" ||
+		opts.Output != "output with spaces/multirunner" || opts.UpdateRoot != "root.json" ||
 		opts.GOOS != "linux" || opts.GOARCH != "arm64" || !opts.AllowDirty {
 		t.Fatalf("options = %+v", opts)
 	}

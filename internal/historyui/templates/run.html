@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>{{displayRun .Run}}</title>
+  <link rel="stylesheet" href="/assets/style.css">
+  <script src="/assets/app.js" defer></script>
+</head>
+<body>
+<header><strong>Multirunner history</strong><nav><a href="/">Overview</a><a href="/runs">Runs</a></nav></header>
+<main>
+  <h1>{{displayRun .Run}}</h1>
+  {{if .Error}}<div class="state error">{{.Error}}</div>{{end}}
+  <section class="card">
+    <div><strong>{{.Run.Repository}}</strong> · <span class="badge {{stateClass .Run.Status .Run.Conclusion}}">{{stateText .Run.Status .Run.Conclusion}}</span></div>
+    <div class="muted">Run #{{.Run.RunNumber}}, attempt {{.Run.RunAttempt}} · {{.Run.Event}} · {{timeTag .Run.CreatedAt}}</div>
+    <div>{{.Run.HeadBranch}} <code>{{.Run.HeadSHA}}</code> {{if .Run.Actor}}by {{.Run.Actor}}{{end}}</div>
+    {{with safeGitHubURL .Run.HTMLURL}}<a href="{{.}}" rel="noreferrer">Open on GitHub</a>{{end}}
+  </section>
+  <h2>Jobs</h2>
+  {{if .Jobs}}
+  <div class="table-wrap"><table>
+    <thead><tr><th>Job</th><th>State</th><th>Runner attribution</th><th>Timing</th></tr></thead>
+    <tbody>{{range .Jobs}}<tr>
+      <td>{{if safeGitHubURL .Job.HTMLURL}}<a href="{{safeGitHubURL .Job.HTMLURL}}" rel="noreferrer">{{.Job.Name}}</a>{{else}}{{.Job.Name}}{{end}}
+        {{if .Job.Steps}}<ol class="steps">{{range .Job.Steps}}<li>{{.Name}} — {{stateText .Status .Conclusion}}</li>{{end}}</ol>{{end}}
+      </td>
+      <td><span class="badge {{stateClass .Job.Status .Job.Conclusion}}">{{stateText .Job.Status .Job.Conclusion}}</span></td>
+      <td>{{.Attribution.Name}} {{if .Attribution.Kind}}<span class="badge">{{.Attribution.Kind}}</span>{{end}}</td>
+      <td>{{if .Job.StartedAt}}{{timeTagPtr .Job.StartedAt}}{{else}}Not started{{end}}</td>
+    </tr>{{end}}</tbody>
+  </table></div>
+  {{else if not .Error}}<div class="state">No jobs have been recorded for this run.</div>{{end}}
+</main>
+</body></html>

@@ -10,45 +10,53 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
-
-	"github.com/GerardSmit/multirunner/internal/autoscale"
-	"github.com/GerardSmit/multirunner/internal/config"
-	"github.com/GerardSmit/multirunner/internal/github"
-	"github.com/GerardSmit/multirunner/internal/pool"
 )
 
-// recordingProvider stands in for a real GitHub provider and records which repo
-// the scaler was asked to place a runner on. Returning a nil client is the
-// legitimate "repo not managed here" answer, so no network access is needed.
-type recordingProvider struct {
-	asked  []string
-	client *github.Client
+type recordingQueued struct {
+	mu     sync.Mutex
+	events []WorkflowJobEvent
 }
 
-func (p *recordingProvider) ClientForSlot(int) *github.Client { return nil }
-func (p *recordingProvider) ClientFor(repo string) *github.Client {
-	p.asked = append(p.asked, repo)
-	return p.client
-}
-func (p *recordingProvider) QueuedJobs(context.Context) ([]github.QueuedJob, error) {
-	return nil, nil
-}
-func (p *recordingProvider) Scope() config.Scope { return config.ScopeRepo }
-
-func testServerWith(secret string, gh github.ClientProvider) *Server {
-	sc := autoscale.New([]*pool.Launcher{}, gh, config.ScopeRepo, 0, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	return New("127.0.0.1:0", "/webhook", secret, sc, slog.New(slog.NewTextHandler(io.Discard, nil)))
+func (r *recordingQueued) OnQueued(event WorkflowJobEvent) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = append(r.events, event)
 }
 
-func testServerWithLaunchers(secret string, gh github.ClientProvider, launchers ...*pool.Launcher) *Server {
-	sc := autoscale.New(launchers, gh, config.ScopeRepo, 0, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	return New("127.0.0.1:0", "/webhook", secret, sc, slog.New(slog.NewTextHandler(io.Discard, nil)))
+type recordingObserver struct {
+	mu     sync.Mutex
+	events []WorkflowJobEvent
+}
+
+func (r *recordingObserver) OnWorkflowJob(
+	_ context.Context, event WorkflowJobEvent,
+) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = append(r.events, event)
+}
+
+func (r *recordingQueued) snapshot() []WorkflowJobEvent {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]WorkflowJobEvent(nil), r.events...)
+}
+
+func (r *recordingObserver) snapshot() []WorkflowJobEvent {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]WorkflowJobEvent(nil), r.events...)
+}
+
+func testServerWith(secret string, queued QueuedObserver) *Server {
+	return New("127.0.0.1:0", "/webhook", secret, queued, slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 
 func testServer(secret string) *Server {
-	return testServerWith(secret, &recordingProvider{})
+	return testServerWith(secret, &recordingQueued{})
 }
 
 func sign(secret string, body []byte) string {
@@ -82,9 +90,24 @@ func do(t *testing.T, s *Server, event, sig string, body string) int {
 	return rec.Code
 }
 
+func doWithDelivery(t *testing.T, s *Server, event, delivery, sig, body string) int {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader(body))
+	req.Header.Set("X-GitHub-Event", event)
+	req.Header.Set("X-GitHub-Delivery", delivery)
+	if sig != "" {
+		req.Header.Set("X-Hub-Signature-256", sig)
+	}
+	rec := httptest.NewRecorder()
+	s.handle(rec, req)
+	return rec.Code
+}
+
 func TestHandlePing(t *testing.T) {
-	s := testServer("")
-	if code := do(t, s, "ping", "", "{}"); code != http.StatusOK {
+	secret := "s3cret"
+	s := testServer(secret)
+	body := "{}"
+	if code := do(t, s, "ping", sign(secret, []byte(body)), body); code != http.StatusOK {
 		t.Errorf("ping = %d", code)
 	}
 }
@@ -93,7 +116,7 @@ func TestHandleWorkflowJobQueued(t *testing.T) {
 	secret := "s3cret"
 	s := testServer(secret)
 	body := `{"action":"queued","workflow_job":{"labels":["self-hosted","linux","x64"]}}`
-	if code := do(t, s, "workflow_job", sign(secret, []byte(body)), body); code != http.StatusOK {
+	if code := doWithDelivery(t, s, "workflow_job", "delivery-queued", sign(secret, []byte(body)), body); code != http.StatusOK {
 		t.Errorf("queued = %d", code)
 	}
 }
@@ -103,96 +126,68 @@ func TestHandleWorkflowJobQueued(t *testing.T) {
 // this value means the runner can be registered somewhere with no work.
 func TestHandleWorkflowJobQueuedRoutesRepo(t *testing.T) {
 	secret := "s3cret"
-	p := &recordingProvider{}
-	s := testServerWith(secret, p)
+	queued := &recordingQueued{}
+	s := testServerWith(secret, queued)
 	body := `{"action":"queued","repository":{"full_name":"o/repoB"},"workflow_job":{"labels":["self-hosted","windows"]}}`
-	if code := do(t, s, "workflow_job", sign(secret, []byte(body)), body); code != http.StatusOK {
+	if code := doWithDelivery(t, s, "workflow_job", "delivery-repo", sign(secret, []byte(body)), body); code != http.StatusOK {
 		t.Fatalf("queued = %d", code)
 	}
-	if len(p.asked) != 1 {
-		t.Fatalf("scaler asked for %d repos, want 1: %v", len(p.asked), p.asked)
-	}
-	if p.asked[0] != "o/repoB" {
-		t.Errorf("scaler asked to place on %q, want o/repoB", p.asked[0])
+	events := waitQueuedEvents(t, queued, 1)
+	if events[0].Repository != "o/repoB" {
+		t.Errorf("queued repository = %q, want o/repoB", events[0].Repository)
 	}
 }
 
-func TestHandleWorkflowJobQueuedDoesNotFetchUnusedWorkflowMetadata(t *testing.T) {
-	var requestedPath string
-	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestedPath = r.URL.Path
-		_, _ = io.WriteString(w, `{
-			"id": 42,
-			"path": ".github/workflows/build.yml",
-			"event": "workflow_dispatch",
-			"triggering_actor": {"login": "octocat"}
-		}`)
-	}))
-	defer api.Close()
-
-	client, err := github.New(context.Background(),
-		config.GitHub{URL: api.URL, Scope: config.ScopeRepo, Owner: "o", Repo: "repoB"},
-		config.Auth{PAT: "test-token"})
-	if err != nil {
-		t.Fatal(err)
-	}
-
+func TestHandleWorkflowJobObserversReceiveAllActionsAndIdentity(t *testing.T) {
 	secret := "s3cret"
-	s := testServerWith(secret, &recordingProvider{client: client})
-	body := `{"action":"queued","repository":{"full_name":"o/repoB"},"workflow_job":{"run_id":42,"labels":["container-build"]}}`
-	if code := do(t, s, "workflow_job", sign(secret, []byte(body)), body); code != http.StatusOK {
-		t.Fatalf("queued = %d", code)
-	}
-	if requestedPath != "" {
-		t.Fatalf("unused workflow run metadata was requested at %q", requestedPath)
-	}
-}
+	queued := &recordingQueued{}
+	observer := &recordingObserver{}
+	s := testServerWith(secret, queued)
+	s.AddObserver(observer)
 
-func TestHandleWorkflowJobQueuedReturnsBeforeRequiredMetadataLookupCompletes(t *testing.T) {
-	requestStarted := make(chan struct{})
-	releaseRequest := make(chan struct{})
-	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		close(requestStarted)
-		<-releaseRequest
-		_, _ = io.WriteString(w, `{"id":42,"status":"completed","triggering_actor":{"login":"octocat"}}`)
-	}))
-	defer api.Close()
-
-	client, err := github.New(context.Background(),
-		config.GitHub{URL: api.URL, Scope: config.ScopeRepo, Owner: "o", Repo: "repoB"},
-		config.Auth{PAT: "test-token"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	launcher := pool.NewLauncher(config.Pool{
-		Name:          "builder",
-		Repository:    "o/repoB",
-		Labels:        []string{"container-build"},
-		Workflows:     []string{".github/workflows/build.yml"},
-		WorkflowEvent: "workflow_dispatch",
-		WorkflowActor: "octocat",
-		WorkflowRef:   "main",
-	}, "", nil, &recordingProvider{}, nil, nil,
-		slog.New(slog.NewTextHandler(io.Discard, nil)), pool.Hooks{})
-	s := testServerWithLaunchers("", &recordingProvider{client: client}, launcher)
-	body := `{"action":"queued","repository":{"full_name":"o/repoB"},"workflow_job":{"run_id":42,"labels":["container-build"]}}`
-
-	returned := make(chan int, 1)
-	go func() { returned <- do(t, s, "workflow_job", "", body) }()
-	select {
-	case code := <-returned:
-		if code != http.StatusOK {
-			t.Errorf("queued = %d", code)
+	for _, action := range []string{"queued", "in_progress", "completed"} {
+		body := `{
+			"action":"` + action + `",
+			"repository":{"full_name":"octo/hello"},
+			"sender":{"login":"hubot"},
+			"workflow_job":{
+				"id":501,"run_id":101,"run_attempt":2,"name":"compile",
+				"workflow_name":"Build","head_branch":"main","head_sha":"abc123",
+				"html_url":"https://github.example/jobs/501","status":"` + action + `",
+				"conclusion":"success","labels":["self-hosted","linux"],
+				"runner_id":7,"runner_name":"runner-7","runner_group_id":8,
+				"runner_group_name":"Default","created_at":"2026-10-07T20:00:00Z",
+				"started_at":"2026-10-07T20:01:00Z","completed_at":"2026-10-07T20:02:00Z",
+				"steps":[{
+					"name":"checkout","status":"completed","conclusion":"success","number":1,
+					"started_at":"2026-10-07T20:01:00Z","completed_at":"2026-10-07T20:01:30Z"
+				}]
+			}
+		}`
+		if code := doWithDelivery(
+			t, s, "workflow_job", "delivery-"+action, sign(secret, []byte(body)), body,
+		); code != http.StatusOK {
+			t.Fatalf("%s = %d", action, code)
 		}
-	case <-time.After(time.Second):
-		t.Fatal("webhook response waited for workflow metadata")
 	}
-	select {
-	case <-requestStarted:
-	case <-time.After(time.Second):
-		t.Fatal("asynchronous workflow metadata lookup did not start")
+
+	waitQueuedEvents(t, queued, 1)
+	events := waitObserverEvents(t, observer, 3)
+	event := events[2]
+	if event.DeliveryID != "delivery-completed" || event.Action != "completed" ||
+		event.Repository != "octo/hello" || event.Sender != "hubot" {
+		t.Fatalf("event envelope = %#v", event)
 	}
-	close(releaseRequest)
+	job := event.WorkflowJob
+	if job.ID != 501 || job.RunID != 101 || job.RunAttempt != 2 ||
+		job.Name != "compile" || job.WorkflowName != "Build" ||
+		job.HeadBranch != "main" || job.HeadSHA != "abc123" ||
+		job.RunnerID != 7 || job.RunnerGroupID != 8 ||
+		job.CreatedAt == nil || job.StartedAt == nil || job.CompletedAt == nil ||
+		len(job.Steps) != 1 || job.Steps[0].Name != "checkout" ||
+		job.Steps[0].StartedAt == nil || job.Steps[0].CompletedAt == nil {
+		t.Fatalf("workflow job = %#v", job)
+	}
 }
 
 func TestHandleBadSignature(t *testing.T) {
@@ -203,9 +198,130 @@ func TestHandleBadSignature(t *testing.T) {
 	}
 }
 
+func TestHandleRejectsOversizedPayload(t *testing.T) {
+	s := testServer("s3cret")
+	body := strings.Repeat(" ", maxPayloadSize+1)
+	if code := do(t, s, "workflow_job", "", body); code != http.StatusRequestEntityTooLarge {
+		t.Errorf("oversized payload = %d, want 413", code)
+	}
+}
+
 func TestHandleUnknownEvent(t *testing.T) {
-	s := testServer("")
-	if code := do(t, s, "push", "", "{}"); code != http.StatusNoContent {
+	secret := "s3cret"
+	s := testServer(secret)
+	body := "{}"
+	if code := do(t, s, "push", sign(secret, []byte(body)), body); code != http.StatusNoContent {
 		t.Errorf("unknown event = %d, want 204", code)
+	}
+}
+
+func TestStartAndHandlerFailClosedWithoutSecret(t *testing.T) {
+	s := testServer("")
+	if err := s.Start(context.Background()); err == nil {
+		t.Fatal("Start accepted an empty webhook secret")
+	}
+	if code := do(t, s, "ping", "", "{}"); code != http.StatusServiceUnavailable {
+		t.Fatalf("unsigned request without configured secret = %d, want 503", code)
+	}
+}
+
+func TestHandleRejectsUnsignedRequest(t *testing.T) {
+	s := testServer("s3cret")
+	if code := do(t, s, "ping", "", "{}"); code != http.StatusUnauthorized {
+		t.Fatalf("unsigned ping = %d, want 401", code)
+	}
+}
+
+func TestHandleSuppressesReplayedDelivery(t *testing.T) {
+	secret := "s3cret"
+	observer := &recordingObserver{}
+	s := testServer(secret)
+	s.AddObserver(observer)
+	body := `{"action":"completed","workflow_job":{"id":42}}`
+	signature := sign(secret, []byte(body))
+	for range 2 {
+		if code := doWithDelivery(
+			t, s, "workflow_job", "delivery-replay", signature, body,
+		); code != http.StatusOK {
+			t.Fatalf("delivery status = %d", code)
+		}
+	}
+	events := waitObserverEvents(t, observer, 1)
+	time.Sleep(20 * time.Millisecond)
+	if got := len(observer.snapshot()); got != len(events) {
+		t.Fatalf("observer received replay: %d events", got)
+	}
+}
+
+type blockingObserver struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (o *blockingObserver) OnWorkflowJob(context.Context, WorkflowJobEvent) {
+	select {
+	case o.started <- struct{}{}:
+	default:
+	}
+	<-o.release
+}
+
+func TestHandleBoundsObserverDispatch(t *testing.T) {
+	secret := "s3cret"
+	blocker := &blockingObserver{started: make(chan struct{}, 1), release: make(chan struct{})}
+	s := testServer(secret)
+	s.dispatch = make(chan struct{}, 1)
+	s.AddObserver(blocker)
+	body := `{"action":"completed","workflow_job":{"id":42}}`
+	signature := sign(secret, []byte(body))
+	first := make(chan int, 1)
+	go func() {
+		first <- doWithDelivery(
+			t, s, "workflow_job", "delivery-first", signature, body,
+		)
+	}()
+	select {
+	case <-blocker.started:
+	case <-time.After(time.Second):
+		t.Fatal("observer did not start")
+	}
+	if code := doWithDelivery(
+		t, s, "workflow_job", "delivery-second", signature, body,
+	); code != http.StatusServiceUnavailable {
+		t.Fatalf("second delivery = %d, want 503", code)
+	}
+	close(blocker.release)
+	if code := <-first; code != http.StatusOK {
+		t.Fatalf("first delivery = %d", code)
+	}
+}
+
+func waitQueuedEvents(t *testing.T, recorder *recordingQueued, count int) []WorkflowJobEvent {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		events := recorder.snapshot()
+		if len(events) >= count {
+			return events
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("queued observer received %d events, want %d", len(events), count)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func waitObserverEvents(t *testing.T, recorder *recordingObserver, count int) []WorkflowJobEvent {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		events := recorder.snapshot()
+		if len(events) >= count {
+			return events
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("observer received %d events, want %d", len(events), count)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }

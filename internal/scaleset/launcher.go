@@ -15,16 +15,20 @@ package scaleset
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/actions/scaleset"
 
 	"github.com/GerardSmit/multirunner/internal/backend"
+	"github.com/GerardSmit/multirunner/internal/runner"
 )
 
 // jitGenerator is the part of *scaleset.Client this package needs. Narrowing it
@@ -59,6 +63,9 @@ type Options struct {
 	MaxRunners int
 	// Ownership is attached to backend resources for restart reconciliation.
 	Ownership backend.RunnerOwnership
+	// Repository is known only for repository-scoped registration.
+	Repository string
+	Observer   runner.LifecycleObserver
 	// OnStart and OnStop report runner lifecycle events.
 	OnStart func()
 	OnStop  func(exitCode int, err error)
@@ -98,7 +105,8 @@ type Launcher struct {
 	// stopped marks that Shutdown has begun. Refilling past that point would
 	// start runners the shutdown is trying to tear down, and they would outlive
 	// it.
-	stopped bool
+	stopped         bool
+	reconciliations map[string]struct{}
 }
 
 type runnerState struct {
@@ -116,6 +124,9 @@ type runnerState struct {
 	stopReported        bool
 	exitCode            int
 	waitErr             error
+	lifecycle           runner.LifecycleEvent
+	terminalObserved    bool
+	launchErr           error
 }
 
 // New returns a Launcher that provisions onto be.
@@ -129,6 +140,18 @@ func New(ctx context.Context, jit jitGenerator, be backend.Backend, opts Options
 	if opts.Ownership.ScaleSetID == 0 {
 		opts.Ownership.ScaleSetID = opts.ScaleSetID
 	}
+	if opts.Ownership.Pool == "" {
+		opts.Ownership.Pool = fmt.Sprintf("scaleset-%d", opts.ScaleSetID)
+	}
+	if opts.Repository == "" {
+		target := opts.Ownership.Target
+		if parsed, err := url.Parse(target); err == nil && parsed.Host != "" {
+			target = strings.Trim(parsed.Path, "/")
+		}
+		if parts := strings.Split(target, "/"); len(parts) == 2 && parts[0] != "" && parts[0] != "enterprises" && parts[1] != "" {
+			opts.Repository = target
+		}
+	}
 	return &Launcher{
 		ctx:                  ctx,
 		jit:                  jit,
@@ -138,6 +161,7 @@ func New(ctx context.Context, jit jitGenerator, be backend.Backend, opts Options
 		pendingRegistrations: make(map[int64]string),
 		pendingExits:         make(map[string]int64),
 		completions:          make(map[string]struct{}),
+		reconciliations:      make(map[string]struct{}),
 	}
 }
 
@@ -238,12 +262,22 @@ func (l *Launcher) HandleDesiredRunnerCount(ctx context.Context, count int) (int
 
 // launchLocked generates a JIT config and starts one runner. Callers hold l.mu.
 func (l *Launcher) launchLocked() (err error) {
-	if l.opts.OnStart != nil {
+	event := runner.LifecycleEvent{
+		LocalSessionID: runner.NewLocalSessionID(), Pool: l.opts.Ownership.Pool,
+		Target: l.lifecycleTarget(), Repository: l.opts.Repository, ExitCode: -1,
+	}
+	deferredTerminal := false
+	if l.opts.Observer == nil && l.opts.OnStart != nil {
 		l.opts.OnStart()
 	}
 	defer func() {
-		if err != nil && l.opts.OnStop != nil {
-			l.opts.OnStop(-1, err)
+		if err != nil {
+			if !deferredTerminal {
+				l.observeTerminal(event, -1, err)
+			}
+			if l.opts.Observer == nil && l.opts.OnStop != nil {
+				l.opts.OnStop(-1, err)
+			}
 		}
 	}()
 
@@ -253,6 +287,8 @@ func (l *Launcher) launchLocked() (err error) {
 		return fmt.Errorf("scaleset: generate runner name: %w", err)
 	}
 	name := fmt.Sprintf("mr-scaleset-%d-%s", l.opts.ScaleSetID, id)
+	event.RunnerName = name
+	l.observe(event, runner.LifecyclePlanned)
 
 	launchCtx, cancel := context.WithTimeout(l.ctx, l.launchDuration())
 	defer cancel()
@@ -274,6 +310,8 @@ func (l *Launcher) launchLocked() (err error) {
 		return fmt.Errorf("scaleset: generate JIT config for %s returned no runner identity", name)
 	}
 	runnerID := int64(jit.Runner.ID)
+	event.GitHubRegistrationID = runnerID
+	l.observe(event, runner.LifecycleRegistered)
 	ownership := l.opts.Ownership
 	ownership.RunnerID = runnerID
 
@@ -301,6 +339,7 @@ func (l *Launcher) launchLocked() (err error) {
 	if err != nil {
 		launchErr := fmt.Errorf("scaleset: launch %s: %w", name, err)
 		if handle != nil {
+			event.BackendInstanceID = handle.ID()
 			// A non-nil handle means the backend cannot prove the resource is
 			// absent. Count it until detached cleanup confirms termination, then
 			// converge registration and backend deletion in the normal order.
@@ -309,7 +348,10 @@ func (l *Launcher) launchLocked() (err error) {
 				runnerID:         runnerID,
 				occupiesCapacity: true,
 				stopReported:     true,
+				lifecycle:        event,
+				launchErr:        launchErr,
 			}
+			deferredTerminal = true
 			l.running[name] = state
 			go func() {
 				if cleanupErr := l.finishRunner(name, state, -1, nil, true); cleanupErr != nil {
@@ -328,10 +370,41 @@ func (l *Launcher) launchLocked() (err error) {
 		return launchErr
 	}
 
-	state := &runnerState{handle: handle, runnerID: runnerID, occupiesCapacity: true}
+	event.BackendInstanceID = handle.ID()
+	l.observe(event, runner.LifecycleLaunched)
+	state := &runnerState{handle: handle, runnerID: runnerID, occupiesCapacity: true, lifecycle: event}
 	l.running[name] = state
 	go l.awaitExit(name, state)
 	return nil
+}
+
+func (l *Launcher) lifecycleTarget() string {
+	target := l.opts.Ownership.Target
+	if parsed, err := url.Parse(target); err == nil && parsed.Host != "" {
+		target = strings.Trim(parsed.Path, "/")
+	}
+	return strings.TrimPrefix(target, "enterprises/")
+}
+
+func (l *Launcher) observe(event runner.LifecycleEvent, kind runner.LifecycleEventType) {
+	if l.opts.Observer == nil {
+		return
+	}
+	event.Type = kind
+	event.Timestamp = time.Now().UTC()
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(l.ctx), l.cleanupDuration())
+	defer cancel()
+	l.opts.Observer.ObserveRunnerLifecycle(ctx, event)
+}
+
+func (l *Launcher) observeTerminal(event runner.LifecycleEvent, code int, err error) {
+	event.ExitCode = code
+	event.Error = runner.SanitizeLifecycleError(err)
+	kind := runner.LifecycleStopped
+	if err != nil {
+		kind = runner.LifecycleFailed
+	}
+	l.observe(event, kind)
 }
 
 func (l *Launcher) launchDuration() time.Duration {
@@ -535,20 +608,51 @@ func (l *Launcher) reconcile(ctx context.Context) (int, error) {
 		if _, active := activeResources[runner.ResourceID]; active {
 			continue
 		}
+		event, report := l.reconciliationEvent(runner)
 		if err := l.removeRunner(ctx, runner.RunnerID); err != nil {
+			if report {
+				l.observeTerminal(event, -1, err)
+			}
 			errs = append(errs, fmt.Errorf("remove registration for %s: %w", runner.Name, err))
 			continue
 		}
 		removeErr := store.RemoveOwnedRunner(ctx, runner.ResourceID)
 		if removeErr != nil {
+			if report {
+				l.observeTerminal(event, -1, removeErr)
+			}
 			errs = append(errs, fmt.Errorf("remove backend runner %s: %w", runner.Name, removeErr))
 			continue
 		}
+		if report {
+			event.Conclusion = "reconciled"
+			l.observeTerminal(event, 0, nil)
+		}
 		reconciled++
 	}
+
 	return reconciled, errors.Join(errs...)
 }
 
+func (l *Launcher) reconciliationEvent(owned backend.OwnedRunner) (runner.LifecycleEvent, bool) {
+	l.mu.Lock()
+	_, reported := l.reconciliations[owned.ResourceID]
+	l.reconciliations[owned.ResourceID] = struct{}{}
+	l.mu.Unlock()
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s/%s/%s/%d/%s",
+		l.opts.Ownership.Instance, l.opts.Ownership.Target, l.opts.Ownership.Pool,
+		l.opts.ScaleSetID, owned.ResourceID)))
+	event := runner.LifecycleEvent{
+		LocalSessionID: "reconciled-" + hex.EncodeToString(sum[:16]),
+		Pool:           l.opts.Ownership.Pool, Target: l.lifecycleTarget(),
+		Repository: l.opts.Repository, RunnerName: owned.Name,
+		GitHubRegistrationID: owned.RunnerID, BackendInstanceID: owned.ResourceID, ExitCode: -1,
+	}
+	if !reported {
+		l.observe(event, runner.LifecyclePlanned)
+	}
+	return event, !reported
+}
 func shortID() (string, error) {
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err != nil {

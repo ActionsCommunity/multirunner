@@ -1,0 +1,12 @@
+{
+  "cobalt": "#174fc4",
+  "orange": "#c6400c",
+  "paper": "#f3f7fa",
+  "ink": "#101c2a",
+  "steel": "#596978",
+  "canvas": "#e7eef4",
+  "line": "#c8d4de",
+  "surface": "#ffffff",
+  "success": "#127453",
+  "shadow": "0 18px 50px rgba(16, 28, 42, 0.09)"
+}

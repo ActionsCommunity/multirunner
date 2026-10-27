@@ -10,7 +10,7 @@ import (
 	"net/url"
 	"testing"
 
-	"github.com/google/go-github/v66/github"
+	"github.com/google/go-github/v88/github"
 
 	"github.com/GerardSmit/multirunner/internal/config"
 )
@@ -18,12 +18,15 @@ import (
 // newTestClient points a Client at an httptest server.
 func newTestClient(t *testing.T, server *httptest.Server, scope config.Scope, owner, repo string) *Client {
 	t.Helper()
-	ghc := github.NewClient(nil)
 	base, err := url.Parse(server.URL + "/")
 	if err != nil {
 		t.Fatal(err)
 	}
-	ghc.BaseURL = base
+	baseURL := base.String()
+	ghc, err := github.NewClient(github.WithURLs(&baseURL, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
 	return &Client{gh: ghc, scope: scope, owner: owner, repo: repo}
 }
 
@@ -196,9 +199,14 @@ func TestQueuedWorkflowJobsCarriesAuthorizationMetadata(t *testing.T) {
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"workflow_runs": []map[string]any{{
-					"id": 101, "path": ".github/workflows/build.yml",
+					"id": 101, "run_attempt": 3, "run_number": 17,
+					"html_url":         "https://github.example/runs/101",
+					"name":             "Build",
+					"workflow_id":      9,
+					"path":             ".github/workflows/build.yml",
 					"event":            "workflow_dispatch",
 					"head_branch":      "main",
+					"head_sha":         "abc123",
 					"status":           "queued",
 					"triggering_actor": map[string]any{"login": "octocat"},
 				}},
@@ -206,6 +214,9 @@ func TestQueuedWorkflowJobsCarriesAuthorizationMetadata(t *testing.T) {
 		case "/repos/octo/hello/actions/runs/101/jobs":
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"jobs": []map[string]any{{
+					"id": 501, "run_id": 101, "run_attempt": 3,
+					"name": "compile", "html_url": "https://github.example/jobs/501",
+					"workflow_name": "Build", "head_branch": "main", "head_sha": "abc123",
 					"status": "queued", "labels": []string{"container-build"},
 				}},
 			})
@@ -226,7 +237,13 @@ func TestQueuedWorkflowJobsCarriesAuthorizationMetadata(t *testing.T) {
 	job := jobs[0]
 	if job.WorkflowPath != ".github/workflows/build.yml" ||
 		job.Event != "workflow_dispatch" || job.Actor != "octocat" ||
-		job.Ref != "main" || job.Status != "queued" {
+		job.Ref != "main" || job.Status != "queued" ||
+		job.RunID != 101 || job.RunAttempt != 3 || job.RunNumber != 17 ||
+		job.RunHTMLURL != "https://github.example/runs/101" ||
+		job.JobID != 501 || job.JobName != "compile" ||
+		job.JobHTMLURL != "https://github.example/jobs/501" ||
+		job.WorkflowID != 9 || job.WorkflowName != "Build" ||
+		job.HeadBranch != "main" || job.HeadSHA != "abc123" {
 		t.Fatalf("authorization metadata = %#v", job)
 	}
 }
@@ -248,13 +265,29 @@ func TestResolveQueuedJobUsesWorkflowRunMetadata(t *testing.T) {
 	defer srv.Close()
 
 	c := newTestClient(t, srv, config.ScopeRepo, "octo", "hello")
-	job, err := c.ResolveQueuedJob(context.Background(), "octo/hello", 101, []string{"container-build"})
+	identity := QueuedJob{
+		Repository:   "octo/hello",
+		RunID:        101,
+		RunAttempt:   2,
+		JobID:        501,
+		JobName:      "compile",
+		JobHTMLURL:   "https://github.example/jobs/501",
+		WorkflowName: "Build",
+		HeadBranch:   "feature",
+		HeadSHA:      "def456",
+		Labels:       []string{"container-build"},
+	}
+	job, err := c.ResolveQueuedJob(context.Background(), identity.Repository, identity.RunID, identity.Labels, identity)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if job.Client != c || job.WorkflowPath != ".github/workflows/build.yml" ||
 		job.Event != "workflow_dispatch" || job.Actor != "octocat" ||
-		job.Ref != "main" || job.Status != "queued" ||
+		job.Ref != "feature" || job.Status != "queued" ||
+		job.RunID != 101 || job.RunAttempt != 2 ||
+		job.JobID != 501 || job.JobName != "compile" ||
+		job.JobHTMLURL != "https://github.example/jobs/501" ||
+		job.WorkflowName != "Build" || job.HeadSHA != "def456" ||
 		len(job.Labels) != 1 || job.Labels[0] != "container-build" {
 		t.Fatalf("resolved job = %#v", job)
 	}

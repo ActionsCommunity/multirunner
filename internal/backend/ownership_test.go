@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/docker/docker/client"
+	"github.com/moby/moby/client"
 )
 
 func TestDockerOwnedRunnerStoreUsesCompleteOwnershipBoundary(t *testing.T) {
@@ -52,7 +52,7 @@ func TestDockerOwnedRunnerStoreUsesCompleteOwnershipBoundary(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cli, err := client.NewClientWithOpts(
+	cli, err := client.New(
 		client.WithHost(server.URL),
 		client.WithHTTPClient(server.Client()),
 		client.WithVersion("1.47"),
@@ -111,7 +111,7 @@ func TestDockerLaunchPersistsRunnerOwnership(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	cli, err := client.NewClientWithOpts(
+	cli, err := client.New(
 		client.WithHost(server.URL),
 		client.WithHTTPClient(server.Client()),
 		client.WithVersion("1.47"),
@@ -176,7 +176,7 @@ func TestDockerCreateFailureCleanupByOwnership(t *testing.T) {
 			}))
 			defer server.Close()
 
-			cli, err := client.NewClientWithOpts(
+			cli, err := client.New(
 				client.WithHost(server.URL),
 				client.WithHTTPClient(server.Client()),
 				client.WithVersion("1.47"),
@@ -231,7 +231,7 @@ func TestDockerOwnedRunnerRemovalToleratesMissingResource(t *testing.T) {
 		http.Error(w, "not found", http.StatusNotFound)
 	}))
 	defer server.Close()
-	cli, err := client.NewClientWithOpts(
+	cli, err := client.New(
 		client.WithHost(server.URL),
 		client.WithHTTPClient(server.Client()),
 		client.WithVersion("1.47"),
@@ -252,7 +252,7 @@ func TestDockerHandleStopsWithoutRemovingCleanupRecord(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer server.Close()
-	cli, err := client.NewClientWithOpts(
+	cli, err := client.New(
 		client.WithHost(server.URL),
 		client.WithHTTPClient(server.Client()),
 		client.WithVersion("1.47"),
@@ -276,7 +276,7 @@ func TestDockerHandleRemovesUnownedPoolContainer(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer server.Close()
-	cli, err := client.NewClientWithOpts(
+	cli, err := client.New(
 		client.WithHost(server.URL),
 		client.WithHTTPClient(server.Client()),
 		client.WithVersion("1.47"),
@@ -304,7 +304,7 @@ func TestDockerHandleForcesUnownedPoolRemovalAfterStopFailure(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer server.Close()
-	cli, err := client.NewClientWithOpts(
+	cli, err := client.New(
 		client.WithHost(server.URL),
 		client.WithHTTPClient(server.Client()),
 		client.WithVersion("1.47"),

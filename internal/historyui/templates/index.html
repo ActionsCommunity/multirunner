@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>History dashboard</title>
+  <link rel="stylesheet" href="/assets/style.css">
+  <script src="/assets/app.js" defer></script>
+</head>
+<body>
+<header><strong>Multirunner history</strong><nav><a href="/">Overview</a><a href="/runs">Runs</a></nav></header>
+<main>
+  <h1>Overview</h1>
+  {{if .Error}}<div class="state error"><strong>History is temporarily unavailable.</strong><br>{{.Error}}</div>{{end}}
+  <div class="grid">
+    <section class="card"><div class="muted">Workflow runs</div><div class="metric">{{.Summary.WorkflowRuns}}</div></section>
+    <section class="card"><div class="muted">Workflow jobs</div><div class="metric">{{.Summary.WorkflowJobs}}</div></section>
+    <section class="card"><div class="muted">Successful jobs</div><div class="metric success">{{.Summary.SuccessfulJobs}}</div></section>
+    <section class="card"><div class="muted">Failed jobs</div><div class="metric failure">{{.Summary.FailedJobs}}</div></section>
+    <section class="card"><div class="muted">Runner sessions</div><div class="metric">{{.Summary.RunnerSessions}}</div></section>
+    <section class="card"><div class="muted">Pending sessions</div><div class="metric">{{.Summary.PendingSessions}}</div></section>
+  </div>
+  <h2>Recent runs</h2>
+  {{if .Runs}}
+  <div class="table-wrap"><table>
+    <thead><tr><th>Repository</th><th>Workflow</th><th>State</th><th>Created</th></tr></thead>
+    <tbody>{{range .Runs}}<tr>
+      <td>{{.Repository}}</td>
+      <td><a href="{{runPath .Repository .ID}}">{{displayRun .}}</a></td>
+      <td><span class="badge {{stateClass .Status .Conclusion}}">{{stateText .Status .Conclusion}}</span></td>
+      <td>{{timeTag .CreatedAt}}</td>
+    </tr>{{end}}</tbody>
+  </table></div>
+  {{else if not .Error}}<div class="state">No workflow history has been recorded yet.</div>{{end}}
+</main>
+</body></html>

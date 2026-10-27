@@ -1,0 +1,50 @@
+{
+  "name": "@multirunner/console",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "packageManager": "pnpm@12.10.1",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "tokens": "node scripts/generate-tokens.mjs",
+    "dev": "vite",
+    "dev:demo": "vite --mode demo",
+    "dev:local": "vite --mode machine",
+    "dev:local:legacy": "vite --mode machine-legacy",
+    "build": "pnpm tokens && tsc -b && vite build",
+    "lint": "oxlint",
+    "licenses:check": "node ../../scripts/generate-third-party-notices.mjs --check",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "test:e2e": "playwright test",
+    "test:smoke": "playwright test --grep \\[smoke\\]",
+    "test:watch": "vitest",
+    "check": "pnpm licenses:check && pnpm lint && pnpm test && pnpm test:e2e && pnpm build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "workbox-window": "^7.4.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.64.0",
+    "@testing-library/jest-dom": "^7.0.1",
+    "@testing-library/react": "^16.3.3",
+    "@testing-library/user-event": "^14.6.7",
+    "@types/node": "^24.13.3",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.7",
+    "@vitejs/plugin-react": "^6.1.1",
+    "@vitest/coverage-v8": "5.0.3",
+    "axe-core": "^4.14.0",
+    "jsdom": "^30.1.2",
+    "oxlint": "^1.81.0",
+    "typescript": "~6.0.2",
+    "vite": "^8.3.4",
+    "vite-plugin-pwa": "^2.0.0",
+    "vitest": "^5.0.3"
+  }
+}

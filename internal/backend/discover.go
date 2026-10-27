@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/docker/docker/client"
+	"github.com/moby/moby/client"
 )
 
 // DockerEndpoint is a container daemon that answered a ping, and the container
@@ -65,27 +65,27 @@ func probeDockerHost(ctx context.Context, host string) (DockerEndpoint, bool) {
 	ctx, cancel := context.WithTimeout(ctx, discoverTimeout)
 	defer cancel()
 
-	cli, err := client.NewClientWithOpts(client.WithHost(host), client.WithAPIVersionNegotiation())
+	cli, err := client.New(client.WithHost(host), client.WithAPIVersionNegotiation())
 	if err != nil {
 		return DockerEndpoint{}, false
 	}
 	defer cli.Close()
 
-	ping, err := cli.Ping(ctx)
+	ping, err := cli.Ping(ctx, client.PingOptions{NegotiateAPIVersion: true})
 	if err != nil {
 		return DockerEndpoint{}, false
 	}
 	// Info supplies the daemon's architecture, which can differ from this host
 	// for remote endpoints. Ping alone cannot label a runnable pool correctly.
-	info, err := cli.Info(ctx)
+	info, err := cli.Info(ctx, client.InfoOptions{})
 	if err != nil {
 		return DockerEndpoint{}, false
 	}
 	osType := ping.OSType
 	if osType == "" {
-		osType = info.OSType
+		osType = info.Info.OSType
 	}
-	return DockerEndpoint{Host: host, OSType: osType, Architecture: info.Architecture}, true
+	return DockerEndpoint{Host: host, OSType: osType, Architecture: info.Info.Architecture}, true
 }
 
 // dedupe keeps the first occurrence of each host, so an endpoint named both by

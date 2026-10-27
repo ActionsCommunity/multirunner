@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: test-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # Unit tests + vet on every supported OS.
   unit:
@@ -17,9 +21,10 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
           cache: true
@@ -29,11 +34,12 @@ jobs:
   # Race detector (needs CGO + a C toolchain, available on ubuntu runners).
   race:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     env:
       CGO_ENABLED: "1"
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
           cache: true
@@ -42,9 +48,10 @@ jobs:
   # Compile every release target so a cross-build break fails CI, not the release.
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
           cache: true
@@ -141,11 +148,12 @@ jobs:
   # Linux container backend against the runner's real Docker daemon.
   docker-integration:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     env:
       MULTIRUNNER_TEST_DOCKER_HOST: unix:///var/run/docker.sock
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
           cache: true
@@ -155,23 +163,25 @@ jobs:
   # The Windows-container and QEMU backends need configured self-hosted hosts.
   qemu-integration:
     runs-on: [self-hosted, linux, qemu]
+    timeout-minutes: 45
     if: github.event_name != 'pull_request' && vars.MR_QEMU_INTEGRATION == 'true'
     env:
       MULTIRUNNER_TEST_QEMU: "1"
       MULTIRUNNER_TEST_ACCEL: kvm
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
       - run: go test ./internal/winvm/... -v
 
   windows-containers:
     runs-on: [self-hosted, windows, containerd]
+    timeout-minutes: 45
     if: github.event_name != 'pull_request' && vars.MR_WINDOWS_CONTAINER_INTEGRATION == 'true'
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
       - run: go test ./internal/backend/... -v

@@ -128,6 +128,107 @@ func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
+type lifecycleRecorder struct {
+	events []LifecycleEvent
+}
+
+func (r *lifecycleRecorder) ObserveRunnerLifecycle(
+	_ context.Context, event LifecycleEvent,
+) {
+	r.events = append(r.events, event)
+}
+
+func TestRunOnceEmitsOrderedLifecycleMetadata(t *testing.T) {
+	gh, _ := jitServer(t, http.StatusNoContent)
+	recorder := &lifecycleRecorder{}
+	spec := Spec{
+		Name:           "mr-linux-a1",
+		LocalSessionID: "session-a1",
+		Pool:           "linux",
+		Target:         "o/r",
+		QueuedRunID:    101,
+		QueuedJobID:    202,
+		Image:          "img",
+		Observer:       recorder,
+	}
+
+	code, err := RunOnce(context.Background(), gh, stubBackend{handle: &stubHandle{code: 7}}, spec, discardLogger())
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if code != 7 {
+		t.Fatalf("exit code = %d, want 7", code)
+	}
+
+	wantTypes := []LifecycleEventType{
+		LifecyclePlanned, LifecycleRegistered, LifecycleLaunched, LifecycleStopped,
+	}
+	if len(recorder.events) != len(wantTypes) {
+		t.Fatalf("events = %+v, want %d events", recorder.events, len(wantTypes))
+	}
+	for i, event := range recorder.events {
+		if event.Type != wantTypes[i] {
+			t.Errorf("event %d type = %q, want %q", i, event.Type, wantTypes[i])
+		}
+		if event.LocalSessionID != spec.LocalSessionID || event.Pool != spec.Pool ||
+			event.Target != spec.Target || event.RunnerName != spec.Name ||
+			event.QueuedRunID != spec.QueuedRunID || event.QueuedJobID != spec.QueuedJobID {
+			t.Errorf("event %d metadata = %+v, want metadata from %+v", i, event, spec)
+		}
+		if event.Timestamp.IsZero() {
+			t.Errorf("event %d has zero timestamp", i)
+		}
+		if i > 0 && event.Timestamp.Before(recorder.events[i-1].Timestamp) {
+			t.Errorf("event %d timestamp %v precedes event %d timestamp %v",
+				i, event.Timestamp, i-1, recorder.events[i-1].Timestamp)
+		}
+	}
+	if recorder.events[0].GitHubRegistrationID != 0 || recorder.events[0].BackendInstanceID != "" {
+		t.Errorf("planned event contains identifiers not known yet: %+v", recorder.events[0])
+	}
+	if recorder.events[1].GitHubRegistrationID != 42 || recorder.events[1].BackendInstanceID != "" {
+		t.Errorf("registered event identifiers = %+v", recorder.events[1])
+	}
+	for _, event := range recorder.events[2:] {
+		if event.GitHubRegistrationID != 42 || event.BackendInstanceID != "container-1" {
+			t.Errorf("post-launch identifiers = %+v", event)
+		}
+	}
+	stopped := recorder.events[3]
+	if stopped.ExitCode != 7 || stopped.Error != "" {
+		t.Errorf("stopped event = %+v, want exit code 7 and no error", stopped)
+	}
+}
+
+func TestRunOnceEmitsFailedWithoutLaunchedForUnusableBackend(t *testing.T) {
+	gh, _ := jitServer(t, http.StatusNoContent)
+	recorder := &lifecycleRecorder{}
+	secret := "do-not-report"
+	_, err := RunOnce(context.Background(), gh,
+		stubBackend{launchErr: errors.New("request https://daemon.test/start?token=" + secret + " token=" + secret)},
+		Spec{Name: "mr-1", LocalSessionID: "session-1", Pool: "linux", Image: "img", Observer: recorder},
+		discardLogger())
+	if err == nil {
+		t.Fatal("RunOnce should surface the launch failure")
+	}
+
+	gotTypes := make([]LifecycleEventType, len(recorder.events))
+	for i, event := range recorder.events {
+		gotTypes[i] = event.Type
+	}
+	wantTypes := []LifecycleEventType{LifecyclePlanned, LifecycleRegistered, LifecycleFailed}
+	if !reflect.DeepEqual(gotTypes, wantTypes) {
+		t.Fatalf("event types = %v, want %v", gotTypes, wantTypes)
+	}
+	failed := recorder.events[len(recorder.events)-1]
+	if strings.Contains(failed.Error, secret) || !strings.Contains(failed.Error, "[redacted]") {
+		t.Errorf("failed error was not sanitized: %q", failed.Error)
+	}
+	if failed.ExitCode != -1 || failed.GitHubRegistrationID != 42 || failed.BackendInstanceID != "" {
+		t.Errorf("failed event metadata = %+v", failed)
+	}
+}
+
 func TestRunOnceCarriesContainerSettings(t *testing.T) {
 	gh, _ := jitServer(t, http.StatusNoContent)
 	want := backend.ContainerSettings{
