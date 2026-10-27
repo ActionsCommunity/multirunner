@@ -31,18 +31,77 @@ func TestPrepareServiceConsoleSecretCreatesOnInstallAndRequiresOnStart(t *testin
 	cfg := &config.Config{}
 	cfg.History.Enabled = true
 	cfg.History.DatabasePath = database
-	if err := prepareServiceConsoleSecret(cfg, "start"); !errors.Is(err, os.ErrNotExist) {
+	cfg.Auth.TokenPath = filepath.Join(t.TempDir(), "github-user-token.json")
+	var calls []string
+	checkPaths := func(path string, tokens []string) {
+		t.Helper()
+		if path != database || !reflect.DeepEqual(tokens, []string{cfg.Auth.TokenPath}) {
+			t.Fatalf("identity paths = %q, %q", path, tokens)
+		}
+	}
+	bootstrap := func(path string, tokens ...string) error {
+		checkPaths(path, tokens)
+		calls = append(calls, "bootstrap")
+		return nil
+	}
+	prepare := func(path string, create bool, tokens ...string) error {
+		checkPaths(path, tokens)
+		calls = append(calls, fmt.Sprintf("prepare:%t", create))
+		if err := securefile.Check(consoleauth.SecretPath(path)); err != nil {
+			t.Fatalf("identity preparation preceded secure secret creation: %v", err)
+		}
+		return nil
+	}
+	if err := prepareServiceConsoleSecretWithIdentity(cfg, "start", bootstrap, prepare); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("missing start secret error = %v", err)
 	}
-	if err := prepareServiceConsoleSecret(cfg, "install"); err != nil {
+	if err := prepareServiceConsoleSecretWithIdentity(cfg, "install", bootstrap, prepare); err != nil {
 		t.Fatal(err)
 	}
 	path := consoleauth.SecretPath(database)
 	if err := securefile.Check(path); err != nil {
 		t.Fatalf("installed secret policy: %v", err)
 	}
-	if err := prepareServiceConsoleSecret(cfg, "start"); err != nil {
+	if err := prepareServiceConsoleSecretWithIdentity(cfg, "start", bootstrap, prepare); err != nil {
 		t.Fatal(err)
+	}
+	if want := []string{"bootstrap", "bootstrap", "prepare:true", "bootstrap", "prepare:false"}; !reflect.DeepEqual(calls, want) {
+		t.Fatalf("identity calls = %q, want %q", calls, want)
+	}
+}
+
+func TestPrepareServiceConsoleSecretPropagatesIdentityErrors(t *testing.T) {
+	sentinel := errors.New("identity validation failed")
+	for _, stage := range []string{"bootstrap", "prepare"} {
+		t.Run(stage, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.History.Enabled = true
+			cfg.History.DatabasePath = filepath.Join(t.TempDir(), "history.db")
+			prepareCalled := false
+			bootstrap := func(string, ...string) error {
+				if stage == "bootstrap" {
+					return sentinel
+				}
+				return nil
+			}
+			prepare := func(string, bool, ...string) error {
+				prepareCalled = true
+				return sentinel
+			}
+			if err := prepareServiceConsoleSecretWithIdentity(cfg, "install", bootstrap, prepare); !errors.Is(err, sentinel) {
+				t.Fatalf("identity error = %v", err)
+			}
+			if stage == "bootstrap" {
+				if prepareCalled {
+					t.Fatal("identity preparation continued after bootstrap failure")
+				}
+				if _, err := os.Stat(consoleauth.SecretPath(cfg.History.DatabasePath)); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("bootstrap failure created a secret: %v", err)
+				}
+			} else if !prepareCalled {
+				t.Fatal("identity preparation was not reached")
+			}
+		})
 	}
 }
 

@@ -397,14 +397,17 @@ func TestConfiguredCredentialRequiresValidatedIndependentSameOperatorBinding(t *
 }
 
 func TestLocalSystemReadsOperatorInstallationAfterIndependentBootstrap(t *testing.T) {
-	directory, err := os.MkdirTemp(".", "installation-owner-")
+	directory, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(directory) })
 	isolateInstallationOwner(t, directory)
 	system, _, current, admins, err := expectedSIDs()
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(directory, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION, current, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(directory, "console.secret")

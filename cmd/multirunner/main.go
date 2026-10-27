@@ -525,10 +525,16 @@ install/uninstall/start/stop require administrator/root.`,
 }
 
 func prepareServiceConsoleSecret(cfg *config.Config, action string) error {
+	return prepareServiceConsoleSecretWithIdentity(cfg, action, consoleipc.BootstrapServiceIdentity, consoleipc.PrepareServiceIdentity)
+}
+
+func prepareServiceConsoleSecretWithIdentity(cfg *config.Config, action string,
+	bootstrap func(string, ...string) error, prepare func(string, bool, ...string) error,
+) error {
 	if cfg == nil || !cfg.History.Enabled {
 		return nil
 	}
-	if err := consoleipc.BootstrapServiceIdentity(cfg.History.DatabasePath, configuredServiceTokenPaths(cfg)...); err != nil {
+	if err := bootstrap(cfg.History.DatabasePath, configuredServiceTokenPaths(cfg)...); err != nil {
 		return fmt.Errorf("bootstrap trusted console installation identity: %w", err)
 	}
 	secretPath := consoleauth.SecretPath(cfg.History.DatabasePath)
@@ -536,7 +542,7 @@ func prepareServiceConsoleSecret(cfg *config.Config, action string) error {
 		if _, err := consoleauth.EnsureSecret(secretPath); err != nil {
 			return fmt.Errorf("provision console secret before service installation: %w", err)
 		}
-		if err := consoleipc.PrepareServiceIdentity(cfg.History.DatabasePath, true, configuredServiceTokenPaths(cfg)...); err != nil {
+		if err := prepare(cfg.History.DatabasePath, true, configuredServiceTokenPaths(cfg)...); err != nil {
 			return fmt.Errorf("provision console operator identity before service installation: %w", err)
 		}
 		return nil
@@ -544,7 +550,7 @@ func prepareServiceConsoleSecret(cfg *config.Config, action string) error {
 	if _, err := consoleauth.LoadSecret(secretPath); err != nil {
 		return fmt.Errorf("validate console secret before service start: %w", err)
 	}
-	if err := consoleipc.PrepareServiceIdentity(cfg.History.DatabasePath, false, configuredServiceTokenPaths(cfg)...); err != nil {
+	if err := prepare(cfg.History.DatabasePath, false, configuredServiceTokenPaths(cfg)...); err != nil {
 		return fmt.Errorf("validate console operator identity before service start: %w", err)
 	}
 	return nil
