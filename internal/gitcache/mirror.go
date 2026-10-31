@@ -20,6 +20,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/GerardSmit/multirunner/internal/backgroundexec"
 )
 
 // lastUsedFile marks when a mirror was last cloned/fetched/bundled, for GC.
@@ -194,7 +196,7 @@ func (m *Manager) Bundle(ctx context.Context, repoSlug string, w io.Writer) erro
 	if err != nil {
 		return err
 	}
-	cmd := exec.CommandContext(ctx, "git", "--git-dir="+path, "bundle", "create", "-", "--all")
+	cmd := backgroundexec.CommandContext(ctx, "git", "--git-dir="+path, "bundle", "create", "-", "--all")
 	// Bundle creation is entirely local. Do not expose the mirror PAT to a
 	// subprocess that cannot use it.
 	cmd.Env = m.localGitEnv()
@@ -236,7 +238,7 @@ func (m *Manager) git(ctx context.Context, gitDir string, args ...string) error 
 	}
 	full = append(full, args...)
 
-	cmd := exec.CommandContext(ctx, "git", full...)
+	cmd := backgroundexec.CommandContext(ctx, "git", full...)
 	cmd.Env = m.gitEnv()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -361,7 +363,7 @@ func stripIndexedGitConfig(env []string) []string {
 // Authorization header there deserves a warning before jobs depend on the
 // cache. Each returned string is one human-readable warning.
 func AuditFileConfig(ctx context.Context, baseURL string) ([]string, error) {
-	cmd := exec.CommandContext(ctx, "git", "config", "-z", "--show-origin", "--get-regexp",
+	cmd := backgroundexec.CommandContext(ctx, "git", "config", "-z", "--show-origin", "--get-regexp",
 		`^(url\..*\.insteadof|http\.(.*\.)?extraheader)$`)
 	// Run outside any repository so only file-based config is inspected, with
 	// the same environment channels stripped that mirror subprocesses drop.
