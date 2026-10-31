@@ -5,8 +5,9 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"time"
+
+	"github.com/GerardSmit/multirunner/internal/backgroundexec"
 )
 
 // GoldenRef ties a golden image to the bake options needed to rebuild it.
@@ -107,7 +108,7 @@ func RearmGolden(ctx context.Context, ref GoldenRef, now time.Time) error {
 	defer os.Remove(iso)
 
 	args := QEMUArgs(LaunchOpts{Overlay: o.Golden, JITISOPath: iso, MemMB: o.MemMB, CPUs: o.CPUs, Accel: o.Accel})
-	cmd := exec.CommandContext(ctx, o.QEMUBin, args...)
+	cmd := backgroundexec.CommandContext(ctx, o.QEMUBin, args...)
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("rearm boot: %w", err)

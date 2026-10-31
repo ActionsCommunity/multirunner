@@ -12,6 +12,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/GerardSmit/multirunner/internal/backgroundexec"
 )
 
 // containerdBackend runs Windows containers via containerd + the runhcs shim,
@@ -60,7 +62,7 @@ func (b *containerdBackend) run(ctx context.Context, args ...string) (string, er
 		return b.runCommand(ctx, args...)
 	}
 	full := append([]string{"--address", b.address, "--namespace", b.namespace}, args...)
-	cmd := exec.CommandContext(ctx, b.nerdctl, full...)
+	cmd := backgroundexec.CommandContext(ctx, b.nerdctl, full...)
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
 	if err := cmd.Run(); err != nil {
@@ -305,7 +307,7 @@ func (h *containerdHandle) Wait(ctx context.Context) (int, error) {
 }
 
 func (h *containerdHandle) Logs(ctx context.Context) (io.ReadCloser, error) {
-	cmd := exec.CommandContext(ctx, h.b.nerdctl,
+	cmd := backgroundexec.CommandContext(ctx, h.b.nerdctl,
 		"--address", h.b.address, "--namespace", h.b.namespace, "logs", "-f", h.name)
 	pr, pw := io.Pipe()
 	cmd.Stdout, cmd.Stderr = pw, pw
