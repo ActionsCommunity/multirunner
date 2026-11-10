@@ -12,12 +12,20 @@ import (
 // <configDir>/.env then ./.env; a variable already set in the real environment
 // always wins (and an earlier file wins over a later one), so nothing the user
 // has actually exported is ever overridden.
-func loadDotEnv(configDir string) {
+//
+// It returns every key found in those files, whether or not it was applied:
+// they are multirunner's secrets either way.
+func loadDotEnv(configDir string) []string {
 	seen := map[string]bool{}
 	paths := []string{filepath.Join(configDir, ".env"), ".env"}
 	for _, p := range paths {
 		applyDotEnv(p, seen)
 	}
+	keys := make([]string, 0, len(seen))
+	for key := range seen {
+		keys = append(keys, key)
+	}
+	return keys
 }
 
 func applyDotEnv(path string, seen map[string]bool) {

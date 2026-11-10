@@ -8,13 +8,17 @@ Detect Windows, Linux, or macOS and `amd64` or `arm64`, then inspect without ele
 - On Linux, systemd and Docker or Podman service state.
 - On macOS, launchd and the Docker-compatible API; read [macOS host notes](macos-host.md).
 - QEMU executable, acceleration, golden image, and disk only for requested Windows VMs.
+- For a Windows `host` pool, the current/service identity, workflow allowlist,
+  runner/state paths, free disk, and any case-insensitive directory collision.
 - Config target scope, pools, backends, labels, capacity, provisioning, and metrics.
 
 Run `multirunner doctor --config <config-path>` when a config exists. It is a
 read-only preflight, including for QEMU pools, and does not clean
-`qemu.work_dir`; see [triage signals](triage-signals.md) for its markers and
-blind spots. Run cleanup or remediation only through a separate, explicit
-command after reviewing its targets and obtaining approval. Use
+`qemu.work_dir`. For host pools it also does not create directories, download
+the runner, or recover recorded processes; those are real-start effects. See
+[triage signals](triage-signals.md) for markers and blind spots. Run cleanup or
+remediation only through a separate, explicit command after reviewing its
+targets and obtaining approval. Use
 `multirunner detect --path <checkout> --os <linux-or-windows>` for
 local workload detection. Report all blockers together.
 

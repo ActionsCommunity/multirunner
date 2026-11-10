@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -153,6 +154,28 @@ pools:
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("plan missing %q:\n%s", want, out.String())
 		}
+	}
+}
+
+func TestRunAutoscaleReturnsWebhookBindError(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	cfg := &config.Config{
+		GitHub: config.GitHub{Scope: config.ScopeRepo},
+		Webhook: config.Webhook{
+			Listen: listener.Addr().String(),
+			Path:   "/webhook",
+		},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	err = runAutoscale(ctx, cfg, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err == nil || !strings.Contains(err.Error(), "listen on") {
+		t.Fatalf("runAutoscale error = %v, want webhook bind failure", err)
 	}
 }
 

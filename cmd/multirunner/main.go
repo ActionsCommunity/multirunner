@@ -28,6 +28,7 @@ import (
 	"github.com/GerardSmit/multirunner/internal/ghapp"
 	"github.com/GerardSmit/multirunner/internal/gitcache"
 	"github.com/GerardSmit/multirunner/internal/github"
+	"github.com/GerardSmit/multirunner/internal/hostrunner"
 	"github.com/GerardSmit/multirunner/internal/metrics"
 	"github.com/GerardSmit/multirunner/internal/pool"
 	"github.com/GerardSmit/multirunner/internal/servicehost"
@@ -631,6 +632,15 @@ func planRun(w io.Writer, configPath string, installDeps bool) error {
 
 	now := time.Now()
 	for _, pool := range cfg.Pools {
+		if pool.Backend == "host" {
+			access := "allowlisted workflows only"
+			if len(pool.Workflows) == 0 {
+				access = "ANY job routed to its labels (allow_unrestricted)"
+			}
+			fmt.Fprintf(w, "Pool %s: backend=host; capacity=1; runs the runner directly on this machine as the current user, for %s; downloads actions/runner when absent; runner registrations will be created\n",
+				pool.Name, access)
+			continue
+		}
 		if pool.Backend != "qemu" {
 			backendName := pool.Backend
 			if backendName == "" {
@@ -802,6 +812,15 @@ func runOrchestrator(ctx context.Context, configPath string, interactive, instal
 			continue
 		}
 		backends = append(backends, be)
+		if host, ok := be.(*hostrunner.Backend); ok {
+			// Host jobs inherit multirunner's environment: keep its secrets out,
+			// and recover from a previous run that stopped mid-job.
+			names, values := cfg.RunnerEnvSecrets()
+			host.Configure(names, values, logger.With("pool", pc.Name))
+			if err := host.CleanupOrphans(); err != nil {
+				return fmt.Errorf("pool %s: recover host runner state: %w", pc.Name, err)
+			}
+		}
 
 		env, mounts := poolEnvAndMounts(cfg, pc, sharedEnv, gitMgr, logger)
 		image := pc.ImageRef()
@@ -884,21 +903,32 @@ func runQEMUHousekeeping(ctx context.Context, cfg *config.Config, logger *slog.L
 // runAutoscale runs the on-demand scaler (polling) plus an optional webhook
 // receiver (when webhook.listen is set and reachable from GitHub).
 func runAutoscale(ctx context.Context, cfg *config.Config, ghProvider github.ClientProvider, launchers []*pool.Launcher, logger *slog.Logger) error {
-	scaler := autoscale.New(launchers, ghProvider, cfg.GitHub.Scope, cfg.Webhook.PollIntervalSec, logger)
+	scaler := autoscale.New(ctx, launchers, ghProvider, cfg.GitHub.Scope, cfg.Webhook.PollIntervalSec, logger)
+	if err := scaler.EnsureImages(ctx); err != nil {
+		return err
+	}
 	if cfg.Webhook.Listen != "" {
 		if cfg.Webhook.Secret == "" {
 			logger.Warn("webhook listener has no secret; signatures will not be verified")
 		}
 		wh := webhook.New(cfg.Webhook.Listen, cfg.Webhook.Path, cfg.Webhook.Secret, scaler, logger)
+		runCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		errCh := make(chan error, 2)
 		go func() {
-			if err := wh.Start(ctx); err != nil {
-				logger.Error("webhook server error", "err", err)
-			}
+			errCh <- wh.Start(runCtx)
 		}()
+		go func() {
+			errCh <- scaler.RunPrepared(runCtx)
+		}()
+		first := <-errCh
+		cancel()
+		second := <-errCh
+		return errors.Join(first, second)
 	} else if cfg.GitHub.Scope != config.ScopeRepo && cfg.GitHub.Scope != config.ScopeRepos {
 		logger.Warn("autoscale without a webhook on non-repo scope cannot poll queued jobs; set webhook.listen (behind NAT use a tunnel) or use provisioning: pool")
 	}
-	return scaler.Run(ctx)
+	return scaler.RunPrepared(ctx)
 }
 
 // preparePool builds and validates a pool's backend, offering to install a
@@ -927,6 +957,8 @@ func preparePool(ctx context.Context, pc config.Pool, interactive, installDeps b
 			}
 		case pc.Backend == "containerd":
 			return nil, fmt.Errorf("pool %s: containerd unreachable at %s: %w (install with `multirunner install-containerd`)", pc.Name, pc.Containerd.Address, err)
+		case pc.Backend == "host":
+			return nil, fmt.Errorf("pool %s: host runner unavailable: %w", pc.Name, err)
 		default:
 			return nil, fmt.Errorf("pool %s: cannot reach docker daemon at %s: %w", pc.Name, pc.Docker.Host, err)
 		}
@@ -940,6 +972,13 @@ func preparePool(ctx context.Context, pc config.Pool, interactive, installDeps b
 }
 
 func newBackend(pc config.Pool) (backend.Backend, error) {
+	if pc.Backend == "host" {
+		return hostrunner.NewBackend(hostrunner.Options{
+			Pool: pc.Name, RunnerDir: pc.Host.RunnerDir, StateDir: pc.Host.StateDir,
+			RunnerVersion: pc.Host.RunnerVersion, RunnerSHA256: pc.Host.RunnerSHA256,
+			KeepWorkspace: pc.Host.KeepWorkspace, AllowLocalSystem: pc.Host.AllowLocalSystem,
+		})
+	}
 	if pc.Backend == "qemu" {
 		return winvm.NewBackend(winvm.Options{
 			Golden: pc.QEMU.Golden, WorkDir: pc.QEMU.WorkDir,
@@ -1372,7 +1411,7 @@ func runRepoChecks(
 // and rootless. Endpoints running the wrong container OS are still shown, marked
 // as such: seeing a Windows daemon is what explains a linux pool failing here.
 func discoveryHint(ctx context.Context, pc config.Pool) string {
-	if pc.Backend == "qemu" || pc.Backend == "containerd" {
+	if pc.Backend == "qemu" || pc.Backend == "containerd" || pc.Backend == "host" {
 		return ""
 	}
 	found := backend.DiscoverDockerHosts(ctx)

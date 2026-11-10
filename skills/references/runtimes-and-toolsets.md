@@ -11,6 +11,7 @@ tools. Don't change a backend merely because another runtime is installed.
 | Windows | `docker` or omitted | Ephemeral Windows container | `image`, or a Windows `image_tier` |
 | Windows | `containerd` | Ephemeral Windows container through runhcs | `image`, or a Windows `image_tier` |
 | Windows | `qemu` | Ephemeral overlay from a golden Windows guest | Tools baked into the golden image |
+| Windows | `host` | Ephemeral runner registration in the current user's host environment | Tools already installed and available to that user |
 
 An explicit `image` wins over `image_tier`. Published Linux tiers are `minimal`,
 `native-build`, `node`, `dotnet`, `rust`, and `go`. Published Windows tiers are
@@ -19,6 +20,12 @@ An explicit `image` wins over `image_tier`. Published Linux tiers are `minimal`,
 local `multirunner/runner-<os>-<tier>:dev` image, so select one only when that
 image is intentionally built and present. `multirunner detect --path <checkout>
 --os <linux-or-windows>` can recommend a container tier without mutation.
+
+The host backend has no image or tool tier. It intentionally exposes the
+current Windows user's installed tools and signed-in state to the job. Use
+`size: 1`, an exact trusted-workflow allowlist, and a dedicated runner/state
+directory pair per pool. Prefer running the service as that user; do not opt
+into LocalSystem execution merely to make a tool visible.
 
 ## QEMU golden tools
 

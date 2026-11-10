@@ -1,6 +1,6 @@
 ---
 name: multirunner-host
-description: Tune or upgrade an existing Multirunner host and its container pools. Use for approved host configuration and lifecycle changes; use multirunner-setup for a new host and multirunner-diagnose for read-only investigation.
+description: Tune or upgrade an existing Multirunner host and its container, VM, or direct-host pools. Use for approved host configuration and lifecycle changes; use multirunner-setup for a new host and multirunner-diagnose for read-only investigation.
 ---
 
 # Operate a Multirunner host
@@ -29,7 +29,7 @@ of truth:
 | Any key's type, default, or validation rule | "Complete key index" in [host configuration](../docs/host-configuration.md) |
 | A whole valid starting file per mode or backend | "Minimal complete configurations" in [host configuration](../docs/host-configuration.md) |
 | Per-pool `size`, `runner_group_id`, `max_consecutive_failures`, or `tool_cache` (inert unless `mode: shared-volume` and `volume` are both set) | "Common pool fields" and "Tool cache and Docker socket" in [host configuration](../docs/host-configuration.md) |
-| Container tier or host runtime choice | [Runtimes and toolsets](../references/runtimes-and-toolsets.md) |
+| Container tier, VM tools, or direct-host runtime choice | [Runtimes and toolsets](../references/runtimes-and-toolsets.md) |
 | Actions or Git cache | [Caching](../references/caching.md) |
 | Binary release or configured-image update | [Verified release](../references/verified-release.md) |
 | Reading service, `doctor`, metric, or log output | [Triage signals](../references/triage-signals.md) |
@@ -52,10 +52,18 @@ of truth:
   for every QEMU pool (possible headless rearm or rebuild), then pool by pool
   in YAML order, cleanup of top-level `*.qcow2`, `*.iso`, `*.vars.fd`, and
   `*.serial.log` files in that pool's `qemu.work_dir` followed by its
-  reachability preflight. Pool preparation
+  reachability preflight. A host pool may download the verified Actions runner
+  and recover a recorded interrupted process during this same preparation.
+  Pool preparation
   is all-or-nothing: one unreachable backend keeps every pool down. The
   default `work_dir` (OS temp plus `multirunner-vm`) is shared by every QEMU
   pool that omits it, so set one per pool.
+- Treat `backend: host` as code execution with the multirunner user's full
+  authority, not as an isolation option. Require `size: 1`, dedicated
+  runner/state paths, and an exact trusted-workflow allowlist. Prefer a service
+  identity matching the required user; never enable
+  `host.allow_unrestricted` or `host.allow_local_system` as a troubleshooting
+  shortcut.
 - A service stop/restart cancels the orchestrator and waits at most 20 seconds,
   so drain capacity first.
 - The Windows installers download binaries without checksum verification,

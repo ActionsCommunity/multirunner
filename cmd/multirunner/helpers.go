@@ -131,6 +131,11 @@ func poolEnvAndMounts(cfg *config.Config, pc config.Pool, shared map[string]stri
 	if gitMgr != nil && cfg.GitHub.Scope == config.ScopeRepo {
 		slug := cfg.GitHub.Owner + "/" + cfg.GitHub.Repo
 		switch {
+		case pc.Backend == "host":
+			// The job runs on the host, so it reads the mirror in place: no mount,
+			// and no bundle hook (that script only exists inside runner images).
+			env["MULTIRUNNER_GIT_MIRROR"] = gitMgr.MirrorPath(slug)
+			logger.Debug("git mirror shared in place", "pool", pc.Name, "repo", slug)
 		case cfg.GitCache.DotGit():
 			// dotgit-cache: serve the mirror as a bundle over the cache server +
 			// a job-started hook seeds the workspace. Works where mounts can't

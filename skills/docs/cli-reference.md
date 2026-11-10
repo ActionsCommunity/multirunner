@@ -65,13 +65,17 @@ Loads and validates configuration, prepares every backend, starts enabled cache
 and metrics services, starts the configured webhook receiver in
 `autoscale`/`webhook` mode, and maintains the configured ephemeral runner capacity.
 It creates runners and may pull images, create cache/mirror state, start servers,
-and perform configured QEMU golden housekeeping.
+perform configured QEMU golden housekeeping, or download and verify the pinned
+Actions runner for a direct Windows host pool. Host startup also recovers
+interrupted runner state before accepting work.
 
 `--dry-run` loads and validates the config and reports backend preparation,
 image pulls, cache/mirror state, listeners, runner registrations, scale-set
-updates, and QEMU cleanup or golden-housekeeping decisions without performing
-them. It does not contact GitHub or runtimes and is a plan, not a health check;
-use the read-only `doctor` command for current-state validation.
+updates, QEMU cleanup or golden-housekeeping decisions, and each host pool's
+direct-user authority and allowlist state without performing them. It does not
+contact GitHub or runtimes, download a host runner, or recover host processes.
+It is a plan, not a health check; use the read-only `doctor` command for
+current-state validation.
 
 `--install-deps` is deliberately narrow despite its broad help text: it only
 auto-installs the standalone Windows Docker daemon when an unreachable pool is
@@ -100,7 +104,10 @@ is enabled; that git audit never fails preflight. All pool pings share one
 stats the golden file (no `MR:GOLDEN_OK`, metadata, accelerator, or disk
 check) without cleaning `qemu.work_dir`; orphan cleanup occurs only when the
 orchestrator starts. It does not hash `qemu.bake_iso`; `run --dry-run` and
-real startup do.
+real startup do. For host pools it validates Windows/current-user policy and
+checks that the configured runner and state paths have a reachable directory
+ancestor. It does not create those directories, download the runner, inspect
+old PID records, or perform crash recovery.
 
 ### `connect`
 

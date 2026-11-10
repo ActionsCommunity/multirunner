@@ -20,6 +20,9 @@ diagnosing. All come from the current source; redact values before sharing.
 - `run --dry-run` and startup print config warnings such as
   `github.repo is ignored when scope=repos` and
   `pool "<name>": backend=qemu ignores image/image_tier`.
+- A host pool under the default Windows service identity fails with
+  `refusing to run jobs as NT AUTHORITY\SYSTEM`; configure the service to run
+  as the intended user rather than enabling unrestricted SYSTEM execution.
 
 ## `doctor`
 
@@ -41,6 +44,9 @@ diagnosing. All come from the current source; redact values before sharing.
 - For a QEMU pool it only locates `qemu-system-x86_64`/`qemu-img` and stats the
   golden file. It does not read `MR:GOLDEN_OK`, `<golden>.meta.json`, the NVRAM
   sidecar, work-directory writability, free disk, or the accelerator.
+- For a host pool it checks backend construction and that the configured
+  runner/state paths have a reachable directory ancestor. It does not create
+  directories, download the runner, inspect old PID records, or recover them.
 - With `qemu.bake_iso` configured, `run --dry-run` and real startup hash the
   whole ISO (`doctor` does not); a multi-GB read can take minutes and a digest
   mismatch fails the command.
@@ -102,6 +108,12 @@ diagnosing. All come from the current source; redact values before sharing.
 - Runner lifecycle: `runner launched`, `runner exited exit_code=<n>`,
   `deregister runner failed`, and `runner still busy after failed kill; keeping
   registration`, which explains orphaned GitHub registrations.
+- Host-specific failures include `runner exited without running a job` (the
+  listener never accepted work, even if `run.cmd` exited 0),
+  `host runner cleanup incomplete; the next launch retries it`, and
+  `recover host runner state`. Per-job `<runner>.log` and archived
+  `<runner>.diag` directories live under the configured host `state_dir`; the
+  newest 20 of each are retained.
 
 ## Cache and git cache
 

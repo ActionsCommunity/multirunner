@@ -9,8 +9,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"time"
 
@@ -36,16 +39,31 @@ func New(listen, path, secret string, scaler *autoscale.Scaler, logger *slog.Log
 
 // Start runs the server until ctx is cancelled.
 func (s *Server) Start(ctx context.Context) error {
+	listener, err := net.Listen("tcp", s.srv.Addr)
+	if err != nil {
+		return fmt.Errorf("listen on %s: %w", s.srv.Addr, err)
+	}
+	errCh := make(chan error, 1)
 	go func() {
-		s.logger.Info("webhook listening", "addr", s.srv.Addr)
-		if err := s.srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			s.logger.Error("webhook server stopped", "err", err)
-		}
+		s.logger.Info("webhook listening", "addr", listener.Addr().String())
+		errCh <- s.srv.Serve(listener)
 	}()
-	<-ctx.Done()
-	shutCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-	defer cancel()
-	return s.srv.Shutdown(shutCtx)
+	select {
+	case err := <-errCh:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return fmt.Errorf("serve webhook: %w", err)
+	case <-ctx.Done():
+		shutCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		shutdownErr := s.srv.Shutdown(shutCtx)
+		serveErr := <-errCh
+		if errors.Is(serveErr, http.ErrServerClosed) {
+			serveErr = nil
+		}
+		return errors.Join(shutdownErr, serveErr)
+	}
 }
 
 func (s *Server) handle(w http.ResponseWriter, r *http.Request) {

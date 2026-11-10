@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	imageversions "github.com/GerardSmit/multirunner/images"
+	"github.com/GerardSmit/multirunner/internal/hostrunner"
 	"github.com/GerardSmit/multirunner/internal/winvm"
 	"gopkg.in/yaml.v3"
 )
@@ -61,6 +62,10 @@ type Config struct {
 	Metrics      Metrics      `yaml:"metrics"`
 	Pools        []Pool       `yaml:"pools"`
 	Log          Log          `yaml:"log"`
+
+	// secretEnvNames are variables multirunner itself consumes (loaded from
+	// .env or referenced as ${VAR}); see RunnerEnvSecrets.
+	secretEnvNames []string
 }
 
 // Webhook configures the workflow_job webhook receiver (provisioning: webhook).
@@ -191,12 +196,13 @@ type Cache struct {
 type Pool struct {
 	Name                   string          `yaml:"name"`
 	OS                     string          `yaml:"os"`      // linux | windows
-	Backend                string          `yaml:"backend"` // docker (default) | containerd | qemu
+	Backend                string          `yaml:"backend"` // docker (default) | containerd | qemu | host
 	Size                   int             `yaml:"size"`
 	ImageTier              string          `yaml:"image_tier"`
 	Image                  string          `yaml:"image"`
 	Container              ContainerConfig `yaml:"container"`
 	QEMU                   QEMU            `yaml:"qemu"`
+	Host                   Host            `yaml:"host"`
 	Containerd             Containerd      `yaml:"containerd"`
 	RunnerGroupID          int64           `yaml:"runner_group_id"`
 	Labels                 []string        `yaml:"labels"`
@@ -386,7 +392,7 @@ const maxLocalImageTierLength = 64
 // names no pool and wastes a JIT runner registration. An unknown tier that is
 // valid keeps falling back to a local build — a supported dev workflow.
 func (p Pool) validateImageTier() error {
-	if p.Image != "" || p.Backend == "qemu" {
+	if p.Image != "" || p.Backend == "qemu" || p.Backend == "host" {
 		return nil
 	}
 	tier := p.ImageTier
@@ -435,6 +441,23 @@ type QEMU struct {
 	Licensed      bool     `yaml:"licensed"`        // real key/KMS -> skip eval housekeeping
 	Tools         []string `yaml:"tools"`           // golden selectors: dotnet[:major] | node[:major] | go | buildtools[:line]
 }
+
+// Host configures the host backend, which runs the runner directly on this
+// machine as the user multirunner runs as. Jobs get that user's full access,
+// so a host pool must be bound to an allowlisted workflow tuple unless
+// AllowUnrestricted says otherwise.
+type Host struct {
+	RunnerDir         string `yaml:"runner_dir"`         // extracted runner (default %LOCALAPPDATA%\multirunner\host\<pool>\runner)
+	StateDir          string `yaml:"state_dir"`          // records + per-job logs (default %LOCALAPPDATA%\multirunner\host\<pool>\state)
+	RunnerVersion     string `yaml:"runner_version"`     // "" = image manifest version
+	RunnerSHA256      string `yaml:"runner_sha256"`      // required with a non-default runner_version
+	KeepWorkspace     bool   `yaml:"keep_workspace"`     // keep the job work folder (debugging only)
+	AllowUnrestricted bool   `yaml:"allow_unrestricted"` // run any job routed to this pool, not just allowlisted workflows
+	AllowLocalSystem  bool   `yaml:"allow_local_system"` // permit jobs to run as NT AUTHORITY\SYSTEM
+}
+
+// knownBackends are the accepted pool backend names; "" means docker.
+var knownBackends = map[string]bool{"": true, "docker": true, "containerd": true, "qemu": true, "host": true}
 
 // Containerd configures the containerd/runhcs Windows-container backend. The
 // runner is launched via nerdctl; isolation auto-detects (process on Server,
@@ -488,13 +511,14 @@ func Load(path string) (*Config, error) {
 	}
 	// Load .env (config dir, then CWD) so ${VAR} refs resolve without an explicit
 	// export. Real environment variables always take precedence.
-	loadDotEnv(filepath.Dir(path))
+	dotEnvKeys := loadDotEnv(filepath.Dir(path))
 	var c Config
 	dec := yaml.NewDecoder(strings.NewReader(string(data)))
 	dec.KnownFields(true)
 	if err := dec.Decode(&c); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
+	c.secretEnvNames = append(c.secretEnvNames, dotEnvKeys...)
 	c.resolveSecrets()
 	c.applyDefaults()
 	if err := c.Validate(); err != nil {
@@ -506,11 +530,37 @@ func Load(path string) (*Config, error) {
 // resolveSecrets expands ${VAR} / $VAR references in sensitive fields so secrets
 // can be supplied via environment variables instead of being written to disk.
 func (c *Config) resolveSecrets() {
-	c.Auth.PAT = expandEnvRef(c.Auth.PAT)
-	c.Auth.PrivateKeyPath = expandEnvRef(c.Auth.PrivateKeyPath)
-	c.Auth.TokenPath = expandEnvRef(c.Auth.TokenPath)
-	c.Webhook.Secret = expandEnvRef(c.Webhook.Secret)
-	c.Cache.AccessToken = expandEnvRef(c.Cache.AccessToken)
+	for _, field := range []*string{
+		&c.Auth.PAT, &c.Auth.PrivateKeyPath, &c.Auth.TokenPath,
+		&c.Webhook.Secret, &c.Cache.AccessToken,
+	} {
+		if name := envRefName(*field); name != "" {
+			c.secretEnvNames = append(c.secretEnvNames, name)
+		}
+		*field = expandEnvRef(*field)
+	}
+}
+
+// RunnerEnvSecrets lists what must never reach a runner that inherits
+// multirunner's own environment (the host backend): every variable loaded from
+// .env or referenced as ${VAR} by the config, and the resolved secret values,
+// whatever variable they arrive in.
+func (c *Config) RunnerEnvSecrets() (names, values []string) {
+	names = append(names, c.secretEnvNames...)
+	for _, v := range []string{c.Auth.PAT, c.Webhook.Secret, c.Cache.AccessToken} {
+		if v != "" {
+			values = append(values, v)
+		}
+	}
+	return names, values
+}
+
+// envRefName returns NAME for a "${NAME}" or "$NAME" value, else "".
+func envRefName(v string) string {
+	if !strings.HasPrefix(v, "$") {
+		return ""
+	}
+	return strings.TrimSuffix(strings.TrimPrefix(strings.TrimPrefix(v, "$"), "{"), "}")
 }
 
 // expandEnvRef resolves a value of the form "${NAME}" or "$NAME" to the named
@@ -639,6 +689,11 @@ func (c *Config) Warnings() []string {
 	}
 	for i := range c.Pools {
 		p := &c.Pools[i]
+		if strings.HasPrefix(p.WorkflowRef, "refs/") {
+			w = append(w, fmt.Sprintf(
+				"pool %q: workflow_ref %q will never match; it is compared with the run's head_branch (e.g. %q)",
+				p.Name, p.WorkflowRef, strings.TrimPrefix(strings.TrimPrefix(p.WorkflowRef, "refs/heads/"), "refs/")))
+		}
 		if p.Backend == "qemu" && (p.Image != "" || (p.ImageTier != "" && p.ImageTier != "minimal")) {
 			w = append(w, fmt.Sprintf(
 				"pool %q: backend=qemu ignores image/image_tier (it boots the baked golden image); "+
@@ -750,7 +805,19 @@ func (c *Config) Validate() error {
 		if p.OS != "linux" && p.OS != "windows" {
 			return fmt.Errorf("pools[%q].os must be linux|windows, got %q", p.Name, p.OS)
 		}
-		if p.Backend == "qemu" {
+		if !knownBackends[p.Backend] {
+			return fmt.Errorf("pools[%q].backend must be docker|containerd|qemu|host, got %q", p.Name, p.Backend)
+		}
+		if p.Backend == "host" {
+			if err := c.validateHostPool(p); err != nil {
+				return err
+			}
+		} else if p.Host != (Host{}) {
+			return fmt.Errorf("pools[%q].host settings require backend: host", p.Name)
+		}
+		if p.Backend == "host" {
+			// No daemon, image or container: validated above.
+		} else if p.Backend == "qemu" {
 			if p.QEMU.Golden == "" {
 				return fmt.Errorf("pools[%q].qemu.golden is required for backend: qemu", p.Name)
 			}
@@ -860,6 +927,41 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	// Host pools run one job at a time per install. Equal, aliased or nested
+	// runner/state paths can let one pool run over or delete another pool's
+	// state. Compare the directories each pool really uses (defaults resolved
+	// from the pool name) the way NTFS does, case-insensitively.
+	type hostDirUse struct {
+		key  string
+		path string
+		pool string
+	}
+	var hostDirs []hostDirUse
+	for _, p := range c.Pools {
+		if p.Backend != "host" {
+			continue
+		}
+		defaultRunner, defaultState := hostrunner.DefaultDirs(p.Name)
+		runnerDir, stateDir := p.Host.RunnerDir, p.Host.StateDir
+		if runnerDir == "" {
+			runnerDir = defaultRunner
+		}
+		if stateDir == "" {
+			stateDir = defaultState
+		}
+		for _, dir := range []string{runnerDir, stateDir} {
+			key := windowsPathKey(dir)
+			for _, previous := range hostDirs {
+				if windowsPathsOverlap(previous.key, key) {
+					return fmt.Errorf("pools[%q] and pools[%q] share host directory space %q and %q; "+
+						"give each host pool non-overlapping runner_dir/state_dir paths",
+						previous.pool, p.Name, previous.path, dir)
+				}
+			}
+			hostDirs = append(hostDirs, hostDirUse{key: key, path: dir, pool: p.Name})
+		}
+	}
+
 	sharedWorkspaces := make(map[string]string)
 	for _, p := range c.Pools {
 		if !p.Docker.ShareWorkspace {
@@ -883,6 +985,101 @@ func (c *Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+// validateHostPool keeps the host backend to what it can do safely: one job at a
+// time on a Windows host, with nothing container-shaped configured, and only
+// for allowlisted workflows unless the operator explicitly opts out.
+func (c *Config) validateHostPool(p *Pool) error {
+	switch {
+	case p.OS != "windows":
+		return fmt.Errorf("pools[%q]: backend: host supports os: windows only", p.Name)
+	case p.Size != 1:
+		return fmt.Errorf("pools[%q]: backend: host requires size: 1 (jobs share one runner install)", p.Name)
+	case p.Image != "" || (p.ImageTier != "" && p.ImageTier != "minimal"):
+		return fmt.Errorf("pools[%q]: backend: host has no image; remove image/image_tier", p.Name)
+	case p.Docker != (Docker{}):
+		return fmt.Errorf("pools[%q]: backend: host does not use docker settings", p.Name)
+	case p.Container.configured():
+		return fmt.Errorf("pools[%q]: backend: host does not support container settings", p.Name)
+	case p.ToolCache.Mode != "" && p.ToolCache.Mode != "off":
+		return fmt.Errorf("pools[%q]: backend: host uses the host's tool cache; remove tool_cache", p.Name)
+	case !hostrunner.ValidWorkFolder(p.WorkFolder):
+		return fmt.Errorf("pools[%q].work_folder must be one safe relative directory name that does not collide with the host runner install", p.Name)
+	case p.Host.RunnerVersion != "" && p.Host.RunnerSHA256 == "":
+		return fmt.Errorf("pools[%q].host.runner_sha256 is required with host.runner_version", p.Name)
+	case len(p.Workflows) == 0 && !p.Host.AllowUnrestricted:
+		return fmt.Errorf("pools[%q]: backend: host runs jobs with this user's full access; "+
+			"bind it to repository + workflows (provisioning: autoscale) or set host.allow_unrestricted: true", p.Name)
+	}
+	for _, dir := range []string{p.Host.RunnerDir, p.Host.StateDir} {
+		if dir != "" && !windowsAbsPath(dir) {
+			return fmt.Errorf("pools[%q].host directories must be absolute paths, got %q", p.Name, dir)
+		}
+	}
+	return nil
+}
+
+// windowsAbsPath reports whether p is an absolute Windows path (drive or UNC).
+// Host pools are Windows-only, but config is also validated on other OSes,
+// where filepath.IsAbs would reject C:\ paths.
+func windowsAbsPath(p string) bool {
+	if len(p) >= 3 && p[1] == ':' && (p[2] == '\\' || p[2] == '/') &&
+		((p[0] >= 'a' && p[0] <= 'z') || (p[0] >= 'A' && p[0] <= 'Z')) {
+		return true
+	}
+	if !strings.HasPrefix(p, `\\`) {
+		return false
+	}
+	return len(strings.FieldsFunc(p, func(r rune) bool { return r == '\\' || r == '/' })) >= 2
+}
+
+// windowsPathKey normalizes a rooted Windows path on any OS, including dot
+// segments that filepath.Clean would not recognize on Unix.
+func windowsPathKey(p string) string {
+	p = strings.ReplaceAll(p, "/", `\`)
+	var prefix string
+	var parts []string
+	switch {
+	case len(p) >= 2 && p[1] == ':':
+		prefix = strings.ToLower(p[:2])
+		parts = strings.Split(strings.TrimLeft(p[2:], `\`), `\`)
+	case strings.HasPrefix(p, `\\`):
+		all := strings.FieldsFunc(p, func(r rune) bool { return r == '\\' })
+		if len(all) >= 2 {
+			prefix = `\\` + strings.ToLower(all[0]) + `\` + strings.ToLower(all[1])
+			parts = all[2:]
+		}
+	default:
+		parts = strings.Split(p, `\`)
+	}
+	clean := make([]string, 0, len(parts))
+	for _, part := range parts {
+		switch part {
+		case "", ".":
+			continue
+		case "..":
+			if len(clean) != 0 {
+				clean = clean[:len(clean)-1]
+			}
+		default:
+			part = strings.ToLower(strings.TrimRight(part, " ."))
+			if part != "" {
+				clean = append(clean, part)
+			}
+		}
+	}
+	if len(clean) == 0 {
+		return prefix
+	}
+	if prefix == "" {
+		return strings.Join(clean, `\`)
+	}
+	return prefix + `\` + strings.Join(clean, `\`)
+}
+
+func windowsPathsOverlap(a, b string) bool {
+	return a == b || strings.HasPrefix(a, b+`\`) || strings.HasPrefix(b, a+`\`)
 }
 
 func validateContainerConfig(p *Pool) error {
