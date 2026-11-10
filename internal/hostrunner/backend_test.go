@@ -78,8 +78,10 @@ type identityErrorProcessOps struct{ err error }
 
 func (p identityErrorProcessOps) start(*exec.Cmd) (processGroup, error) { return nil, p.err }
 func (identityErrorProcessOps) alive(int) (bool, error)                 { return true, nil }
-func (p identityErrorProcessOps) startTime(int) (int64, error)          { return 0, p.err }
-func (p identityErrorProcessOps) killTree(int) error                    { return p.err }
+func (p identityErrorProcessOps) identify(int) (processIdentity, bool, error) {
+	return processIdentity{}, false, p.err
+}
+func (p identityErrorProcessOps) killTree(int) error { return p.err }
 
 func TestRemoveOwnedRunnerPreservesRecordWhenIdentityLookupFails(t *testing.T) {
 	dir := t.TempDir()
@@ -89,7 +91,7 @@ func TestRemoveOwnedRunnerPreservesRecordWhenIdentityLookupFails(t *testing.T) {
 			StateDir:  filepath.Join(dir, "state"),
 			Pool:      "pool",
 		},
-		proc: identityErrorProcessOps{err: errors.New("access denied")},
+		proc: identityErrorProcessOps{err: errors.New("system process query failed")},
 	}
 	if err := os.MkdirAll(b.opt.StateDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -101,7 +103,7 @@ func TestRemoveOwnedRunnerPreservesRecordWhenIdentityLookupFails(t *testing.T) {
 	recordPath := filepath.Join(b.opt.StateDir, resourceID)
 	if err := writeRunnerRecord(recordPath, runnerRecord{
 		Name: "runner", Ownership: ownership, Root: b.runnerRoot(), WorkFolder: "_work",
-		PID: 1234, StartTime: 5678, Started: true,
+		PID: 1234, StartTime: 5678, ImageName: "cmd.exe", Started: true,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -112,6 +114,25 @@ func TestRemoveOwnedRunnerPreservesRecordWhenIdentityLookupFails(t *testing.T) {
 	}
 	if _, err := os.Stat(recordPath); err != nil {
 		t.Fatalf("retry record was removed after an inconclusive identity check: %v", err)
+	}
+}
+
+func TestMatchesRunnerIdentity(t *testing.T) {
+	actual := processIdentity{startTime: 100, imageName: "cmd.exe"}
+	if !matchesRunnerIdentity(runnerRecord{StartTime: 100, ImageName: "cmd.exe"}, actual) {
+		t.Fatal("exact match should succeed")
+	}
+	if !matchesRunnerIdentity(runnerRecord{StartTime: 100, ImageName: "CMD.EXE"}, actual) {
+		t.Fatal("case-insensitive image match should succeed")
+	}
+	if !matchesRunnerIdentity(runnerRecord{StartTime: 100}, actual) {
+		t.Fatal("legacy record without ImageName should still match on StartTime")
+	}
+	if matchesRunnerIdentity(runnerRecord{StartTime: 200, ImageName: "cmd.exe"}, actual) {
+		t.Fatal("different StartTime must not match")
+	}
+	if matchesRunnerIdentity(runnerRecord{StartTime: 100, ImageName: "AdobeUpdateService.exe"}, actual) {
+		t.Fatal("different ImageName must not match")
 	}
 }
 

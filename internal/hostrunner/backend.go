@@ -77,13 +77,18 @@ var (
 	_ backend.OwnedRunnerStore = (*Backend)(nil)
 )
 
+type processIdentity struct {
+	startTime int64
+	imageName string
+}
+
 // processOps is the platform process control the backend needs; tests replace it.
 type processOps interface {
 	// start starts cmd so that kill() terminates its whole process tree.
 	start(cmd *exec.Cmd) (processGroup, error)
 	alive(pid int) (bool, error)
-	// startTime identifies a process across PID reuse (0 when unknown).
-	startTime(pid int) (int64, error)
+	// identify identifies a running process across PID reuse without opening it.
+	identify(pid int) (id processIdentity, found bool, err error)
 	killTree(pid int) error
 }
 
@@ -362,14 +367,18 @@ func (b *Backend) Launch(ctx context.Context, req backend.LaunchRequest) (backen
 	}
 	record.Started = true
 	record.PID = cmd.Process.Pid
-	// Recovery only kills a PID whose start time still matches, so a runner
-	// without a known identity is not allowed to run at all.
-	started, err := b.proc.startTime(record.PID)
-	if err == nil && started == 0 {
-		err = errors.New("start time is zero")
+	// Recovery only kills a PID whose start time and image name still match, so
+	// a runner without a known identity is not allowed to run at all.
+	identity, found, err := b.proc.identify(record.PID)
+	if err == nil && !found {
+		err = errors.New("process is not in the system process table")
+	}
+	if err == nil && (identity.startTime == 0 || identity.imageName == "") {
+		err = errors.New("process identity is incomplete")
 	}
 	if err == nil {
-		record.StartTime = started
+		record.StartTime = identity.startTime
+		record.ImageName = identity.imageName
 		err = writeRunnerRecord(recordPath, record)
 	}
 	if err != nil {
@@ -617,6 +626,7 @@ type runnerRecord struct {
 	Log        string                  `json:"log"`
 	PID        int                     `json:"pid,omitempty"`
 	StartTime  int64                   `json:"startTime,omitempty"`
+	ImageName  string                  `json:"imageName,omitempty"`
 	Started    bool                    `json:"started"`
 }
 
@@ -691,19 +701,21 @@ func (b *Backend) removeRunner(ctx context.Context, recordPath string, record ru
 				return fmt.Errorf("host runner %s: PID %d is alive but its identity was never recorded; "+
 					"refusing to kill it (stop it by hand, then delete %s)", record.Name, record.PID, recordPath)
 			}
-			started, err := b.proc.startTime(record.PID)
+			identity, found, err := b.proc.identify(record.PID)
 			if err != nil {
 				return fmt.Errorf("host runner %s: identify live PID %d: %w", record.Name, record.PID, err)
 			}
-			if started == 0 {
-				return fmt.Errorf("host runner %s: live PID %d has no process start time; refusing cleanup", record.Name, record.PID)
-			}
-			if started == record.StartTime {
-				if err := b.proc.killTree(record.PID); err != nil {
-					return fmt.Errorf("stop host runner %s: %w", record.Name, err)
+			if found {
+				if identity.startTime == 0 {
+					return fmt.Errorf("host runner %s: live PID %d has no process start time; refusing cleanup", record.Name, record.PID)
 				}
-				if err := waitForExit(ctx, record.PID, b.proc.alive); err != nil {
-					return fmt.Errorf("wait for host runner %s: %w", record.Name, err)
+				if matchesRunnerIdentity(record, identity) {
+					if err := b.proc.killTree(record.PID); err != nil {
+						return fmt.Errorf("stop host runner %s: %w", record.Name, err)
+					}
+					if err := waitForExit(ctx, record.PID, b.proc.alive); err != nil {
+						return fmt.Errorf("wait for host runner %s: %w", record.Name, err)
+					}
 				}
 			}
 		}
@@ -718,6 +730,16 @@ func (b *Backend) removeRunner(ctx context.Context, recordPath string, record ru
 		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
+}
+
+func matchesRunnerIdentity(record runnerRecord, actual processIdentity) bool {
+	if record.StartTime == 0 || actual.startTime != record.StartTime {
+		return false
+	}
+	if record.ImageName != "" && !strings.EqualFold(actual.imageName, record.ImageName) {
+		return false
+	}
+	return true
 }
 
 func waitForExit(ctx context.Context, pid int, alive func(int) (bool, error)) error {

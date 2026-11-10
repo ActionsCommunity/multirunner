@@ -133,21 +133,84 @@ func (windowsProcessOps) alive(pid int) (bool, error) {
 	return code == stillActive, nil
 }
 
-func (windowsProcessOps) startTime(pid int) (int64, error) {
+// identify reads a running process's creation time and image name from
+// NtQuerySystemInformation(SystemProcessInformation) so PID reuse recovery works
+// even when the PID now belongs to a process OpenProcess cannot open.
+func (windowsProcessOps) identify(pid int) (processIdentity, bool, error) {
 	id, err := processID(pid)
 	if err != nil {
-		return 0, err
+		return processIdentity{}, false, err
 	}
-	handle, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, id)
+	buf, err := querySystemProcessInformation()
 	if err != nil {
-		return 0, err
+		return processIdentity{}, false, err
 	}
-	defer windows.CloseHandle(handle)
-	var created, exited, kernel, user windows.Filetime
-	if err := windows.GetProcessTimes(handle, &created, &exited, &kernel, &user); err != nil {
-		return 0, err
+	offset := 0
+	for {
+		if offset+int(unsafe.Sizeof(windows.SYSTEM_PROCESS_INFORMATION{})) > len(buf) {
+			return processIdentity{}, false, errors.New("truncated SYSTEM_PROCESS_INFORMATION buffer")
+		}
+		// #nosec G103 -- walking the variable-length SYSTEM_PROCESS_INFORMATION list returned by NtQuerySystemInformation.
+		spi := (*windows.SYSTEM_PROCESS_INFORMATION)(unsafe.Pointer(&buf[offset]))
+		if spi.UniqueProcessID == uintptr(id) {
+			return processIdentity{
+				startTime: filetimeNanoseconds(spi.CreateTime),
+				imageName: spi.ImageName.String(),
+			}, true, nil
+		}
+		if spi.NextEntryOffset == 0 {
+			return processIdentity{}, false, nil
+		}
+		next := offset + int(spi.NextEntryOffset)
+		if next <= offset || next > len(buf) {
+			return processIdentity{}, false, errors.New("invalid SYSTEM_PROCESS_INFORMATION offset")
+		}
+		offset = next
 	}
-	return created.Nanoseconds(), nil
+}
+
+func querySystemProcessInformation() ([]byte, error) {
+	size := uint32(256 * 1024)
+	for attempt := 0; attempt < 8; attempt++ {
+		words := make([]uint64, (int(size)+7)/8)
+		// #nosec G103 -- 8-byte-aligned backing buffer for SYSTEM_PROCESS_INFORMATION.
+		buf := unsafe.Slice((*byte)(unsafe.Pointer(&words[0])), len(words)*8)
+		var needed uint32
+		err := windows.NtQuerySystemInformation(
+			windows.SystemProcessInformation,
+			// #nosec G103 -- passing output buffer to NtQuerySystemInformation.
+			unsafe.Pointer(&buf[0]),
+			uint32(len(buf)),
+			&needed,
+		)
+		if err == nil {
+			if needed > 0 && int(needed) <= len(buf) {
+				return buf[:needed], nil
+			}
+			return buf, nil
+		}
+		if !errors.Is(err, windows.STATUS_INFO_LENGTH_MISMATCH) {
+			return nil, fmt.Errorf("NtQuerySystemInformation: %w", err)
+		}
+		if needed > size {
+			size = needed + 64*1024
+		} else {
+			size *= 2
+		}
+	}
+	return nil, errors.New("NtQuerySystemInformation: process table kept growing")
+}
+
+func filetimeNanoseconds(createTime int64) int64 {
+	if createTime <= 0 {
+		return 0
+	}
+	// #nosec G115 -- splitting a 64-bit Windows FILETIME into low and high 32-bit words.
+	ft := windows.Filetime{
+		LowDateTime:  uint32(uint64(createTime)),
+		HighDateTime: uint32(uint64(createTime) >> 32),
+	}
+	return ft.Nanoseconds()
 }
 
 // killTree is the restart-recovery path, when the Job Object handle died with

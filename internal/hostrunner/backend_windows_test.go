@@ -4,6 +4,7 @@ package hostrunner
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -14,8 +15,10 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/GerardSmit/multirunner/internal/backend"
+	"golang.org/x/sys/windows"
 )
 
 // tookJob is what a fake run.cmd prints so the backend sees a job was run.
@@ -81,6 +84,28 @@ func hiddenReadOnly(t *testing.T, path string) {
 	p, _ := syscall.UTF16PtrFromString(path)
 	if err := syscall.SetFileAttributes(p, syscall.FILE_ATTRIBUTE_HIDDEN|syscall.FILE_ATTRIBUTE_READONLY); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestIdentifyMatchesGetProcessTimes(t *testing.T) {
+	pid := os.Getpid()
+	identity, found, err := windowsProcessOps{}.identify(pid)
+	if err != nil {
+		t.Fatalf("identify(%d): %v", pid, err)
+	}
+	if !found {
+		t.Fatalf("identify(%d) did not find current process", pid)
+	}
+	var created, exited, kernel, user windows.Filetime
+	if err := windows.GetProcessTimes(windows.CurrentProcess(), &created, &exited, &kernel, &user); err != nil {
+		t.Fatalf("GetProcessTimes: %v", err)
+	}
+	if identity.startTime != created.Nanoseconds() {
+		t.Fatalf("SystemProcessInformation CreateTime = %d, want GetProcessTimes %d", identity.startTime, created.Nanoseconds())
+	}
+	wantImage := filepath.Base(os.Args[0])
+	if identity.imageName == "" || !strings.EqualFold(identity.imageName, wantImage) {
+		t.Fatalf("SystemProcessInformation ImageName = %q, want %q", identity.imageName, wantImage)
 	}
 }
 
@@ -213,12 +238,12 @@ func TestCleanupOrphansRecoversAfterACrashMidJob(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer orphan.Process.Kill()
-	started, err := b.proc.startTime(orphan.Process.Pid)
-	if err != nil {
-		t.Fatal(err)
+	identity, found, err := b.proc.identify(orphan.Process.Pid)
+	if err != nil || !found {
+		t.Fatalf("identify orphan %d: found=%v err=%v", orphan.Process.Pid, found, err)
 	}
 	record := runnerRecord{Name: "job-1", Root: root, WorkFolder: "_work",
-		PID: orphan.Process.Pid, StartTime: started, Started: true}
+		PID: orphan.Process.Pid, StartTime: identity.startTime, ImageName: identity.imageName, Started: true}
 	if err := writeRunnerRecord(filepath.Join(b.opt.StateDir, "job-1.runner.json"), record); err != nil {
 		t.Fatal(err)
 	}
@@ -239,6 +264,92 @@ func TestCleanupOrphansRecoversAfterACrashMidJob(t *testing.T) {
 	}
 }
 
+func TestCleanupOrphansSkipsReusedInaccessibleOrDifferentPID(t *testing.T) {
+	b := fakeRunner(t, `exit /b 0`)
+	root := b.runnerRoot()
+
+	// Prefer a live PID on this machine that OpenProcess rejects with
+	// ERROR_ACCESS_DENIED (reproducing a reboot/crash where a service reused
+	// the runner's PID); fall back to os.Getpid() when running elevated.
+	reusedPID := findInaccessibleLivePID(t)
+	if reusedPID == 0 {
+		reusedPID = os.Getpid()
+	}
+	actual, found, err := b.proc.identify(reusedPID)
+	if err != nil || !found || actual.startTime == 0 {
+		t.Fatalf("identify(%d) = %+v, found=%v, err=%v", reusedPID, actual, found, err)
+	}
+
+	recordPath := filepath.Join(b.opt.StateDir, "job-reused.runner.json")
+	record := runnerRecord{
+		Name: "job-reused", Root: root, WorkFolder: "_work",
+		PID: reusedPID, StartTime: actual.startTime - 1, ImageName: "cmd.exe", Started: true,
+	}
+	if err := writeRunnerRecord(recordPath, record); err != nil {
+		t.Fatal(err)
+	}
+	hiddenReadOnly(t, filepath.Join(root, ".credentials"))
+	if err := os.MkdirAll(filepath.Join(root, "_work", "repo"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := b.CleanupOrphans(); err != nil {
+		t.Fatalf("CleanupOrphans failed on reused PID %d (%s): %v", reusedPID, actual.imageName, err)
+	}
+	if exists(recordPath) || exists(filepath.Join(root, ".credentials")) || exists(filepath.Join(root, "_work")) {
+		t.Fatal("reused PID record and stale workspace should be cleaned up without killing the process")
+	}
+
+	// Even if StartTime matched, a different ImageName proves PID reuse and
+	// must not kill the process.
+	selfID, found, err := b.proc.identify(os.Getpid())
+	if err != nil || !found {
+		t.Fatalf("identify self: found=%v err=%v", found, err)
+	}
+	if err := writeRunnerRecord(recordPath, runnerRecord{
+		Name: "job-reused", Root: root, WorkFolder: "_work",
+		PID: os.Getpid(), StartTime: selfID.startTime, ImageName: "not-" + selfID.imageName, Started: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.CleanupOrphans(); err != nil {
+		t.Fatalf("CleanupOrphans with mismatched ImageName failed: %v", err)
+	}
+	if exists(recordPath) {
+		t.Fatal("record with mismatched ImageName should be removed")
+	}
+}
+
+func findInaccessibleLivePID(t *testing.T) int {
+	t.Helper()
+	buf, err := querySystemProcessInformation()
+	if err != nil {
+		t.Fatalf("querySystemProcessInformation: %v", err)
+	}
+	offset := 0
+	for {
+		if offset+int(unsafe.Sizeof(windows.SYSTEM_PROCESS_INFORMATION{})) > len(buf) {
+			break
+		}
+		spi := (*windows.SYSTEM_PROCESS_INFORMATION)(unsafe.Pointer(&buf[offset]))
+		pid := int(spi.UniqueProcessID)
+		if pid > 4 && spi.CreateTime > 0 && spi.ImageName.String() != "" {
+			h, openErr := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+			if h != 0 {
+				_ = windows.CloseHandle(h)
+			}
+			if errors.Is(openErr, windows.ERROR_ACCESS_DENIED) {
+				return pid
+			}
+		}
+		if spi.NextEntryOffset == 0 {
+			break
+		}
+		offset += int(spi.NextEntryOffset)
+	}
+	return 0
+}
+
 func TestRecoveryRefusesToKillAnUnidentifiedPID(t *testing.T) {
 	b := fakeRunner(t, `exit /b 0`)
 	record := runnerRecord{Name: "job-1", Root: b.runnerRoot(), WorkFolder: "_work",
@@ -257,7 +368,7 @@ func TestRemoveOwnedRunnerSkipsReusedPID(t *testing.T) {
 	own := backend.RunnerOwnership{Instance: "i", Target: "acme/site", Pool: "sync", ScaleSetID: 1, RunnerID: 7}
 	record := runnerRecord{
 		Name: "job-1", Ownership: own, Root: b.runnerRoot(), WorkFolder: "_work",
-		PID: os.Getpid(), StartTime: 1, Started: true, // our PID, but a different start time
+		PID: os.Getpid(), StartTime: 1, ImageName: "cmd.exe", Started: true, // our PID, but a different start time
 	}
 	path := filepath.Join(b.opt.StateDir, runnerRecordName("job-1", own))
 	if err := writeRunnerRecord(path, record); err != nil {
@@ -297,6 +408,13 @@ func TestOwnedLaunchRetainsExactCleanupRecord(t *testing.T) {
 	recordPath := filepath.Join(b.opt.StateDir, resourceID)
 	if !exists(recordPath) {
 		t.Fatal("owned record must remain until scale-set cleanup converges")
+	}
+	record, err := readRunnerRecord(recordPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.EqualFold(record.ImageName, "cmd.exe") || record.StartTime == 0 {
+		t.Fatalf("owned record identity = (%d, %q), want non-zero StartTime and cmd.exe", record.StartTime, record.ImageName)
 	}
 	owned, err := b.ListOwnedRunners(context.Background(), ownership)
 	if err != nil || len(owned) != 1 || owned[0].ResourceID != resourceID {
