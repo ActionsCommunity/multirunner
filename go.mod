@@ -8,7 +8,6 @@ require (
 	github.com/containerd/errdefs v1.0.0
 	github.com/docker/docker v28.5.2+incompatible
 	github.com/google/go-github/v66 v66.0.0
-	github.com/hashicorp/go-retryablehttp v0.7.8
 	github.com/kardianos/service v1.3.0
 	github.com/kdomanski/iso9660 v0.4.0
 	github.com/mattn/go-isatty v0.0.24
@@ -38,7 +37,6 @@ require (
 	github.com/google/go-github/v88 v88.0.0 // indirect
 	github.com/google/go-querystring v1.2.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/hashicorp/go-cleanhttp v0.5.2 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/kr/text v0.2.0 // indirect
 	github.com/moby/docker-image-spec v1.3.1 // indirect

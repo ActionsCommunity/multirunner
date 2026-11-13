@@ -837,3 +837,72 @@ func TestFailedRunnerIsNotReplacedImmediately(t *testing.T) {
 		t.Errorf("launched %d runners, want a replacement on the next message", n)
 	}
 }
+
+type fakeAcquirer struct {
+	mu       sync.Mutex
+	acquired [][]int64
+}
+
+func (a *fakeAcquirer) AcquireJobs(_ context.Context, ids []int64) ([]int64, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	copied := append([]int64(nil), ids...)
+	a.acquired = append(a.acquired, copied)
+	return copied, nil
+}
+
+func TestScaleHandlesAvailableStartedCompletedAndIdleMessages(t *testing.T) {
+	be := &fakeBackend{}
+	jit := &fakeJIT{}
+	acquirer := &fakeAcquirer{}
+	l := New(t.Context(), jit, be, Options{ScaleSetID: 1, MaxRunners: 2})
+	l.SetJobAcquirer(acquirer)
+
+	if err := l.Scale(context.Background(), &scaleset.RunnerScaleSetMessage{
+		MessageID: 1,
+		JobAvailableMessages: []*scaleset.JobAvailable{
+			{RunnerRequestID: 101},
+			{RunnerRequestID: 102},
+		},
+		Statistics: &scaleset.RunnerScaleSetStatistic{TotalAssignedJobs: 2},
+	}); err != nil {
+		t.Fatalf("Scale available+stats: %v", err)
+	}
+
+	if len(acquirer.acquired) != 1 || len(acquirer.acquired[0]) != 2 || acquirer.acquired[0][0] != 101 || acquirer.acquired[0][1] != 102 {
+		t.Fatalf("acquired = %v, want [[101 102]]", acquirer.acquired)
+	}
+	if got := l.Running(); got != 2 {
+		t.Fatalf("running = %d, want 2", got)
+	}
+
+	reqs := be.requests()
+	if err := l.Scale(context.Background(), &scaleset.RunnerScaleSetMessage{
+		MessageID: 2,
+		JobStartedMessages: []*scaleset.JobStarted{
+			{RunnerName: reqs[0].Name},
+		},
+		Statistics: &scaleset.RunnerScaleSetStatistic{TotalAssignedJobs: 2},
+	}); err != nil {
+		t.Fatalf("Scale started: %v", err)
+	}
+
+	be.finish(0)
+	waitFor(t, func() bool { return l.Running() == 1 })
+
+	// Nil poll message must keep converging with the cached desired count.
+	if err := l.Scale(context.Background(), nil); err != nil {
+		t.Fatalf("Scale nil: %v", err)
+	}
+
+	if err := l.Scale(context.Background(), &scaleset.RunnerScaleSetMessage{
+		MessageID: 3,
+		JobCompletedMessages: []*scaleset.JobCompleted{
+			{RunnerName: reqs[0].Name},
+		},
+		Statistics: &scaleset.RunnerScaleSetStatistic{TotalAssignedJobs: 1},
+	}); err != nil {
+		t.Fatalf("Scale completed: %v", err)
+	}
+}
+
