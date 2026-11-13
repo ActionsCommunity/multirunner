@@ -161,6 +161,7 @@ func (s listenerSession) run(ctx context.Context, available func()) error {
 	if err != nil {
 		return classifySessionError(fmt.Errorf("create listener for %q: %w", s.opts.Name, err))
 	}
+	s.launcher.SetJobAcquirer(session)
 	available()
 	if err := l.Run(ctx, s.launcher); err != nil && !errors.Is(err, context.Canceled) {
 		return classifySessionError(fmt.Errorf("listener for %q stopped: %w", s.opts.Name, err))

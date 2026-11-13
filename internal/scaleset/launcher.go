@@ -38,6 +38,11 @@ type jitGenerator interface {
 	RemoveRunner(ctx context.Context, runnerID int64) error
 }
 
+// jobAcquirer claims available jobs on the active message session.
+type jobAcquirer interface {
+	AcquireJobs(ctx context.Context, requestIDs []int64) ([]int64, error)
+}
+
 // Options configures a Launcher.
 type Options struct {
 	// ScaleSetID identifies the scale set this launcher provisions for.
@@ -84,6 +89,7 @@ type Launcher struct {
 
 	mu                   sync.Mutex
 	removeMu             sync.Mutex
+	acquirer             jobAcquirer
 	running              map[string]*runnerState
 	pendingRegistrations map[int64]string
 	// Successful exits remain in the previous broker count until the matching
@@ -160,6 +166,63 @@ func (l *Launcher) allowedLocked(want int) int {
 		}
 	}
 	return start
+}
+
+// SetJobAcquirer binds the active message session so Scale can acquire jobs
+// advertised in JobAvailableMessages.
+func (l *Launcher) SetJobAcquirer(acquirer jobAcquirer) {
+	l.mu.Lock()
+	l.acquirer = acquirer
+	l.mu.Unlock()
+}
+
+// Scale implements listener.Scaler for github.com/actions/scaleset/listener.
+func (l *Launcher) Scale(ctx context.Context, msg *scaleset.RunnerScaleSetMessage) error {
+	if msg == nil {
+		l.mu.Lock()
+		desired := l.desired
+		l.mu.Unlock()
+		_, err := l.HandleDesiredRunnerCount(ctx, desired)
+		return err
+	}
+
+	if len(msg.JobAvailableMessages) > 0 {
+		ids := make([]int64, 0, len(msg.JobAvailableMessages))
+		for _, job := range msg.JobAvailableMessages {
+			if job != nil {
+				ids = append(ids, job.RunnerRequestID)
+			}
+		}
+		l.mu.Lock()
+		acquirer := l.acquirer
+		l.mu.Unlock()
+		if len(ids) > 0 && acquirer != nil {
+			l.opts.Logger.Info("acquiring jobs", slog.Int("count", len(ids)))
+			acquired, err := acquirer.AcquireJobs(ctx, ids)
+			if err != nil {
+				return fmt.Errorf("acquire available jobs: %w", err)
+			}
+			l.opts.Logger.Info("jobs acquired", slog.Int("count", len(acquired)))
+		}
+	}
+
+	for _, jobStarted := range msg.JobStartedMessages {
+		if err := l.HandleJobStarted(ctx, jobStarted); err != nil {
+			return fmt.Errorf("handle job started: %w", err)
+		}
+	}
+	for _, jobCompleted := range msg.JobCompletedMessages {
+		if err := l.HandleJobCompleted(ctx, jobCompleted); err != nil {
+			return fmt.Errorf("handle job completed: %w", err)
+		}
+	}
+
+	if msg.Statistics != nil {
+		if _, err := l.HandleDesiredRunnerCount(ctx, msg.Statistics.TotalAssignedJobs); err != nil {
+			return fmt.Errorf("handle desired runner count: %w", err)
+		}
+	}
+	return nil
 }
 
 // HandleDesiredRunnerCount starts runners until the desired count is met and

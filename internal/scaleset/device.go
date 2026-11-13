@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/actions/scaleset"
-	"github.com/hashicorp/go-retryablehttp"
 
 	"github.com/GerardSmit/multirunner/internal/ghapp"
 )
@@ -17,7 +16,7 @@ import (
 // The scale set library captures the token at construction and re-sends it (as a
 // Bearer header) whenever it refreshes its Actions admin session, which can be
 // hours into a long-lived session — by then a user token has expired. A
-// refreshing transport intercepts exactly that header and swaps in a freshly
+// refreshing HTTPClient intercepts exactly that header and swaps in a freshly
 // refreshed token, leaving every other request (notably the RemoteAuth
 // admin-token calls that drive the long-poll and job acquisition) untouched.
 func newDeviceClient(opts ClientOptions) (*scaleset.Client, error) {
@@ -25,25 +24,25 @@ func newDeviceClient(opts ClientOptions) (*scaleset.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	// The library re-sends this exact token value, so the hook matches on it
+	// The library re-sends this exact token value, so the client matches on it
 	// rather than on the rotated token it will later hold.
 	initial := refresher.Current()
 	sentinel := "Bearer " + initial
 
-	// The rewrite runs in RequestLogHook, not in a wrapping RoundTripper: the
-	// library re-derives its retryable client mid-session (client.go:869) and
-	// type-asserts HTTPClient.Transport to *http.Transport, so replacing the
-	// transport makes the admin-connection call fail outright. The hook sees the
-	// same request and leaves the transport's concrete type alone. It cannot
-	// return an error, so a failed refresh leaves the stale header and surfaces
-	// as the API's own 401.
-	rc := newDeviceRetryableClient(refresher, sentinel)
+	hc := newDeviceHTTPClient(refresher, sentinel)
 
-	return scaleset.NewClientWithPersonalAccessToken(scaleset.NewClientWithPersonalAccessTokenConfig{
-		GitHubConfigURL:     opts.TargetURL,
-		PersonalAccessToken: initial,
-		SystemInfo:          systemInfo(0),
-	}, scaleset.WithRetryableHTTPClint(rc))
+	return scaleset.NewClientWithPersonalAccessToken(
+		scaleset.NewClientWithPersonalAccessTokenConfig{
+			GitHubConfigURL:     opts.TargetURL,
+			PersonalAccessToken: initial,
+			SystemInfo:          systemInfo(0),
+		},
+		scaleset.WithHTTPClient(hc),
+		scaleset.WithRetry(scaleset.RetryConfig{
+			Max:     3,
+			WaitMax: 5 * time.Second,
+		}),
+	)
 }
 
 // baseURLFromTarget recovers the GitHub web host (scheme + host) from a scale set
@@ -57,32 +56,30 @@ func baseURLFromTarget(target string) string {
 	return u.Scheme + "://" + u.Host
 }
 
-// newDeviceRetryableClient builds the retryable client the library expects,
-// rewriting the pinned user token to a refreshed one before each attempt. The
-// transport is left as the default *http.Transport on purpose; see the comment
-// in newDeviceClient.
-func newDeviceRetryableClient(refresher *ghapp.TokenRefresher, sentinel string) *retryablehttp.Client {
-	rc := retryablehttp.NewClient()
+type deviceHTTPClient struct {
+	base      *http.Client
+	refresher *ghapp.TokenRefresher
+	sentinel  string
+}
 
-	// The library takes this instance rather than a copy, and the admin-connection
-	// call installs a CheckRetry on it that treats 401 and 403 as retryable
-	// (client.go:868). That policy then applies to every later request through the
-	// same client, so a credential that has genuinely gone bad is re-sent on the
-	// default schedule before the caller ever sees the 401. Keeping the budget
-	// small leaves real transient failures covered without turning a dead token
-	// into half a minute of backoff per call.
-	rc.RetryMax = 3
-	rc.RetryWaitMax = 5 * time.Second
-
-	rc.RequestLogHook = func(_ retryablehttp.Logger, req *http.Request, _ int) {
-		if req.Header.Get("Authorization") != sentinel {
-			return
-		}
-		access, err := refresher.AccessToken(req.Context())
-		if err != nil {
-			return
-		}
-		req.Header.Set("Authorization", "Bearer "+access)
+// newDeviceHTTPClient builds the HTTP client passed to WithHTTPClient,
+// rewriting the pinned user token to a refreshed one before each attempt while
+// keeping the SDK's default *http.Transport. If refreshing fails, the stale
+// header is left in place so the API's own 401 surfaces to the caller.
+func newDeviceHTTPClient(refresher *ghapp.TokenRefresher, sentinel string) *deviceHTTPClient {
+	return &deviceHTTPClient{
+		base:      scaleset.NewHTTPClient(scaleset.HTTPClientConfig{}),
+		refresher: refresher,
+		sentinel:  sentinel,
 	}
-	return rc
+}
+
+func (c *deviceHTTPClient) Do(req *http.Request) (*http.Response, error) {
+	if req.Header.Get("Authorization") == c.sentinel {
+		if access, err := c.refresher.AccessToken(req.Context()); err == nil {
+			req = req.Clone(req.Context())
+			req.Header.Set("Authorization", "Bearer "+access)
+		}
+	}
+	return c.base.Do(req)
 }
