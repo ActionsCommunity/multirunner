@@ -75,6 +75,9 @@ func eventQueryHandler(options Options) http.HandlerFunc {
 		if hasMore {
 			events = events[:limit]
 		}
+		if events == nil {
+			events = []operations.Event{}
+		}
 		nextCursor := ""
 		if hasMore && len(events) > 0 {
 			cursor.Position = events[len(events)-1].Sequence
@@ -125,6 +128,9 @@ func runnerQueryHandler(options Options) http.HandlerFunc {
 		}
 		end := min(start+limit, len(snapshot.Runners))
 		runners := snapshot.Runners[start:end]
+		if runners == nil {
+			runners = []operations.RunnerState{}
+		}
 		nextCursor := ""
 		if end < len(snapshot.Runners) {
 			cursor.Position = int64(end)

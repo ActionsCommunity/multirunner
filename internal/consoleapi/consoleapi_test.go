@@ -679,6 +679,32 @@ type memoryEvents struct {
 	runners []operations.RunnerState
 }
 
+func TestEmptyQueryCollectionsEncodeArrays(t *testing.T) {
+	options := Options{Events: &memoryEvents{}, HostEpoch: "epoch"}
+	for name, handler := range map[string]http.HandlerFunc{
+		"runners": runnerQueryHandler(options),
+		"events":  eventQueryHandler(options),
+	} {
+		t.Run(name, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+			if response.Code != http.StatusOK {
+				t.Fatalf("empty collection returned %d: %s", response.Code, response.Body.String())
+			}
+			var body struct {
+				Items json.RawMessage `json:"items"`
+				Count int             `json:"count"`
+			}
+			if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+				t.Fatal(err)
+			}
+			if string(body.Items) != "[]" || body.Count != 0 {
+				t.Fatalf("empty collection items=%s count=%d, want [] and 0", body.Items, body.Count)
+			}
+		})
+	}
+}
+
 func (s *memoryEvents) AppendOperationalEvent(_ context.Context, epoch string, input operations.EventInput) (operations.Event, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

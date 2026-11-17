@@ -156,6 +156,13 @@ func validateRegistryBindingDescriptor(sd *windows.SECURITY_DESCRIPTOR, leaf boo
 		} else if ace.Header.AceType == windows.ACCESS_ALLOWED_ACE_TYPE &&
 			ace.Header.AceFlags&windows.INHERIT_ONLY_ACE == 0 && ace.Mask&writable != 0 &&
 			!sid.Equals(system) && !sid.Equals(administrators) && !sid.Equals(installer) {
+			// CREATOR OWNER is a child-inheritance template, not an account
+			// grant. Ancestor owners are trusted above; binding keys never
+			// inherit and must still satisfy the strict leaf DACL.
+			if sid.IsWellKnown(windows.WinCreatorOwnerSid) &&
+				ace.Header.AceFlags&windows.CONTAINER_INHERIT_ACE != 0 {
+				continue
+			}
 			return fmt.Errorf("%w: registry binding ancestor is writable by an untrusted account", ErrInsecurePermissions)
 		}
 	}
