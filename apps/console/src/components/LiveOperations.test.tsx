@@ -6,23 +6,34 @@ import type { OperationalEvent, RunnerState } from '../lib/operations-api'
 
 const sampleEvent: OperationalEvent = {
   id: 'evt-101',
+  schema_version: 1,
+  host_id: 'host-1',
+  host_epoch: 'epoch-1',
   sequence: 101,
-  epoch: 'epoch-1',
-  timestamp: '2026-11-17T12:00:00Z',
   type: 'runner.started',
   entity_type: 'runner',
   entity_id: 'runner-1',
-  summary: 'Runner started',
+  timestamp: '2026-11-17T12:00:00Z',
+  correlation_id: 'corr-1',
+  causation_id: 'cause-1',
+  actor_kind: 'system',
+  actor_id: 'daemon',
+  payload: { summary: 'Runner started' },
+  command_id: 'cmd-1',
 }
 
 const sampleRunner: RunnerState = {
   id: 'runner-1',
+  host_id: 'host-1',
+  host_epoch: 'epoch-1',
   runner_name: 'win-runner-01',
   pool: 'windows-pool',
   repository: 'ActionsCommunity/multirunner',
   target: 'https://github.com/ActionsCommunity/multirunner',
   backend_id: 'host-win-01',
   status: 'running',
+  error: '',
+  last_event_id: 'evt-101',
   updated_at: '2026-11-17T12:00:00Z',
   sequence: 101,
 }
@@ -55,7 +66,7 @@ describe('LiveOperations components', () => {
     rerender(
       <LiveEventLedger
         events={[sampleEvent]}
-        streamStatus="connected"
+        streamStatus="current"
         streamLabel="Live"
         eventLabel={eventLabel}
         formatRelativeTime={formatRelativeTime}
