@@ -13,8 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hashicorp/go-retryablehttp"
-
 	"github.com/GerardSmit/multirunner/internal/ghapp"
 )
 
@@ -32,44 +30,40 @@ func writeToken(t *testing.T, access, refresh string, expiry time.Time) string {
 	return path
 }
 
-// newTestClient builds the device-flow retryable client the way newDeviceClient
+// newTestClient builds the device-flow HTTP client the way newDeviceClient
 // does, refreshing against refreshBaseURL and matching sentinelToken.
-func newTestClient(t *testing.T, tokenPath, refreshBaseURL, sentinelToken string) *retryablehttp.Client {
+func newTestClient(t *testing.T, tokenPath, refreshBaseURL, sentinelToken string) *deviceHTTPClient {
 	t.Helper()
 	refresher, err := ghapp.NewTokenRefresher("cid", refreshBaseURL, tokenPath)
 	if err != nil {
 		t.Fatalf("NewTokenRefresher: %v", err)
 	}
-	return newDeviceRetryableClient(refresher, "Bearer "+sentinelToken)
+	return newDeviceHTTPClient(refresher, "Bearer "+sentinelToken)
 }
 
-// doGet drives one request through the retryable client, exercising the hook.
-func doGet(t *testing.T, rc *retryablehttp.Client, url, auth string) *http.Response {
+// doGet drives one request through the device HTTP client.
+func doGet(t *testing.T, hc *deviceHTTPClient, url, auth string) *http.Response {
 	t.Helper()
-	req, err := retryablehttp.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	req.Header.Set("Authorization", auth)
-	resp, err := rc.Do(req)
+	resp, err := hc.Do(req)
 	if err != nil {
 		t.Fatalf("Do: %v", err)
 	}
 	return resp
 }
 
-// TestDeviceClientKeepsConcreteTransport is the regression guard for the scale
-// set library's runtime type assertion: httpClientOption.newRetryableHTTPClient
-// asserts HTTPClient.Transport.(*http.Transport) and otherwise fails with
-// "failed to get http transport from retryablehttp client". Wrapping the
-// transport to refresh tokens broke every scale-set session; the refresh runs in
-// RequestLogHook precisely so this assertion keeps holding.
+// TestDeviceClientKeepsConcreteTransport guards that the underlying *http.Client
+// retains the SDK's concrete *http.Transport.
 func TestDeviceClientKeepsConcreteTransport(t *testing.T) {
 	tokenPath := writeToken(t, "ghu_current", "ghr_current", time.Now().Add(time.Hour))
-	rc := newTestClient(t, tokenPath, "http://127.0.0.1:1", "ghu_current")
+	hc := newTestClient(t, tokenPath, "http://127.0.0.1:1", "ghu_current")
 
-	if _, ok := rc.HTTPClient.Transport.(*http.Transport); !ok {
-		t.Fatalf("Transport is %T, want *http.Transport", rc.HTTPClient.Transport)
+	if _, ok := hc.base.Transport.(*http.Transport); !ok {
+		t.Fatalf("Transport is %T, want *http.Transport", hc.base.Transport)
 	}
 }
 
@@ -294,7 +288,6 @@ func TestDeviceClientRefreshFailureSendsStaleToken(t *testing.T) {
 
 	tokenPath := writeToken(t, "ghu_old", "ghr_old", time.Now().Add(-time.Minute))
 	rc := newTestClient(t, tokenPath, refreshSrv.URL, "ghu_old")
-	rc.RetryMax = 0
 
 	resp := doGet(t, rc, apiSrv.URL+"/x", "Bearer ghu_old")
 	defer resp.Body.Close()

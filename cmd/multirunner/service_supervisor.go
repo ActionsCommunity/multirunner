@@ -172,7 +172,7 @@ func superviseProcess(ctx context.Context, spec serviceProcessSpec, logger servi
 		default:
 			intentionalStop = true
 			_ = stdin.Close()
-			waitErr = stopSupervisedProcess(cmd, group, waitDone, stopTimeout)
+			waitErr = stopSupervisedProcess(cmd, group, waitDone, stopTimeout, drainTimeout)
 		}
 	}
 	_ = stdin.Close()
@@ -197,7 +197,7 @@ func superviseProcess(ctx context.Context, spec serviceProcessSpec, logger servi
 	}
 }
 
-func stopSupervisedProcess(cmd *exec.Cmd, group supervisedProcessGroup, waitDone <-chan error, timeout time.Duration) error {
+func stopSupervisedProcess(cmd *exec.Cmd, group supervisedProcessGroup, waitDone <-chan error, timeout, forcedWait time.Duration) error {
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
@@ -207,7 +207,7 @@ func stopSupervisedProcess(cmd *exec.Cmd, group supervisedProcessGroup, waitDone
 		if err := group.Kill(); err != nil {
 			_ = cmd.Process.Kill()
 		}
-		waitTimer := time.NewTimer(serviceOutputDrainTimeout)
+		waitTimer := time.NewTimer(forcedWait)
 		defer waitTimer.Stop()
 		select {
 		case err := <-waitDone:
@@ -225,9 +225,11 @@ func waitForServiceOutput(reader io.Closer, drainDone <-chan struct{}, timeout t
 	case <-drainDone:
 	case <-timer.C:
 		_ = reader.Close()
+		secondTimer := time.NewTimer(timeout)
+		defer secondTimer.Stop()
 		select {
 		case <-drainDone:
-		case <-time.After(time.Second):
+		case <-secondTimer.C:
 		}
 	}
 }

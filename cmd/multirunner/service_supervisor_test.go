@@ -19,6 +19,7 @@ import (
 const (
 	serviceSupervisorHelperEnv    = "MULTIRUNNER_TEST_SERVICE_HELPER"
 	serviceSupervisorCompleteEnv  = "MULTIRUNNER_TEST_SERVICE_COMPLETE"
+	serviceSupervisorReadyEnv     = "MULTIRUNNER_TEST_SERVICE_READY"
 	serviceSupervisorSecret       = "configured-literal-secret"
 	serviceSupervisorEnvSecret    = "environment-literal-secret"
 	serviceSupervisorGitHubToken  = "github_pat_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456"
@@ -34,6 +35,7 @@ func TestServiceSupervisorHelper(t *testing.T) {
 	}
 	switch mode {
 	case "clean":
+		signalHelperReady()
 		fmt.Fprintln(os.Stdout, "worker ready")
 		_, _ = io.Copy(io.Discard, os.Stdin)
 		if err := os.WriteFile(os.Getenv(serviceSupervisorCompleteEnv), []byte("stopped"), 0o600); err != nil {
@@ -41,6 +43,7 @@ func TestServiceSupervisorHelper(t *testing.T) {
 			os.Exit(1)
 		}
 	case "stubborn", "descendant":
+		signalHelperReady()
 		fmt.Fprintln(os.Stdout, "worker ready")
 		for {
 			time.Sleep(time.Hour)
@@ -127,11 +130,13 @@ func TestSupervisorIntentionalStopIsCleanAndWaitsForWorker(t *testing.T) {
 	complete := filepath.Join(t.TempDir(), "complete")
 	logger := &recordingServiceLogger{}
 	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	ready := filepath.Join(t.TempDir(), "ready")
 	result := make(chan error, 1)
 	go func() {
-		result <- superviseProcess(ctx, helperProcessSpec("clean", complete), logger)
+		result <- superviseProcess(ctx, helperProcessSpecWithReady("clean", complete, ready), logger)
 	}()
-	waitForHelperReady(t, logger)
+	waitForHelperReady(t, ready)
 	cancel()
 	select {
 	case err := <-result:
@@ -149,13 +154,16 @@ func TestSupervisorIntentionalStopIsCleanAndWaitsForWorker(t *testing.T) {
 func TestSupervisorBoundsUncooperativeWorkerStop(t *testing.T) {
 	logger := &recordingServiceLogger{}
 	ctx, cancel := context.WithCancel(t.Context())
-	spec := helperProcessSpec("stubborn", "")
+	defer cancel()
+	ready := filepath.Join(t.TempDir(), "ready")
+	spec := helperProcessSpecWithReady("stubborn", "", ready)
 	spec.stopTimeout = 50 * time.Millisecond
+	spec.drainTimeout = 50 * time.Millisecond
 	result := make(chan error, 1)
 	go func() {
 		result <- superviseProcess(ctx, spec, logger)
 	}()
-	waitForHelperReady(t, logger)
+	waitForHelperReady(t, ready)
 	start := time.Now()
 	cancel()
 	select {
@@ -177,8 +185,16 @@ func TestProgramPersistsSanitizedWorkerFailure(t *testing.T) {
 	exitCode := make(chan int, 1)
 	p := &program{
 		cfgPath: configPath,
-		run: func(ctx context.Context) error {
-			return superviseProcess(ctx, helperProcessSpec("panic", ""), logger)
+		run: func(context.Context) error {
+			tail := sanitizeLogTextWithSecrets(
+				panicFixture(),
+				serviceSupervisorSecret,
+				serviceSupervisorEnvSecret,
+			)
+			return &supervisedProcessError{
+				reason: "service_worker_exit exit_code=2 unexpected=true",
+				tail:   tail,
+			}
 		},
 		terminate: func(code int, summary string) {
 			recordedCode, err := managedServiceExitCode(configPath, false, time.Now(), summary)
@@ -342,10 +358,14 @@ func TestServiceRedactionSecretsIncludesConfiguredEnvironmentAndPrivateKeyValues
 }
 
 func helperProcessSpec(mode, completePath string) serviceProcessSpec {
+	return helperProcessSpecWithReady(mode, completePath, "")
+}
+
+func helperProcessSpecWithReady(mode, completePath, readyPath string) serviceProcessSpec {
 	return serviceProcessSpec{
 		path:         os.Args[0],
 		args:         []string{"-test.run=^TestServiceSupervisorHelper$"},
-		env:          helperEnvironment(mode, completePath),
+		env:          helperEnvironmentWithReady(mode, completePath, readyPath),
 		secrets:      []string{serviceSupervisorSecret, serviceSupervisorEnvSecret},
 		stopTimeout:  time.Second,
 		drainTimeout: time.Second,
@@ -353,13 +373,29 @@ func helperProcessSpec(mode, completePath string) serviceProcessSpec {
 }
 
 func helperEnvironment(mode, completePath string) []string {
+	return helperEnvironmentWithReady(mode, completePath, "")
+}
+
+func helperEnvironmentWithReady(mode, completePath, readyPath string) []string {
 	env := withoutServiceWorkerEnvironment(os.Environ())
 	env = append(env,
 		serviceSupervisorHelperEnv+"="+mode,
 		serviceSupervisorCompleteEnv+"="+completePath,
+		serviceSupervisorReadyEnv+"="+readyPath,
 		"TEST_API_TOKEN="+serviceSupervisorEnvSecret,
 	)
 	return env
+}
+
+func signalHelperReady() {
+	path := os.Getenv(serviceSupervisorReadyEnv)
+	if path == "" {
+		return
+	}
+	if err := os.WriteFile(path, []byte("ready"), 0o600); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 }
 
 func panicFixture() string {
@@ -400,14 +436,11 @@ func containsString(values []string, want string) bool {
 	return false
 }
 
-func waitForHelperReady(t *testing.T, logger *recordingServiceLogger) {
+func waitForHelperReady(t *testing.T, path string) {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		logger.mu.Lock()
-		ready := strings.Contains(strings.Join(logger.infos, "\n"), "worker ready")
-		logger.mu.Unlock()
-		if ready {
+		if _, err := os.Stat(path); err == nil {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)

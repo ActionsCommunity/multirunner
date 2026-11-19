@@ -1,4 +1,4 @@
-# Linux "dotnet" flavor: .NET SDK 8 + 9, with Node inherited from the node flavor.
+# Linux "dotnet" flavor: .NET SDK 10 + 11, with Node inherited from the node flavor.
 # Covers ASP.NET Core + JS SPA builds (mcr dotnet/sdk ships no Node; this does).
 #
 #   docker build -f images/linux/flavors/dotnet.Dockerfile \

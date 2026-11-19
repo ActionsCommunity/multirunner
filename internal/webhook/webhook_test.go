@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -38,12 +39,12 @@ func (p *recordingProvider) QueuedJobs(context.Context) ([]github.QueuedJob, err
 func (p *recordingProvider) Scope() config.Scope { return config.ScopeRepo }
 
 func testServerWith(secret string, gh github.ClientProvider) *Server {
-	sc := autoscale.New([]*pool.Launcher{}, gh, config.ScopeRepo, 0, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	sc := autoscale.New(context.Background(), []*pool.Launcher{}, gh, config.ScopeRepo, 0, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	return New("127.0.0.1:0", "/webhook", secret, sc, slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 
 func testServerWithLaunchers(secret string, gh github.ClientProvider, launchers ...*pool.Launcher) *Server {
-	sc := autoscale.New(launchers, gh, config.ScopeRepo, 0, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	sc := autoscale.New(context.Background(), launchers, gh, config.ScopeRepo, 0, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	return New("127.0.0.1:0", "/webhook", secret, sc, slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 
@@ -86,6 +87,33 @@ func TestHandlePing(t *testing.T) {
 	s := testServer("")
 	if code := do(t, s, "ping", "", "{}"); code != http.StatusOK {
 		t.Errorf("ping = %d", code)
+	}
+}
+
+func TestStartReturnsBindError(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	s := New(listener.Addr().String(), "/webhook", "", nil,
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	err = s.Start(ctx)
+	if err == nil || !strings.Contains(err.Error(), "listen on") {
+		t.Fatalf("Start error = %v, want bind failure", err)
+	}
+}
+
+func TestStartStopsWhenContextIsCanceled(t *testing.T) {
+	s := New("127.0.0.1:0", "/webhook", "", nil,
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := s.Start(ctx); err != nil {
+		t.Fatalf("Start canceled = %v", err)
 	}
 }
 

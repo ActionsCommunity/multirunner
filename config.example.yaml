@@ -130,7 +130,7 @@ pools:
   # per-job copy-on-write overlay). Build the golden image first: multirunner bake.
   - name: windows-vm-pool
     os: windows
-    backend: qemu                # docker (default) | qemu
+    backend: qemu                # docker (default) | containerd | qemu | host
     size: 2
     runner_group_id: 1
     labels: [self-hosted, windows, x64]
@@ -158,6 +158,25 @@ pools:
       # Two Build Tools lines are two full Visual Studio installs: bake with a
       # --disk-gb well above the 40 GB default.
       # tools: [dotnet, "node:24", "buildtools:17", "buildtools:18"]
+
+  # Windows host runner (NO isolation). Set provisioning: autoscale for this
+  # allowlisted example. Jobs run as the current user and can access its files,
+  # drives, credentials, and signed-in tools.
+  # - name: windows-host
+  #   os: windows
+  #   backend: host
+  #   size: 1
+  #   labels: [self-hosted, windows, host]
+  #   repository: myorg/myrepo
+  #   workflows: [.github/workflows/trusted-host-job.yml]
+  #   workflow_event: workflow_dispatch
+  #   workflow_actor: octocat
+  #   workflow_ref: main
+  #   host:
+  #     # runner_dir: 'D:\multirunner\host\runner'
+  #     # state_dir: 'D:\multirunner\host\state'
+  #     # keep_workspace: false
+  #     # allow_local_system: false
 
   - name: windows-pool
     os: windows

@@ -23,6 +23,8 @@ import (
 
 	imageversions "github.com/GerardSmit/multirunner/images"
 	"github.com/GerardSmit/multirunner/internal/vmview"
+
+	"github.com/GerardSmit/multirunner/internal/backgroundexec"
 )
 
 // DefaultRunnerVersion is the actions/runner baked into golden VMs. It comes
@@ -1091,7 +1093,7 @@ func Prepare(ctx context.Context, o *BakeOptions) (autoISO string, args []string
 	if err := prepareVNC(o); err != nil {
 		return "", nil, err
 	}
-	if out, err := exec.CommandContext(ctx, o.ImgBin, "create", "-f", "qcow2", o.Golden, fmt.Sprintf("%dG", o.DiskGB)).CombinedOutput(); err != nil {
+	if out, err := backgroundexec.CommandContext(ctx, o.ImgBin, "create", "-f", "qcow2", o.Golden, fmt.Sprintf("%dG", o.DiskGB)).CombinedOutput(); err != nil {
 		return "", nil, fmt.Errorf("create golden disk: %w: %s", err, out)
 	}
 	_ = os.Remove(GoldenSerialPath(o.Golden)) // stale markers must not satisfy the bake check
@@ -1141,7 +1143,7 @@ func Bake(ctx context.Context, o BakeOptions, now time.Time) error {
 		fmt.Printf("Web viewer:  http://%s\n", o.VNCWeb)
 	}
 
-	cmd := exec.CommandContext(ctx, o.QEMUBin, args...)
+	cmd := backgroundexec.CommandContext(ctx, o.QEMUBin, args...)
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start qemu: %w", err)
