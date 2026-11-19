@@ -70,3 +70,62 @@ test('reports bounded pairing attempts and clears the submitted token', async ()
   ).toBeInTheDocument()
   expect(input).toHaveValue('')
 })
+
+test('keeps the console locked after a failed session check and rejects blank tokens locally', async () => {
+  const onPaired = vi.fn()
+  const fetchMock = vi.fn().mockResolvedValueOnce(new Response(null, { status: 503 }))
+  vi.stubGlobal('fetch', fetchMock)
+
+  render(
+    <PairingGate onPaired={onPaired}>
+      <p>Authenticated console</p>
+    </PairingGate>,
+  )
+
+  expect(await screen.findByRole('alert')).toHaveTextContent('The console session could not be checked')
+  expect(screen.queryByText('Authenticated console')).not.toBeInTheDocument()
+  const input = screen.getByLabelText('One-time pairing token')
+  expect(input).toHaveFocus()
+  fireEvent.change(input, { target: { value: '   ' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Open console' }))
+
+  expect(screen.getByRole('alert')).toHaveTextContent('Enter the pairing token')
+  expect(fetchMock).toHaveBeenCalledTimes(1)
+  expect(onPaired).not.toHaveBeenCalled()
+})
+
+test('clears a token after a transport failure and accepts a fresh token on retry', async () => {
+  const onPaired = vi.fn()
+  const fetchMock = vi
+    .fn()
+    .mockResolvedValueOnce(new Response(null, { status: 401 }))
+    .mockRejectedValueOnce(new TypeError('Fixture transport unavailable'))
+    .mockResolvedValueOnce(new Response(null, { status: 204 }))
+  vi.stubGlobal('fetch', fetchMock)
+
+  render(
+    <PairingGate onPaired={onPaired}>
+      <p>Authenticated console</p>
+    </PairingGate>,
+  )
+
+  const input = await screen.findByLabelText('One-time pairing token')
+  fireEvent.change(input, { target: { value: 'pair.first-fixture' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Open console' }))
+
+  expect(await screen.findByRole('alert')).toHaveTextContent('Pairing could not be completed')
+  expect(input).toHaveValue('')
+  expect(input).toHaveFocus()
+  expect(onPaired).not.toHaveBeenCalled()
+  expect(screen.queryByText('Authenticated console')).not.toBeInTheDocument()
+
+  fireEvent.change(input, { target: { value: 'pair.fresh-fixture' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Open console' }))
+
+  await waitFor(() => expect(onPaired).toHaveBeenCalledOnce())
+  expect(fetchMock).toHaveBeenNthCalledWith(
+    3,
+    '/auth/pair',
+    expect.objectContaining({ method: 'POST', body: JSON.stringify({ token: 'pair.fresh-fixture' }) }),
+  )
+})

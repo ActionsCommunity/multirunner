@@ -203,7 +203,7 @@ function npmDependencies() {
           name: manifest.name,
           version: manifest.version,
           license: declared,
-          source: dependency.resolved || `https://www.npmjs.com/package/${manifest.name}`,
+          source: `https://www.npmjs.com/package/${manifest.name}/v/${manifest.version}`,
           files,
         });
       }

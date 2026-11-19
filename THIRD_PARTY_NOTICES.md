@@ -8850,7 +8850,7 @@ SOFTWARE.
 
 Declared license: `MIT`
 
-Source: https://packagefeedproxy.microsoft.io/npm/@types/trusted-types/-/trusted-types-2.0.7.tgz
+Source: https://www.npmjs.com/package/@types/trusted-types/v/2.0.7
 
 #### LICENSE
 
@@ -8882,7 +8882,7 @@ Source: https://packagefeedproxy.microsoft.io/npm/@types/trusted-types/-/trusted
 
 Declared license: `MIT`
 
-Source: https://packagefeedproxy.microsoft.io/npm/react-dom/-/react-dom-19.3.0.tgz
+Source: https://www.npmjs.com/package/react-dom/v/19.3.0
 
 #### LICENSE
 
@@ -8914,7 +8914,7 @@ SOFTWARE.
 
 Declared license: `MIT`
 
-Source: https://packagefeedproxy.microsoft.io/npm/react/-/react-19.3.0.tgz
+Source: https://www.npmjs.com/package/react/v/19.3.0
 
 #### LICENSE
 
@@ -8946,7 +8946,7 @@ SOFTWARE.
 
 Declared license: `MIT`
 
-Source: https://packagefeedproxy.microsoft.io/npm/scheduler/-/scheduler-0.28.0.tgz
+Source: https://www.npmjs.com/package/scheduler/v/0.28.0
 
 #### LICENSE
 
@@ -8978,7 +8978,7 @@ SOFTWARE.
 
 Declared license: `MIT`
 
-Source: https://packagefeedproxy.microsoft.io/npm/workbox-core/-/workbox-core-7.4.1.tgz
+Source: https://www.npmjs.com/package/workbox-core/v/7.4.1
 
 #### LICENSE
 
@@ -9008,7 +9008,7 @@ THE SOFTWARE.
 
 Declared license: `MIT`
 
-Source: https://packagefeedproxy.microsoft.io/npm/workbox-window/-/workbox-window-7.4.1.tgz
+Source: https://www.npmjs.com/package/workbox-window/v/7.4.1
 
 #### LICENSE
 
