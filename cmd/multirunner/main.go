@@ -76,7 +76,7 @@ re-provisioned with a fresh just-in-time registration. It also bundles a
 self-hosted Actions cache (v2) so actions/cache stays on your host.
 
 Run with no command to start the orchestrator (same as "run").`,
-		Example: `  multirunner connect --org my-org      # one-time: create + install a GitHub App
+		Example: `  multirunner connect --org my-org      # choose a GitHub App authorization model
   multirunner doctor                    # verify daemons are reachable
   multirunner run                       # start the runner pools`,
 		SilenceUsage: true,
@@ -95,9 +95,9 @@ Run with no command to start the orchestrator (same as "run").`,
 	run := &cobra.Command{
 		Use:   "run",
 		Short: "Run the orchestrator (default)",
-		Long: `Run the orchestrator: validate each pool's container daemon, start the
-self-hosted cache (if enabled), and keep every pool's ephemeral runner slots
-filled, re-provisioning each runner after it finishes its one job.
+		Long: `Run the orchestrator: check each pool's backend, start the self-hosted
+cache (if enabled), and provision ephemeral runner slots using the configured
+mode: fixed pool, queued-job autoscaling, or GitHub runner scale sets.
 
 Runs identically in the foreground or under a service manager (see "service").`,
 		Example: `  multirunner run --config config.yaml
@@ -116,9 +116,8 @@ Runs identically in the foreground or under a service manager (see "service").`,
 	doctorC := &cobra.Command{
 		Use:   "doctor",
 		Short: "Check daemons, repository access, and scheduling without starting runners",
-		Long: `Run preflight checks against the config: for every pool, confirm its Docker/
-Podman daemon is reachable and running in the expected container mode (a Linux
-daemon assigned to a Windows pool, or vice versa, is reported as a problem).
+		Long: `Run preflight checks against the config and each pool's backend.
+For Docker-compatible pools, check connectivity and the expected container OS.
 For repo/repositories scope, also verify that Actions is enabled and perform a
 heuristic workflow scan for the self-hosted label. The heuristic can miss custom
 label and matrix expressions, but incomplete API checks still fail preflight.

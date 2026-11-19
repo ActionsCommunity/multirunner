@@ -1,0 +1,61 @@
+---
+import Layout from "../layouts/Layout.astro";
+import versions from "../../images/versions.json";
+
+const base = import.meta.env.BASE_URL;
+const repo = "https://github.com/actionscommunity/multirunner";
+const main = `${repo}/blob/main`;
+---
+
+<Layout title="Configuration and operations | multirunner" description="Choose a provisioning mode and runner backend, configure credentials and images, and troubleshoot a multirunner host.">
+  <article class="page-shell manual">
+    <h1>Configuration and operations</h1>
+    <p class="lead">Choose how jobs are assigned and where they run. These instructions describe the source built for this site; older releases may differ.</p>
+    <nav aria-label="Operations sections">
+      <a href="#configuration">Configuration</a><a href="#backends">Backends</a><a href="#images">Images</a><a href="#security">Security</a><a href="#troubleshooting">Troubleshooting</a><a href="#upgrades">Upgrades</a>
+    </nav>
+
+    <h2 id="configuration">Configuration</h2>
+    <p>Start from the <a href={`${main}/config.example.yaml`}>annotated YAML example</a>, then keep only the pools and options you need. Unknown YAML fields are rejected. Set a GitHub target, credentials, and at least one uniquely named pool with <code>os: linux</code> or <code>os: windows</code>.</p>
+    <ul>
+      <li><code>github.scope</code>: <code>repo</code> (owner and repo), <code>repos</code> (repository list), <code>org</code> (organization login), or <code>enterprise</code> (enterprise slug). <code>github.url</code> defaults to <code>https://github.com</code>.</li>
+      <li><code>provisioning: scaleset</code>: GitHub supplies desired capacity over an outbound connection. This is the default except with <code>scope: repos</code>. Each pool defaults its <code>scale_set</code> name to the pool name; <code>size</code> caps its capacity.</li>
+      <li><code>provisioning: pool</code>: keeps a fixed number of ephemeral runner slots available. This is the default for <code>scope: repos</code>, which cannot use a single scale set.</li>
+      <li><code>provisioning: autoscale</code> (alias <code>webhook</code>): polls queued jobs for repo and repos scopes, with a default interval of 300 seconds; set <code>webhook.poll_interval_sec: -1</code> to disable polling. For inbound delivery, configure <code>webhook.listen</code> and a matching secret; the default route is <code>/webhook</code>. Org and enterprise targets do not have that repo polling fallback.</li>
+      <li>Pool defaults: <code>size: 1</code>, <code>work_folder: _work</code>, <code>runner_group_id: 1</code>, <code>name_prefix: multirunner</code>, and <code>max_consecutive_failures: 5</code>.</li>
+      <li><code>cache.enabled</code> opts in to the local Actions cache. <code>git_cache</code> supports a mirror or dotgit cache for repository scope. For network and storage settings, see the annotated YAML.</li>
+    </ul>
+
+    <h2 id="backends">Backends</h2>
+    <ul>
+      <li><strong>Docker-compatible API</strong> (default): use a Linux container daemon for Linux pools or a Windows container daemon for Windows pools. Set the reachable <code>docker.host</code>; Docker and compatible Podman endpoints can serve Linux pools.</li>
+      <li><strong>Windows containerd</strong> (<code>backend: containerd</code>): uses runhcs and nerdctl. Set <code>os: windows</code> and <code>containerd.isolation</code> to <code>process</code>, <code>hyperv</code>, or <code>auto</code>. Per-container DNS is not supported on this backend.</li>
+      <li><strong>QEMU</strong> (<code>backend: qemu</code>): provide a golden QCOW2 in <code>qemu.golden</code> and a dedicated artifact directory. <code>multirunner bake</code> builds a Windows golden image; individual jobs use overlays. Image tiers do not apply. See the <a href={`${main}/skills/docs/qemu-windows.md`}>QEMU guide</a> for host prerequisites and tool selectors.</li>
+      <li><strong>Windows host</strong> (<code>backend: host</code>): no VM, container, or image. A pool has <code>os: windows</code> and <code>size: 1</code>. Prefer an autoscale pool bound to <code>repository</code> and <code>workflows</code>, with event, actor, and ref constraints where appropriate. Use a dedicated, least-privilege account and only trusted workflows. Environment filtering and workspace cleanup do not stop code from accessing the service account’s files and other credentials.</li>
+    </ul>
+
+    <h2 id="images">Runner images</h2>
+    <p>Container pools default to the <code>minimal</code> tier, which resolves to <code>gerardsmit/multirunner-runner-linux:latest</code> or <code>gerardsmit/multirunner-runner-windows:latest</code>. Other published tiers use their named tag. Set <code>image</code> to choose an explicit reference.</p>
+    <ul>
+      <li>Linux (amd64 and arm64): <code>minimal</code>, <code>native-build</code>, <code>node</code>, <code>dotnet</code>, <code>rust</code>, <code>go</code>.</li>
+      <li>Windows containers (amd64): <code>minimal</code>, <code>node</code>, <code>dotnet</code>, <code>buildtools</code> or <code>buildtools:&lt;line&gt;</code>. The default Build Tools line is <code>{versions.buildtools.default_line}</code>.</li>
+      <li>Source manifest: Actions runner <code>{versions.minimal.runner.version}</code>; Linux minimal base <code>{versions.minimal.linux_base.repository}:{versions.minimal.linux_base.tag}</code>; .NET SDKs <code>{Object.values(versions.dotnet.channels).map(({version}) => version).join(", ")}</code> in the corresponding .NET tiers.</li>
+    </ul>
+    <p>These pins come from <a href={`${main}/images/versions.json`}>the source manifest</a>; a registry tag is not proof that you pulled that revision. Use an explicit image digest when deployments require reproducibility.</p>
+
+    <h2 id="security">Credentials and isolation</h2>
+    <p>Use a PAT, a GitHub App installation, or supported device-flow credentials. Enterprise runner administration requires a classic PAT with <code>manage_runners:enterprise</code>; multi-repo scope does not support device credentials. Keep secret values and token sidecars out of source control.</p>
+    <p>Do not run untrusted jobs on the Windows host backend or give them a container engine socket. Treat socket access like host access. Restrict access to the cache, runtime API, and metrics listeners; do not expose an unauthenticated daemon to the network.</p>
+
+    <h2 id="troubleshooting">Troubleshooting</h2>
+    <ol>
+      <li>Run <code>multirunner run --config config.yaml --dry-run</code> to validate the configuration and preview startup.</li>
+      <li>Run <code>multirunner doctor --config config.yaml</code> to check runtime reachability and applicable GitHub settings without launching runners. Its workflow scan is heuristic; verify job labels or the selected scale-set name in the workflow itself.</li>
+      <li>For service status and logs, use the platform’s service manager. Run <code>multirunner service --help</code> for the supported lifecycle commands. Set <code>metrics.listen</code> to an address such as <code>127.0.0.1:9090</code> to enable <code>/health</code> (liveness) and <code>/metrics</code> (Prometheus). Liveness does not prove a runner can accept a job.</li>
+    </ol>
+
+    <h2 id="upgrades">Upgrade checks</h2>
+    <p>Check <a href={`${repo}/releases`}>release notes and checksums</a>, preserve the configuration and credential files, and validate with the new binary before replacing a running service. Check the image manifest separately: current .NET tiers do not bundle .NET 8 or 9. On Windows, confirm your container isolation and base-image compatibility before changing images.</p>
+    <p>See also: <a href={`${base}commands/`}>CLI reference</a> · <a href={`${base}#get-started`}>Quick start</a></p>
+  </article>
+</Layout>

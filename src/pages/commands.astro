@@ -1,0 +1,54 @@
+---
+import Layout from "../layouts/Layout.astro";
+import entries from "../../.astro/site-cli.json";
+
+const base = import.meta.env.BASE_URL;
+const sections = ["NAME", "SYNOPSIS", "DESCRIPTION", "COMMANDS AND SUBCOMMANDS", "OPTIONS", "ENVIRONMENT", "FILES", "EXIT STATUS", "EXAMPLES", "SEE ALSO"];
+const anchor = (text: string) => text.toLowerCase().replaceAll(" ", "-");
+const root = entries[0];
+const commands = entries.slice(1);
+---
+
+<Layout title="multirunner(1) | CLI reference" description="Command, option, and environment reference for multirunner built from the same source revision as this site.">
+  <article class="page-shell manual">
+    <h1>multirunner(1)</h1>
+    <p class="lead">CLI reference for the source revision used to build this site, not a specific binary release. Run <code>multirunner --help</code> to check an installed version.</p>
+    <nav aria-label="Manual sections">{sections.map((section) => <a href={`#${anchor(section)}`}>{section}</a>)}</nav>
+    <h2 id="name">NAME</h2>
+    <p><code>multirunner</code> — coordinate ephemeral GitHub Actions self-hosted runners on one host.</p>
+    <h2 id="synopsis">SYNOPSIS</h2>
+    <pre><code>{`multirunner [--config FILE] [--dry-run] [--install-deps]
+multirunner COMMAND [SUBCOMMAND] [OPTIONS]
+multirunner [COMMAND [SUBCOMMAND]] --help
+multirunner --version`}</code></pre>
+    <h2 id="description">DESCRIPTION</h2>
+    <p>With no command, start the orchestrator as with <code>run</code>. Use <code>run --dry-run</code> to validate the configuration and preview startup effects without starting services or runners.</p>
+    <h2 id="commands-and-subcommands">COMMANDS AND SUBCOMMANDS</h2>
+    <p>Usage and options below come from the built binary’s public help, including service and shell-completion subcommands. Hidden developer commands are not part of this reference.</p>
+    <nav aria-label="Command index">{commands.map(({path}) => <a href={`#cmd-${path.join("-")}`}>{path.join(" ")}</a>)}</nav>
+    {commands.map(({ path, help }) => (
+      <section id={`cmd-${path.join("-")}`}>
+        <h3><code>{path.join(" ")}</code></h3>
+        <pre data-cli={path.join(" ")}><code>{help}</code></pre>
+      </section>
+    ))}
+    <h2 id="options">OPTIONS</h2>
+    <p><code>--config</code> takes a YAML path (default: <code>config.yaml</code>) and is inherited by subcommands. The help shows value types and non-zero defaults. Where Cobra omits the zero default, a switch defaults to <code>false</code>, a string to empty, and a number to <code>0</code>; a command may resolve that value at runtime as described in its help.</p>
+    <h3>Root command</h3>
+    <pre data-cli=""><code>{root.help}</code></pre>
+    <h2 id="environment">ENVIRONMENT</h2>
+    <p>Names such as <code>GITHUB_PAT</code> are supplied by your configuration, not read automatically as credentials. The config loader resolves whole-value <code>$VAR</code> and <code>${"{VAR}"}</code> references in <code>auth.pat</code>, <code>auth.private_key_path</code>, <code>auth.token_path</code>, <code>webhook.secret</code>, and <code>cache.access_token</code>. The process environment takes precedence over <code>.env</code>.</p>
+    <h2 id="files">FILES</h2>
+    <p><code>config.yaml</code> defaults to the current working directory. The loader checks <code>.env</code> next to the config first, then in the working directory. <code>connect</code> device flow stores its credential at <code>CONFIG.user-token.json</code>; <code>connect --own-app</code> writes <code>multirunner-app.private-key.pem</code> next to the config unless <code>--key-out</code> is supplied. Protect both as credentials.</p>
+    <h2 id="exit-status">EXIT STATUS</h2>
+    <p><code>0</code> indicates success; <code>1</code> indicates a reported command or runtime failure. A service manager or operating system may report a separate termination status.</p>
+    <h2 id="examples">EXAMPLES</h2>
+    <pre><code>{`multirunner connect --repo my-user/my-repo --dry-run
+multirunner run --config config.yaml --dry-run
+multirunner doctor --config config.yaml
+multirunner detect --path .
+multirunner service start --help`}</code></pre>
+    <h2 id="see-also">SEE ALSO</h2>
+    <p><a href={`${base}operations/`}>Configuration and operations</a> · <a href={`${base}#get-started`}>Quick start</a></p>
+  </article>
+</Layout>
