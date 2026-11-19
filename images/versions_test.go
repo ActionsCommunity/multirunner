@@ -45,8 +45,8 @@ func TestEmbeddedManifest(t *testing.T) {
 
 func TestReadForUpdateAllowsNewUnresolvedEntries(t *testing.T) {
 	m := MustEmbedded()
-	m.Node.Releases["26"] = NodeRelease{}
-	m.DotNet.Channels["11.0"] = DotNetChannel{Targets: []string{DotNetTargetLinux}}
+	m.Node.Releases["28"] = NodeRelease{}
+	m.DotNet.Channels["12.0"] = DotNetChannel{Targets: []string{DotNetTargetLinux}}
 	m.BuildTools.Lines["19"] = BuildToolsLine{Channel: "19/stable"}
 	data, err := json.Marshal(m)
 	if err != nil {

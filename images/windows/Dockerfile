@@ -7,7 +7,7 @@
 # BASE must match the host build for process isolation: ltsc2025 (build 26100) on
 # Windows 11 24H2 / Server 2025. Use ltsc2022 only with Hyper-V isolation.
 # Generated from images/versions.json by go run ./cmd/update-image-versions.
-ARG BASE=mcr.microsoft.com/windows/servercore:ltsc2025@sha256:e18a49cbc074dfaa8e106296d51cebd62bbf6effb999f134a5c48eed1c2334e1
+ARG BASE=mcr.microsoft.com/windows/servercore:ltsc2025@sha256:a43c2d41a3d6e940dec865731e2f5db5c3e03f705f5300ef0b5817d3e01ecfb1
 
 FROM ${BASE}
 

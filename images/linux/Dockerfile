@@ -5,7 +5,7 @@
 # default below is the "minimal" tier built on the .NET runtime deps base.
 
 # Generated from images/versions.json by go run ./cmd/update-image-versions.
-ARG BASE=mcr.microsoft.com/dotnet/runtime-deps:8.0-noble@sha256:a83f3565178daccf8974fd854aa8359a0f8aaec5bd2ea06e11159d476369a228
+ARG BASE=mcr.microsoft.com/dotnet/runtime-deps:10.0-noble@sha256:fabe6d8f15c430642a1f92ba0b8d58ff81370cd34c39a182164ad13ba136d38f
 
 FROM ${BASE} AS build
 # TARGETARCH is supplied automatically by buildx (amd64|arm64); map it to the

@@ -399,9 +399,9 @@ The QEMU backend boots the baked golden image and **ignores `image`/`image_tier`
 (those only apply to container backends — multirunner warns if you set them on a
 qemu pool). To give a VM runner toolchains, bake them in with `--tools`
 (`dotnet` = the SDK channels carrying the `qemu-windows` target in
-`images/versions.json`, minus any that have reached EOL; `dotnet:8`, `dotnet:9`,
-and `dotnet:10` select exact majors and fail if that major is no longer
-supported; `node` = every declared LTS major while `node:22` and `node:24` select
+`images/versions.json`, minus any that have reached EOL; `dotnet:10` and
+`dotnet:11` select exact majors and fail if that major is no longer
+supported; `node` = every declared LTS major while `node:22`, `node:24`, and `node:26` select
 exact majors; `buildtools` selects the manifest `default_line`; `buildtools:17`
 and `buildtools:18` are exact and may be combined — each line is a full Visual
 Studio install, so combining them needs a larger `--disk-gb` than the 40 GB

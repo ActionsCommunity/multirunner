@@ -1,4 +1,4 @@
-# Windows "dotnet" flavor: .NET SDK 10 on top of the node flavor, so .NET repos
+# Windows "dotnet" flavor: .NET SDK 10 + 11 on top of the node flavor, so .NET repos
 # that also build a JS front end work in one image. Mirrors
 # images/linux/flavors/dotnet.Dockerfile, which chains onto node the same way.
 #
