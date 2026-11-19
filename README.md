@@ -515,9 +515,10 @@ How it behaves:
 Use it only for trusted, allowlisted workflows in a private repository. The
 allowlist accepts one `workflow_event` per pool, so a workflow that runs on both
 `schedule` and `workflow_dispatch` needs two host pools. Each pool gets its
-own directories by default; explicit `runner_dir`/`state_dir` must not alias or
-overlap any other host runner/state path. A custom `work_folder` must also avoid
-runner-install names such as `bin`, `_diag`, and `run.cmd`.
+own directories by default; `runner_dir`/`state_dir` must not alias or
+overlap any other host runner/state path, and neither explicit nor default paths
+may use Windows device namespaces (`\\?\` or `\\.\`). A custom `work_folder`
+must also avoid runner-install names such as `bin`, `_diag`, and `run.cmd`.
 
 ---
 

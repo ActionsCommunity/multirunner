@@ -950,6 +950,10 @@ func (c *Config) Validate() error {
 			stateDir = defaultState
 		}
 		for _, dir := range []string{runnerDir, stateDir} {
+			normalized := strings.ReplaceAll(dir, "/", `\`)
+			if strings.HasPrefix(normalized, `\\?\`) || strings.HasPrefix(normalized, `\\.\`) {
+				return fmt.Errorf("pools[%q].host directories must not use Windows device-namespace paths, got %q", p.Name, dir)
+			}
 			key := windowsPathKey(dir)
 			for _, previous := range hostDirs {
 				if windowsPathsOverlap(previous.key, key) {

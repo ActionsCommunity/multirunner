@@ -119,6 +119,32 @@ func TestHostDirectoriesCannotAliasOrOverlap(t *testing.T) {
 	}
 }
 
+func TestHostDirectoriesRejectDeviceNamespace(t *testing.T) {
+	for _, path := range []string{`\\?\C:\mr\runner`, `\\.\C:\mr\runner`, `\\?\UNC\server\share\runner`, `\\?\C:/mr/runner`} {
+		t.Run(path, func(t *testing.T) {
+			c := hostConfig(func(p *Pool) { p.Host.RunnerDir = path })
+			if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "device-namespace") {
+				t.Fatalf("want device-namespace rejection, got %v", err)
+			}
+			c = hostConfig(func(p *Pool) { p.Host.StateDir = path })
+			if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "device-namespace") {
+				t.Fatalf("want state directory device-namespace rejection, got %v", err)
+			}
+		})
+	}
+	c := hostConfig(func(p *Pool) { p.Host.RunnerDir = `\\server\share\runner` })
+	if err := c.Validate(); err != nil {
+		t.Fatalf("ordinary UNC path should validate: %v", err)
+	}
+}
+
+func TestHostDefaultDirectoriesRejectDeviceNamespace(t *testing.T) {
+	t.Setenv("LOCALAPPDATA", `\\?\C:\mr`)
+	if err := hostConfig(nil).Validate(); err == nil || !strings.Contains(err.Error(), "device-namespace") {
+		t.Fatalf("want default device-namespace rejection, got %v", err)
+	}
+}
+
 func TestHostPoolDefaultDirsCollideCaseInsensitively(t *testing.T) {
 	c := hostConfig(func(p *Pool) { p.Name = "Nightly" })
 	second := c.Pools[0]
