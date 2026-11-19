@@ -18,7 +18,7 @@ import (
 	"strings"
 	"unicode/utf16"
 
-	"github.com/docker/docker/client"
+	"github.com/moby/moby/client"
 )
 
 // encodePowerShell encodes a script for powershell -EncodedCommand (base64 of
@@ -44,16 +44,16 @@ const Pipe = `npipe:////./pipe/docker_engine_windows`
 // DaemonReachable reports whether a Windows-container daemon is reachable at host
 // and running in windows mode.
 func DaemonReachable(ctx context.Context, host string) bool {
-	cli, err := client.NewClientWithOpts(client.WithHost(host), client.WithAPIVersionNegotiation())
+	cli, err := client.New(client.WithHost(host), client.WithAPIVersionNegotiation())
 	if err != nil {
 		return false
 	}
 	defer cli.Close()
-	info, err := cli.Info(ctx)
+	info, err := cli.Info(ctx, client.InfoOptions{})
 	if err != nil {
 		return false
 	}
-	return info.OSType == "windows"
+	return info.Info.OSType == "windows"
 }
 
 func statusPaths() (statusFile, logFile string) {

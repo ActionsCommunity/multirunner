@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	githubapi "github.com/google/go-github/v66/github"
+	githubapi "github.com/google/go-github/v88/github"
 )
 
 const testToken = "REDACTED"
@@ -232,7 +232,7 @@ func TestAPIClientIsFixedToGitHub(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newAPIClient() error = %v", err)
 	}
-	if got := client.github.BaseURL.String(); got != "https://api.github.com/" {
+	if got := client.github.BaseURL(); got != "https://api.github.com/" {
 		t.Fatalf("BaseURL = %q", got)
 	}
 	redirectURL, err := url.Parse("https://example.test/redirect")
@@ -266,7 +266,7 @@ func TestAPIClientAcceptsMatchingGHESBase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newAPIClient() error = %v", err)
 	}
-	if got := client.github.BaseURL.String(); got != "https://github.example.test/api/v3/" {
+	if got := client.github.BaseURL(); got != "https://github.example.test/api/v3/" {
 		t.Fatalf("BaseURL = %q", got)
 	}
 	redirectURL, err := url.Parse("https://github.example.test/outside")
@@ -400,8 +400,15 @@ func newTestAPIClient(t *testing.T, server *httptest.Server) *apiClient {
 	if err != nil {
 		t.Fatalf("parse test server URL: %v", err)
 	}
-	client := githubapi.NewClient(server.Client()).WithAuthToken(testToken)
-	client.BaseURL = baseURL
+	base := baseURL.String()
+	client, err := githubapi.NewClient(
+		githubapi.WithHTTPClient(server.Client()),
+		githubapi.WithAuthToken(testToken),
+		githubapi.WithURLs(&base, nil),
+	)
+	if err != nil {
+		t.Fatalf("create test GitHub client: %v", err)
+	}
 	return &apiClient{github: client, token: testToken}
 }
 

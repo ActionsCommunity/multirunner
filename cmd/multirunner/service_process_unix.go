@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"syscall"
 )
 
@@ -13,8 +14,18 @@ type unixSupervisedProcessGroup struct {
 	pid int
 }
 
-func prepareSupervisedProcess(cmd *exec.Cmd) {
+func prepareSupervisedProcess(cmd *exec.Cmd, verified *os.File) error {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if verified == nil {
+		return nil
+	}
+	cmd.ExtraFiles = append(cmd.ExtraFiles, verified)
+	if runtime.GOOS == "linux" {
+		cmd.Path = "/proc/self/fd/3"
+	} else {
+		cmd.Path = "/dev/fd/3"
+	}
+	return nil
 }
 
 func attachSupervisedProcess(cmd *exec.Cmd) (supervisedProcessGroup, error) {

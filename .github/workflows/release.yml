@@ -1,4 +1,4 @@
-name: release
+name: release-build
 
 on:
   push:
@@ -6,18 +6,81 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-build-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  build:
+  console:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-go@v7
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          package_json_file: apps/console/package.json
+          run_install: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24.20.0
+          cache: pnpm
+          cache-dependency-path: apps/console/pnpm-lock.yaml
+
+      - name: Build embedded console
+        run: |
+          set -euo pipefail
+          pnpm --dir apps/console install --frozen-lockfile
+          node scripts/generate-third-party-notices.mjs --check
+          pnpm --dir apps/console build
+
+      - name: Upload embedded console
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: multirunner-console
+          path: internal/consoleui/dist
+          if-no-files-found: error
+
+  build:
+    needs: console
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
+
+      - name: Download independently built console
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: multirunner-console
+          path: ${{ runner.temp }}/console
+
+      - name: Verify committed console matches independent build
+        run: |
+          set -euo pipefail
+          test -z "$(find "$RUNNER_TEMP/console" -xdev ! -type d ! -type f -print -quit)"
+          diff --no-dereference --recursive --brief \
+            internal/consoleui/dist "$RUNNER_TEMP/console"
+
+      - name: Prepare embedded update trust root
+        if: github.ref_type == 'tag'
+        env:
+          MULTIRUNNER_TUF_ROOT_B64: ${{ vars.MULTIRUNNER_TUF_ROOT_B64 }}
+        run: |
+          set -euo pipefail
+          : "${MULTIRUNNER_TUF_ROOT_B64:?missing threshold-signed TUF root}"
+          printf '%s' "$MULTIRUNNER_TUF_ROOT_B64" | base64 --decode > "$RUNNER_TEMP/root.json"
 
       - name: Cross-compile binaries
         run: |
@@ -29,7 +92,12 @@ jobs:
           fi
           COMMIT="${GITHUB_SHA}"
           echo "version=$VER" >> "$GITHUB_ENV"
+          root_args=()
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            root_args=(-update-root "$RUNNER_TEMP/root.json")
+          fi
           mkdir -p dist
+          cp LICENSE THIRD_PARTY_NOTICES.md dist/
           for t in linux/amd64 linux/arm64 windows/amd64 windows/arm64 darwin/amd64 darwin/arm64; do
             os="${t%/*}"; arch="${t#*/}"; ext=""
             [ "$os" = "windows" ] && ext=".exe"
@@ -37,26 +105,40 @@ jobs:
             echo "building $out"
             go run ./cmd/build \
               -version "$VER" -commit "$COMMIT" \
+              "${root_args[@]}" \
               -goos "$os" -goarch "$arch" -o "$out"
           done
           ( cd dist && sha256sum ./* > SHA256SUMS.txt )
           ls -la dist
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: multirunner-binaries
           path: dist/*
 
-      - name: Publish GitHub Release
+      - name: Prepare unsigned update signing request
         if: github.ref_type == 'tag'
-        uses: softprops/action-gh-release@v3
-        with:
-          files: dist/*
-          generate_release_notes: true
-          body: |
-            Verify the installed build identity with:
+        run: |
+          set -euo pipefail
+          go run ./cmd/update-repository prepare \
+            -dist dist \
+            -output update-signing-request \
+            -root "$RUNNER_TEMP/root.json" \
+            -console internal/consoleui/dist \
+            -version "$version" \
+            -commit "$GITHUB_SHA" \
+            -repository "$GITHUB_REPOSITORY" \
+            -workflow ".github/workflows/release-sign.yml" \
+            -builder-id "https://github.com/actions/runner" \
+            -invocation-id "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT" \
+            -source-run-id "$GITHUB_RUN_ID" \
+            -metadata-version "$GITHUB_RUN_ID"
 
-            ```
-            multirunner --version
-            ```
+      - name: Upload unsigned update signing request
+        if: github.ref_type == 'tag'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: multirunner-update-signing-request
+          path: update-signing-request/**
+          if-no-files-found: error

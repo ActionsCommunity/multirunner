@@ -12,7 +12,7 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/docker/docker/pkg/stdcopy"
+	"github.com/moby/moby/api/pkg/stdcopy"
 
 	"github.com/GerardSmit/multirunner/internal/backend"
 	"github.com/GerardSmit/multirunner/internal/github"
@@ -20,21 +20,61 @@ import (
 
 // Spec describes one runner to launch.
 type Spec struct {
-	Name          string
-	Image         string
-	RunnerGroupID int64
-	Labels        []string
-	WorkFolder    string
-	Env           map[string]string
-	Mounts        []backend.Mount
-	Container     backend.ContainerSettings
-	Index         int
+	Name             string
+	LocalSessionID   string
+	Pool             string
+	Target           string
+	Repository       string
+	QueuedRunID      int64
+	QueuedRunAttempt int
+	QueuedJobID      int64
+	Observer         LifecycleObserver
+	Image            string
+	RunnerGroupID    int64
+	Labels           []string
+	WorkFolder       string
+	Env              map[string]string
+	Mounts           []backend.Mount
+	Container        backend.ContainerSettings
+	Index            int
 }
 
 // RunOnce provisions a fresh JIT config, launches the runner on the backend,
 // streams its logs, and blocks until it exits (after its single job). The
 // returned exit code is the runner process exit code.
-func RunOnce(ctx context.Context, gh *github.Client, be backend.Backend, spec Spec, logger *slog.Logger) (int, error) {
+func RunOnce(ctx context.Context, gh *github.Client, be backend.Backend, spec Spec, logger *slog.Logger) (code int, err error) {
+	event := LifecycleEvent{
+		Type:             LifecyclePlanned,
+		LocalSessionID:   spec.LocalSessionID,
+		Pool:             spec.Pool,
+		Target:           spec.Target,
+		Repository:       spec.Repository,
+		RunnerName:       spec.Name,
+		QueuedRunID:      spec.QueuedRunID,
+		QueuedRunAttempt: spec.QueuedRunAttempt,
+		QueuedJobID:      spec.QueuedJobID,
+		Timestamp:        time.Now().UTC(),
+		ExitCode:         -1,
+	}
+	observe(ctx, spec.Observer, event)
+	defer func() {
+		if err != nil && intentionalStop(ctx) != "" && cancellationOnly(err) {
+			code, err = 0, nil
+		}
+		event.Timestamp = time.Now().UTC()
+		event.ExitCode = code
+		event.Error = sanitizeLifecycleError(err)
+		if err != nil {
+			event.Type = LifecycleFailed
+		} else {
+			event.Type = LifecycleStopped
+			event.Conclusion = intentionalStop(ctx)
+		}
+		terminalCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
+		defer cancel()
+		observe(terminalCtx, spec.Observer, event)
+	}()
+
 	jit, err := gh.GenerateJITConfig(ctx, github.JITConfigRequest{
 		Name:          spec.Name,
 		RunnerGroupID: spec.RunnerGroupID,
@@ -44,6 +84,10 @@ func RunOnce(ctx context.Context, gh *github.Client, be backend.Backend, spec Sp
 	if err != nil {
 		return -1, fmt.Errorf("jit config: %w", err)
 	}
+	event.Type = LifecycleRegistered
+	event.GitHubRegistrationID = jit.Runner.ID
+	event.Timestamp = time.Now().UTC()
+	observe(ctx, spec.Observer, event)
 
 	handle, err := be.Launch(ctx, backend.LaunchRequest{
 		Name:             spec.Name,
@@ -59,6 +103,7 @@ func RunOnce(ctx context.Context, gh *github.Client, be backend.Backend, spec Sp
 	if err != nil {
 		launchErr := fmt.Errorf("launch: %w", err)
 		if handle != nil {
+			event.BackendInstanceID = handle.ID()
 			// A non-nil handle means Launch could not prove the instance is absent,
 			// so terminate it before reclaiming the registration. If even that
 			// fails the runner may be alive and already on a job, so GitHub
@@ -68,10 +113,16 @@ func RunOnce(ctx context.Context, gh *github.Client, be backend.Backend, spec Sp
 				return -1, errors.Join(launchErr, fmt.Errorf("kill runner: %w", killErr))
 			}
 		}
-		deregister(ctx, gh, jit.Runner.ID, spec.Name, logger)
+		if cleanupErr := deregister(ctx, gh, jit.Runner.ID, spec.Name, logger); cleanupErr != nil {
+			return -1, errors.Join(launchErr, fmt.Errorf("deregister runner: %w", cleanupErr))
+		}
 		return -1, launchErr
 	}
 
+	event.Type = LifecycleLaunched
+	event.BackendInstanceID = handle.ID()
+	event.Timestamp = time.Now().UTC()
+	observe(ctx, spec.Observer, event)
 	logger.Info("runner launched", "name", spec.Name, "container", short(handle.ID()), "runner_id", jit.Runner.ID)
 
 	logCtx, cancelLogs := context.WithCancel(ctx)
@@ -85,7 +136,12 @@ func RunOnce(ctx context.Context, gh *github.Client, be backend.Backend, spec Sp
 			reclaimAfterFailedKill(ctx, gh, jit.Runner.ID, spec.Name, logger)
 			return code, errors.Join(ctx.Err(), fmt.Errorf("kill runner: %w", killErr))
 		}
-		deregister(ctx, gh, jit.Runner.ID, spec.Name, logger)
+		if cleanupErr := deregister(ctx, gh, jit.Runner.ID, spec.Name, logger); cleanupErr != nil {
+			return code, errors.Join(ctx.Err(), fmt.Errorf("deregister runner: %w", cleanupErr))
+		}
+		if waitErr != nil && !cancellationOnly(waitErr) {
+			return code, fmt.Errorf("wait: %w", waitErr)
+		}
 		return code, ctx.Err()
 	}
 	if waitErr != nil {
@@ -103,6 +159,14 @@ func RunOnce(ctx context.Context, gh *github.Client, be backend.Backend, spec Sp
 	return code, nil
 }
 
+func observe(
+	ctx context.Context, observer LifecycleObserver, event LifecycleEvent,
+) {
+	if observer != nil {
+		observer.ObserveRunnerLifecycle(ctx, event)
+	}
+}
+
 // cleanupTimeout bounds the detached cleanup calls made once the job context is
 // already cancelled.
 const cleanupTimeout = 10 * time.Second
@@ -116,9 +180,9 @@ func terminate(ctx context.Context, handle backend.RunnerHandle) error {
 // deregister removes a runner registration best-effort. A registration that is
 // already gone is the expected outcome for a runner that completed its job, so
 // that case is not worth a warning.
-func deregister(ctx context.Context, gh *github.Client, runnerID int64, name string, logger *slog.Logger) {
+func deregister(ctx context.Context, gh *github.Client, runnerID int64, name string, logger *slog.Logger) error {
 	if runnerID == 0 {
-		return
+		return nil
 	}
 	detached, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
 	defer cancel()
@@ -130,7 +194,9 @@ func deregister(ctx context.Context, gh *github.Client, runnerID int64, name str
 	case errors.Is(err, github.ErrRunnerNotFound):
 	default:
 		logger.Warn("deregister runner failed", "name", name, "runner_id", runnerID, "err", err)
+		return err
 	}
+	return nil
 }
 
 // reclaimAfterFailedKill decides what to do with the registration of a runner

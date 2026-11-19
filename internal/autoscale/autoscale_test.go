@@ -18,7 +18,19 @@ import (
 	"github.com/GerardSmit/multirunner/internal/config"
 	"github.com/GerardSmit/multirunner/internal/github"
 	"github.com/GerardSmit/multirunner/internal/pool"
+	"github.com/GerardSmit/multirunner/internal/webhook"
 )
+
+type metadataTestProvider struct {
+	client *github.Client
+}
+
+func (p metadataTestProvider) ClientForSlot(int) *github.Client { return p.client }
+func (p metadataTestProvider) ClientFor(string) *github.Client  { return p.client }
+func (p metadataTestProvider) QueuedJobs(context.Context) ([]github.QueuedJob, error) {
+	return nil, nil
+}
+func (p metadataTestProvider) Scope() config.Scope { return config.ScopeRepo }
 
 type scalerProvider struct {
 	client    *github.Client
@@ -95,6 +107,10 @@ func scalerClient(t *testing.T) *github.Client {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/actions/runs/42") {
+			_, _ = io.WriteString(w, `{"id":42,"status":"queued","triggering_actor":{"login":"octocat"}}`)
+			return
+		}
 		w.WriteHeader(http.StatusCreated)
 		_, _ = io.WriteString(w, `{"encoded_jit_config":"jit","runner":{"id":42,"name":"mr"}}`)
 	}))
@@ -128,7 +144,7 @@ func TestOnQueuedAfterCancellationDoesNotConsultProvider(t *testing.T) {
 	cancel()
 	provider := &scalerProvider{}
 	s := New(ctx, nil, provider, config.ScopeRepo, 0, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	s.OnQueued("o/r", 42, []string{"self-hosted"})
+	s.OnQueued(webhook.WorkflowJobEvent{Repository: "o/r", WorkflowJob: webhook.WorkflowJob{RunID: 42, Labels: []string{"self-hosted"}}})
 	if got := provider.calls.Load(); got != 0 {
 		t.Fatalf("provider calls after shutdown = %d, want 0", got)
 	}
@@ -152,7 +168,8 @@ func TestOnQueuedLaunchesManagedRepository(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s.OnQueued("o/r", 42, labels)
+	s.OnQueued(webhook.WorkflowJobEvent{Repository: "o/r", WorkflowJob: webhook.WorkflowJob{RunID: 42, Labels: labels}})
+	s.dispatchDemand(ctx)
 	select {
 	case h := <-be.launched:
 		h.complete()
@@ -167,7 +184,7 @@ func TestOnQueuedLaunchesManagedRepository(t *testing.T) {
 func TestReconcileUsesPartialResultsAndStopsOnTotalFailure(t *testing.T) {
 	client := scalerClient(t)
 	labels := []string{"self-hosted", "linux"}
-	job := github.QueuedJob{Client: client, Repository: "o/r", Labels: labels}
+	job := github.QueuedJob{Client: client, Repository: "o/r", Labels: labels, RunID: 42}
 
 	t.Run("partial results", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -192,6 +209,7 @@ func TestReconcileUsesPartialResultsAndStopsOnTotalFailure(t *testing.T) {
 			t.Fatal(err)
 		}
 		s.reconcile()
+		s.dispatchDemand(ctx)
 		select {
 		case h := <-be.launched:
 			h.complete()
@@ -218,6 +236,10 @@ func TestReconcileUsesPartialResultsAndStopsOnTotalFailure(t *testing.T) {
 		s := New(t.Context(), []*pool.Launcher{launcher}, provider, config.ScopeRepo, 0,
 			slog.New(slog.NewTextHandler(io.Discard, nil)))
 		s.reconcile()
+		s.dispatchDemand(t.Context())
+		if len(s.pending) != 0 {
+			t.Fatal("all-failed poll retained demand from unusable results")
+		}
 		select {
 		case <-be.launched:
 			t.Fatal("all-failed poll launched a runner from unusable results")
@@ -266,12 +288,16 @@ func TestTryLaunchRespectsCapacityAndCancellation(t *testing.T) {
 		t.Fatalf("image ensures = %d, want 1", got)
 	}
 
-	job := github.QueuedJob{Client: client, Repository: "o/r", Labels: labels}
+	job := github.QueuedJob{Client: client, Repository: "o/r", Labels: labels, JobID: 1}
+	replacement := job
+	replacement.JobID = 2
+	s.launchFor(job)
+	s.launchFor(replacement)
 	if !s.tryLaunch(s.states[0], job) {
 		t.Fatal("first launch was rejected")
 	}
 	first := <-be.launched
-	if s.tryLaunch(s.states[0], job) {
+	if s.tryLaunch(s.states[0], replacement) {
 		t.Fatal("second launch exceeded capacity")
 	}
 
@@ -288,7 +314,7 @@ func TestTryLaunchRespectsCapacityAndCancellation(t *testing.T) {
 	if len(s.states[0].sem) != 0 {
 		t.Fatal("completed runner did not release capacity")
 	}
-	if !s.tryLaunch(s.states[0], job) {
+	if !s.tryLaunch(s.states[0], replacement) {
 		t.Fatal("replacement launch was rejected after capacity release")
 	}
 	second := <-be.launched
@@ -353,5 +379,59 @@ func TestContainerBuildLabelDoesNotMatchGenericLinuxJob(t *testing.T) {
 	}
 	if !labelsMatch(pool, []string{"container-build"}) {
 		t.Fatal("custom-only container-build pool rejected its explicit label")
+	}
+}
+
+func TestMetadataResolutionIsBoundedAndCancelled(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	scaler := New(t.Context(), nil, metadataTestProvider{client: &github.Client{}},
+		config.ScopeRepo, 0, logger)
+	scaler.metadataWorkers = 2
+	scaler.metadataQueue = make(chan metadataRequest, 64)
+	var active atomic.Int32
+	var maximum atomic.Int32
+	started := make(chan struct{}, 16)
+	scaler.resolveMetadata = func(
+		ctx context.Context, _ *github.Client, job github.QueuedJob,
+	) (github.QueuedJob, error) {
+		current := active.Add(1)
+		defer active.Add(-1)
+		for {
+			observed := maximum.Load()
+			if current <= observed || maximum.CompareAndSwap(observed, current) {
+				break
+			}
+		}
+		started <- struct{}{}
+		<-ctx.Done()
+		return github.QueuedJob{}, ctx.Err()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- scaler.Run(ctx) }()
+	for id := int64(1); id <= 20; id++ {
+		scaler.metadataQueue <- metadataRequest{
+			client: &github.Client{},
+			job:    github.QueuedJob{Repository: "o/r", RunID: id, JobID: id},
+		}
+	}
+	for range 2 {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("metadata workers did not start")
+		}
+	}
+	if got := maximum.Load(); got != 2 {
+		t.Fatalf("maximum metadata concurrency = %d, want 2", got)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) && err != nil {
+			t.Fatalf("Run error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("metadata workers did not stop after cancellation")
 	}
 }

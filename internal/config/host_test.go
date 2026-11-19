@@ -201,6 +201,22 @@ func TestRunnerEnvSecretsCoverDotEnvAndReferences(t *testing.T) {
 	}
 }
 
+func TestRunnerEnvSecretsCoverConsoleNotificationWebhook(t *testing.T) {
+	t.Setenv("MR_TEST_NOTIFICATION", "notification-test-value")
+	c := &Config{}
+	c.History.Notifications.Webhooks = []NotificationWebhook{
+		{Name: "test", Secret: "${MR_TEST_NOTIFICATION}"},
+	}
+	c.resolveSecrets()
+	names, values := c.RunnerEnvSecrets()
+	if len(names) != 1 || names[0] != "MR_TEST_NOTIFICATION" {
+		t.Fatalf("notification environment reference not filtered: %v", names)
+	}
+	if len(values) != 1 || values[0] != "notification-test-value" {
+		t.Fatal("resolved notification secret not filtered by value")
+	}
+}
+
 func TestFullRefWorkflowRefWarns(t *testing.T) {
 	c := hostConfig(func(p *Pool) { p.WorkflowRef = "refs/heads/main" })
 	warnings := strings.Join(c.Warnings(), "\n")

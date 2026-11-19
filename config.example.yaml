@@ -44,6 +44,50 @@ webhook:
 metrics:
   listen: ""                     # e.g. "127.0.0.1:9090" -> /metrics, /health
 
+# Optional local history database and loopback-only history API.
+history:
+  enabled: false
+  database: "D:/multirunner/history.db"
+  listen: "127.0.0.1:8081"
+  sync_interval_sec: 300         # minimum 30 seconds
+  backfill: all_available        # all_available | none
+  retention_days: -1            # -1 keeps history forever; positive days prune locally
+  legacy_runner_prefixes: []     # prior runner name prefixes to associate
+  notifications:
+    # aitext_url: http://127.0.0.1:8099/alerts
+    webhooks: []
+    # - name: operations
+    #   url: https://alerts.example.com/multirunner
+    #   secret: ${MULTIRUNNER_ALERT_WEBHOOK_SECRET}
+  # Privileged Operations Console commands are fail-closed. Enable only the
+  # capabilities whose local operational/security evidence you have accepted.
+  operations_console:
+    capabilities:
+      pool_pause_resume: false
+      pool_drain: false
+      runner_terminate: false
+      runner_recycle: false
+      history_sync: false
+      support_bundles: false
+      backup_create: false
+      restore_stage: false
+      update_stage: false
+      update_apply: false
+
+# Signed application update inspection and staging. Checks are read-only.
+# Applying an update is always operator-triggered and is blocked unless a
+# threshold-signed TUF root and exact signer/provenance policy are configured.
+updates:
+  check_enabled: false
+  # metadata_url: "https://updates.example.com/multirunner/stable/"
+  # trusted_root: "D:/multirunner/update-root.json"
+  # allowed_target_key_ids:
+  #   - "<sha256 TUF targets key ID>"
+  # revoked_key_ids: []
+  # repository: "GerardSmit/multirunner"
+  # workflow: ".github/workflows/release-sign.yml"
+  # builder_id: "https://github.com/actions/runner"
+
 git_cache:
   mode: "off"                    # mirror | dotgit-cache | off  (wired for scope=repo)
   path: "D:/multirunner/gitmirror"

@@ -3,13 +3,14 @@ package backend
 import (
 	"context"
 	"fmt"
+	"net/netip"
 	"os"
 	"slices"
 	"testing"
 	"time"
 
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/client"
+	cerrdefs "github.com/containerd/errdefs"
+	"github.com/moby/moby/client"
 )
 
 const dockerIntegrationImage = "alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b"
@@ -81,27 +82,29 @@ func TestDockerLinuxContainerControls(t *testing.T) {
 	if err != nil {
 		t.Fatalf("launchConfigs: %v", err)
 	}
-	created, err := be.cli.ContainerCreate(ctx, containerConfig, hostConfig, nil, nil, req.Name)
+	created, err := be.cli.ContainerCreate(ctx, client.ContainerCreateOptions{
+		Config: containerConfig, HostConfig: hostConfig, Name: req.Name,
+	})
 	if err != nil {
 		t.Fatalf("ContainerCreate: %v", err)
 	}
 	t.Cleanup(func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cleanupCancel()
-		err := be.cli.ContainerRemove(cleanupCtx, created.ID, container.RemoveOptions{Force: true})
-		if err != nil && !client.IsErrNotFound(err) {
+		_, err := be.cli.ContainerRemove(cleanupCtx, created.ID, client.ContainerRemoveOptions{Force: true})
+		if err != nil && !cerrdefs.IsNotFound(err) {
 			t.Errorf("ContainerRemove(%s): %v", created.ID, err)
 		}
 	})
 
-	inspected, err := be.cli.ContainerInspect(ctx, created.ID)
+	inspected, err := be.cli.ContainerInspect(ctx, created.ID, client.ContainerInspectOptions{})
 	if err != nil {
 		t.Fatalf("ContainerInspect: %v", err)
 	}
-	if inspected.HostConfig == nil {
+	if inspected.Container.HostConfig == nil {
 		t.Fatal("ContainerInspect returned no host configuration")
 	}
-	resources := inspected.HostConfig.Resources
+	resources := inspected.Container.HostConfig.Resources
 	if resources.NanoCPUs != settings.CPUCount*nanoCPUsPerCPU {
 		t.Errorf("NanoCPUs = %d, want %d", resources.NanoCPUs, settings.CPUCount*nanoCPUsPerCPU)
 	}
@@ -111,7 +114,9 @@ func TestDockerLinuxContainerControls(t *testing.T) {
 	if resources.MemorySwap != settings.MemorySwapBytes {
 		t.Errorf("MemorySwap = %d, want %d", resources.MemorySwap, settings.MemorySwapBytes)
 	}
-	if !slices.Equal(inspected.HostConfig.DNS, settings.DNS) {
-		t.Errorf("DNS = %v, want %v", inspected.HostConfig.DNS, settings.DNS)
+	if !slices.EqualFunc(inspected.Container.HostConfig.DNS, settings.DNS, func(got netip.Addr, want string) bool {
+		return got.String() == want
+	}) {
+		t.Errorf("DNS = %v, want %v", inspected.Container.HostConfig.DNS, settings.DNS)
 	}
 }

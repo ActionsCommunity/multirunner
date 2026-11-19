@@ -54,6 +54,160 @@ pools:
 	if p0.ImageTier != "minimal" || p0.MaxConsecutiveFailures != 5 {
 		t.Errorf("pool defaults not applied: %+v", p0)
 	}
+	if c.History.Enabled {
+		t.Error("history must be disabled by default")
+	}
+	if c.History.SyncIntervalSec != 300 || c.History.Backfill != "all_available" || c.History.RetentionDays != -1 {
+		t.Errorf("history defaults not applied: %+v", c.History)
+	}
+	if c.History.OperationsConsole.Capabilities != (OperationsConsoleCapabilities{}) {
+		t.Errorf("operations console capabilities must default disabled: %+v",
+			c.History.OperationsConsole.Capabilities)
+	}
+}
+
+func TestHistoryConfig(t *testing.T) {
+	valid := `
+github: {scope: org, owner: o}
+auth: {pat: x}
+history:
+  enabled: true
+  database: history.db
+  listen: "127.0.0.1:8081"
+  backfill: all_available
+  retention_days: -1
+  legacy_runner_prefixes: [old-runner, older-runner]
+  notifications:
+    aitext_url: http://127.0.0.1:8099/alerts
+    webhooks:
+      - {name: operations, url: "https://alerts.example.com/multirunner", secret: signing-secret}
+  operations_console:
+    capabilities:
+      pool_pause_resume: true
+      pool_drain: true
+      runner_terminate: true
+      runner_recycle: true
+      history_sync: true
+      support_bundles: true
+      backup_create: true
+      restore_stage: true
+      update_stage: true
+      update_apply: true
+pools: [{name: p, os: linux, docker: {host: h}}]`
+	c, err := Load(writeConfig(t, valid))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.History.SyncIntervalSec != 300 {
+		t.Fatalf("sync interval = %d, want 300", c.History.SyncIntervalSec)
+	}
+	if c.History.Notifications.AiTextURL == "" ||
+		len(c.History.Notifications.Webhooks) != 1 {
+		t.Fatalf("notifications = %+v", c.History.Notifications)
+	}
+	if capabilities := c.History.OperationsConsole.Capabilities; !capabilities.PoolPauseResume || !capabilities.PoolDrain ||
+		!capabilities.RunnerTerminate || !capabilities.RunnerRecycle ||
+		!capabilities.HistorySync || !capabilities.SupportBundles ||
+		!capabilities.BackupCreate || !capabilities.RestoreStage ||
+		!capabilities.UpdateStage || !capabilities.UpdateApply {
+		t.Fatalf("operations console capabilities = %+v", capabilities)
+	}
+
+	cases := map[string]string{
+		"missing database":   "database: ''\n  listen: '127.0.0.1:8081'",
+		"missing listen":     "database: history.db\n  listen: ''",
+		"non-loopback":       "database: history.db\n  listen: '0.0.0.0:8081'",
+		"short interval":     "database: history.db\n  listen: '127.0.0.1:8081'\n  sync_interval_sec: 29",
+		"bad backfill":       "database: history.db\n  listen: '127.0.0.1:8081'\n  backfill: recent",
+		"zero retention":     "database: history.db\n  listen: '127.0.0.1:8081'\n  retention_days: -2",
+		"blank prefix":       "database: history.db\n  listen: '127.0.0.1:8081'\n  legacy_runner_prefixes: [' ']",
+		"duplicate prefix":   "database: history.db\n  listen: '127.0.0.1:8081'\n  legacy_runner_prefixes: [Old, old]",
+		"external AiText":    "database: history.db\n  listen: '127.0.0.1:8081'\n  notifications: {aitext_url: 'https://example.com/alerts'}",
+		"HTTP webhook":       "database: history.db\n  listen: '127.0.0.1:8081'\n  notifications: {webhooks: [{name: ops, url: 'http://example.com', secret: x}]}",
+		"missing secret":     "database: history.db\n  listen: '127.0.0.1:8081'\n  notifications: {webhooks: [{name: ops, url: 'https://example.com', secret: ''}]}",
+		"duplicate endpoint": "database: history.db\n  listen: '127.0.0.1:8081'\n  notifications: {webhooks: [{name: Ops, url: 'https://one.example', secret: x}, {name: ops, url: 'https://two.example', secret: y}]}",
+	}
+	for name, fields := range cases {
+		t.Run(name, func(t *testing.T) {
+			body := `
+github: {scope: org, owner: o}
+auth: {pat: x}
+history:
+  enabled: true
+  ` + fields + `
+pools: [{name: p, os: linux, docker: {host: h}}]`
+			if _, err := Load(writeConfig(t, body)); err == nil {
+				t.Fatal("expected history validation error")
+			}
+		})
+	}
+}
+
+func TestWebhookListenerRequiresSecret(t *testing.T) {
+	body := `
+github: {scope: org, owner: o}
+auth: {pat: x}
+webhook:
+  listen: "127.0.0.1:8080"
+pools: [{name: p, os: linux, docker: {host: h}}]`
+	if _, err := Load(writeConfig(t, body)); err == nil ||
+		!strings.Contains(err.Error(), "webhook.secret is required") {
+		t.Fatalf("Load error = %v, want missing webhook secret", err)
+	}
+}
+
+func TestUpdateTrustConfig(t *testing.T) {
+	validKey := strings.Repeat("a", 64)
+	valid := `
+github: {scope: org, owner: o}
+auth: {pat: x}
+updates:
+  metadata_url: https://updates.example.com/stable/
+  trusted_root: update-root.json
+  allowed_target_key_ids: [` + validKey + `]
+  repository: GerardSmit/multirunner
+  workflow: .github/workflows/release.yml
+  builder_id: https://github.com/actions/runner
+pools: [{name: p, os: linux, docker: {host: h}}]`
+	if _, err := Load(writeConfig(t, valid)); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := map[string]string{
+		"insecure URL": `
+updates: {metadata_url: http://updates.example.com/}`,
+		"root without policy": `
+updates: {metadata_url: https://updates.example.com/, trusted_root: root.json}`,
+		"invalid key": `
+updates:
+  metadata_url: https://updates.example.com/
+  trusted_root: root.json
+  allowed_target_key_ids: [invalid]
+  repository: GerardSmit/multirunner
+  workflow: release.yml
+  builder_id: builder`,
+		"allowed and revoked": `
+updates:
+  metadata_url: https://updates.example.com/
+  trusted_root: root.json
+  allowed_target_key_ids: [` + validKey + `]
+  revoked_key_ids: [` + validKey + `]
+  repository: GerardSmit/multirunner
+  workflow: release.yml
+  builder_id: builder`,
+	}
+	for name, updates := range tests {
+		t.Run(name, func(t *testing.T) {
+			body := `
+github: {scope: org, owner: o}
+auth: {pat: x}
+` + updates + `
+pools: [{name: p, os: linux, docker: {host: h}}]`
+			if _, err := Load(writeConfig(t, body)); err == nil {
+				t.Fatal("invalid update configuration accepted")
+			}
+		})
+	}
 }
 
 func TestLoadQEMUBakeChecksums(t *testing.T) {
@@ -232,9 +386,17 @@ pools:
 
 func TestPATEnvExpansion(t *testing.T) {
 	t.Setenv("MR_TEST_PAT", "ghp_fromenv")
+	t.Setenv("MR_TEST_ALERT_SECRET", "alert-secret-fromenv")
 	p := writeConfig(t, `
 github: {scope: org, owner: o}
 auth: {pat: "${MR_TEST_PAT}"}
+history:
+  enabled: true
+  database: history.db
+  listen: 127.0.0.1:8081
+  notifications:
+    webhooks:
+      - {name: operations, url: "https://alerts.example.com", secret: "${MR_TEST_ALERT_SECRET}"}
 pools: [{name: p, os: linux, docker: {host: h}}]`)
 	c, err := Load(p)
 	if err != nil {
@@ -242,6 +404,13 @@ pools: [{name: p, os: linux, docker: {host: h}}]`)
 	}
 	if c.Auth.PAT != "ghp_fromenv" {
 		t.Errorf("PAT = %q, want ghp_fromenv", c.Auth.PAT)
+	}
+	if got := c.History.Notifications.Webhooks[0].Secret; got != "alert-secret-fromenv" {
+		t.Errorf("notification secret = %q", got)
+	}
+	secrets := c.SecretValues()
+	if len(secrets) != 2 || secrets[1] != "alert-secret-fromenv" {
+		t.Errorf("SecretValues = %#v", secrets)
 	}
 }
 

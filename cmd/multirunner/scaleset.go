@@ -86,25 +86,7 @@ func runScaleset(
 			Labels:      p.cfg.Labels,
 			Target:      target,
 			Pool:        p.cfg.Name,
-			Launch: scalesetmode.Options{
-				Image:      p.image,
-				WorkFolder: p.cfg.WorkFolder,
-				Labels:     p.cfg.Labels,
-				Env:        p.env,
-				Mounts:     p.mounts,
-				Container:  p.container,
-				MaxRunners: p.cfg.Size,
-				OnStart: func() {
-					if hooks.OnStart != nil {
-						hooks.OnStart(p.cfg.Name)
-					}
-				},
-				OnStop: func(code int, err error) {
-					if hooks.OnStop != nil {
-						hooks.OnStop(p.cfg.Name, code, err)
-					}
-				},
-			},
+			Launch:      scaleSetLaunchOptions(cfg, p, hooks),
 		}
 		sessions = append(sessions, scalesetmode.SupervisedSession{
 			Name: p.cfg.ScaleSet,
@@ -124,4 +106,29 @@ func runScaleset(
 		})
 	}
 	return scalesetmode.RunSupervised(ctx, sessions, logger)
+}
+
+func scaleSetLaunchOptions(cfg *config.Config, p scaleSetPool, hooks pool.Hooks) scalesetmode.Options {
+	return scalesetmode.Options{
+		Image: p.image, WorkFolder: p.cfg.WorkFolder, Labels: p.cfg.Labels,
+		Env: p.env, Mounts: p.mounts, Container: p.container, MaxRunners: p.cfg.Size,
+		Observer: hooks.Observer, Repository: scaleSetRepository(cfg),
+		OnStart: func() {
+			if hooks.OnStart != nil {
+				hooks.OnStart(p.cfg.Name)
+			}
+		},
+		OnStop: func(code int, err error) {
+			if hooks.OnStop != nil {
+				hooks.OnStop(p.cfg.Name, code, err)
+			}
+		},
+	}
+}
+
+func scaleSetRepository(cfg *config.Config) string {
+	if cfg.GitHub.Scope == config.ScopeRepo {
+		return cfg.GitHub.Owner + "/" + cfg.GitHub.Repo
+	}
+	return ""
 }

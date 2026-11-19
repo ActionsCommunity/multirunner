@@ -10,12 +10,22 @@ import (
 	upstream "github.com/actions/scaleset"
 )
 
-func (l *Launcher) finishRunner(name string, state *runnerState, code int, waitErr error, terminate bool) error {
+func (l *Launcher) finishRunner(name string, state *runnerState, code int, waitErr error, terminate bool) (result error) {
 	state.cleanupMu.Lock()
 	defer state.cleanupMu.Unlock()
 	if state.cleaned {
 		return nil
 	}
+	defer func() {
+		if !state.terminalObserved {
+			state.terminalObserved = true
+			event := state.lifecycle
+			if terminate && result == nil && state.launchErr == nil {
+				event.Conclusion = "shutdown"
+			}
+			l.observeTerminal(event, state.exitCode, errors.Join(state.launchErr, state.waitErr, result))
+		}
+	}()
 
 	l.mu.Lock()
 	busy := state.busy
@@ -45,7 +55,7 @@ func (l *Launcher) finishRunner(name string, state *runnerState, code int, waitE
 		reportStop := !state.stopReported
 		state.stopReported = true
 		l.mu.Unlock()
-		if reportStop && l.opts.OnStop != nil {
+		if reportStop && l.opts.Observer == nil && l.opts.OnStop != nil {
 			l.opts.OnStop(state.exitCode, state.waitErr)
 		}
 	}

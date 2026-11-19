@@ -5,7 +5,7 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/docker/docker/api/types/container"
+	"github.com/moby/moby/api/types/container"
 )
 
 // NewDockerWindows creates a backend bound to a Windows Docker daemon (a

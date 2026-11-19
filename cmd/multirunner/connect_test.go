@@ -471,7 +471,16 @@ func orgInstall(id int64, account string) ghapp.Installation {
 func TestSelectInstallationUsesGitHubsAnswers(t *testing.T) {
 	t.Run("single org taken without asking", func(t *testing.T) {
 		p := newPrompt(failingReader{t}, &bytes.Buffer{})
-		got, err := selectInstallation([]ghapp.Installation{orgInstall(1, "acme")}, "", "https://github.com", ghapp.DefaultAppSlug, true, p, true)
+		got, err := selectInstallation(
+			[]ghapp.Installation{orgInstall(1, "acme")},
+			installationSelectionOptions{
+				BaseURL:             "https://github.com",
+				AppSlug:             ghapp.DefaultAppSlug,
+				RequireOrganization: true,
+				Prompt:              p,
+				Interactive:         true,
+			},
+		)
 		if err != nil || got.Account != "acme" {
 			t.Fatalf("got %+v, err %v", got, err)
 		}
@@ -480,7 +489,13 @@ func TestSelectInstallationUsesGitHubsAnswers(t *testing.T) {
 	t.Run("personal installation is not offered", func(t *testing.T) {
 		installs := []ghapp.Installation{{ID: 9, Account: "gerard", IsOrg: false, AppSlug: "multirunner-connect"}}
 		p := newPrompt(failingReader{t}, &bytes.Buffer{})
-		_, err := selectInstallation(installs, "", "https://github.com", ghapp.DefaultAppSlug, true, p, true)
+		_, err := selectInstallation(installs, installationSelectionOptions{
+			BaseURL:             "https://github.com",
+			AppSlug:             ghapp.DefaultAppSlug,
+			RequireOrganization: true,
+			Prompt:              p,
+			Interactive:         true,
+		})
 		if err == nil || !strings.Contains(err.Error(), "not installed on any organization") {
 			t.Fatalf("want no-org error, got %v", err)
 		}
@@ -490,7 +505,13 @@ func TestSelectInstallationUsesGitHubsAnswers(t *testing.T) {
 		var out bytes.Buffer
 		p := newPrompt(strings.NewReader("2\n"), &out)
 		installs := []ghapp.Installation{orgInstall(1, "acme"), orgInstall(2, "globex")}
-		got, err := selectInstallation(installs, "", "https://github.com", ghapp.DefaultAppSlug, true, p, true)
+		got, err := selectInstallation(installs, installationSelectionOptions{
+			BaseURL:             "https://github.com",
+			AppSlug:             ghapp.DefaultAppSlug,
+			RequireOrganization: true,
+			Prompt:              p,
+			Interactive:         true,
+		})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -507,7 +528,13 @@ func TestSelectInstallationUsesGitHubsAnswers(t *testing.T) {
 	t.Run("several orgs pickable by name", func(t *testing.T) {
 		p := newPrompt(strings.NewReader("ACME\n"), &bytes.Buffer{})
 		installs := []ghapp.Installation{orgInstall(1, "acme"), orgInstall(2, "globex")}
-		got, err := selectInstallation(installs, "", "https://github.com", ghapp.DefaultAppSlug, true, p, true)
+		got, err := selectInstallation(installs, installationSelectionOptions{
+			BaseURL:             "https://github.com",
+			AppSlug:             ghapp.DefaultAppSlug,
+			RequireOrganization: true,
+			Prompt:              p,
+			Interactive:         true,
+		})
 		if err != nil || got.Account != "acme" {
 			t.Fatalf("got %+v, err %v", got, err)
 		}
@@ -516,7 +543,12 @@ func TestSelectInstallationUsesGitHubsAnswers(t *testing.T) {
 	t.Run("several orgs non-interactive demands --org", func(t *testing.T) {
 		p := newPrompt(failingReader{t}, &bytes.Buffer{})
 		installs := []ghapp.Installation{orgInstall(1, "acme"), orgInstall(2, "globex")}
-		_, err := selectInstallation(installs, "", "https://github.com", ghapp.DefaultAppSlug, true, p, false)
+		_, err := selectInstallation(installs, installationSelectionOptions{
+			BaseURL:             "https://github.com",
+			AppSlug:             ghapp.DefaultAppSlug,
+			RequireOrganization: true,
+			Prompt:              p,
+		})
 		if err == nil || !strings.Contains(err.Error(), "--org") {
 			t.Fatalf("want error naming --org, got %v", err)
 		}
@@ -524,7 +556,17 @@ func TestSelectInstallationUsesGitHubsAnswers(t *testing.T) {
 
 	t.Run("named target that is not installed reports the install URL", func(t *testing.T) {
 		p := newPrompt(failingReader{t}, &bytes.Buffer{})
-		_, err := selectInstallation([]ghapp.Installation{orgInstall(1, "acme")}, "other", "https://github.com", ghapp.DefaultAppSlug, true, p, true)
+		_, err := selectInstallation(
+			[]ghapp.Installation{orgInstall(1, "acme")},
+			installationSelectionOptions{
+				Owner:               "other",
+				BaseURL:             "https://github.com",
+				AppSlug:             ghapp.DefaultAppSlug,
+				RequireOrganization: true,
+				Prompt:              p,
+				Interactive:         true,
+			},
+		)
 		if err == nil || !strings.Contains(err.Error(), "installations/new") {
 			t.Fatalf("want install URL, got %v", err)
 		}

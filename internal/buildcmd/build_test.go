@@ -181,6 +181,25 @@ func TestBuildRejectsDirtyExplicitVersionWithoutOverride(t *testing.T) {
 	}
 }
 
+func TestBuildRejectsExplicitCommitDifferentFromCheckout(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.test/build\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	command := gitCommands(t, root, "", func([]string) error {
+		t.Fatal("mismatched source identity reached go build")
+		return nil
+	})
+	err := build(context.Background(), Options{
+		Directory: root,
+		Version:   "v1.2.3",
+		Commit:    strings.Repeat("f", 40),
+	}, command)
+	if err == nil || !strings.Contains(err.Error(), "does not match source checkout") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestBuildAllowsDirtyExplicitVersionWithOverride(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.test/build\n"), 0o600); err != nil {
@@ -286,12 +305,18 @@ func TestReleaseWorkflowUsesCanonicalBuildCommandForEveryTarget(t *testing.T) {
 	}
 	text := string(workflow)
 	for _, want := range []string{
+		"  console:",
+		"  build:",
+		"needs: console",
+		"name: multirunner-console",
+		"path: ${{ runner.temp }}/console",
+		"diff --no-dereference --recursive --brief",
 		"linux/amd64 linux/arm64 windows/amd64 windows/arm64 darwin/amd64 darwin/arm64",
 		`COMMIT="${GITHUB_SHA}"`,
 		"go run ./cmd/build",
 		`-version "$VER" -commit "$COMMIT"`,
+		`root_args=(-update-root "$RUNNER_TEMP/root.json")`,
 		`-goos "$os" -goarch "$arch" -o "$out"`,
-		"multirunner --version",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("release workflow is missing %q", want)
@@ -303,6 +328,51 @@ func TestReleaseWorkflowUsesCanonicalBuildCommandForEveryTarget(t *testing.T) {
 	}
 	if got := strings.Count(text, "go run ./cmd/build"); got != 1 {
 		t.Errorf("release workflow has %d build helper calls, want one loop body", got)
+	}
+	consoleStart := strings.Index(text, "  console:")
+	buildStart := strings.Index(text, "  build:")
+	if consoleStart >= 0 && buildStart > consoleStart {
+		consoleSection := text[consoleStart:buildStart]
+		buildSection := text[buildStart:]
+		for _, frontendCapability := range []string{
+			"pnpm/action-setup@", "actions/setup-node@", "pnpm --dir", "node scripts/",
+		} {
+			if strings.Contains(buildSection, frontendCapability) {
+				t.Errorf("release build job contains frontend capability %q", frontendCapability)
+			}
+			if !strings.Contains(consoleSection, frontendCapability) {
+				t.Errorf("isolated console job is missing frontend capability %q", frontendCapability)
+			}
+		}
+	}
+	for _, floating := range []string{
+		"actions/checkout@v", "actions/setup-go@v",
+		"actions/upload-artifact@v", "softprops/action-gh-release@v",
+	} {
+		if strings.Contains(text, floating) {
+			t.Errorf("release workflow contains floating action tag %q", floating)
+		}
+	}
+
+	signing, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", "release-sign.yml"))
+	if err != nil {
+		t.Fatalf("read signing workflow: %v", err)
+	}
+	signingText := string(signing)
+	for _, want := range []string{
+		"workflow_run:",
+		"environment: release-signing",
+		"git merge-base --is-ancestor",
+		"go run ./cmd/update-repository",
+		"MULTIRUNNER_TUF_TARGETS_PRIVATE_KEY",
+		"multirunner --version",
+	} {
+		if !strings.Contains(signingText, want) {
+			t.Errorf("signing workflow is missing %q", want)
+		}
+	}
+	if strings.Contains(text, "MULTIRUNNER_TUF_TARGETS_PRIVATE_KEY") {
+		t.Error("tag-controlled build workflow receives a TUF signing key")
 	}
 }
 
