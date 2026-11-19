@@ -147,7 +147,7 @@ func TestLaunchRunsJobAndCleansWorkspace(t *testing.T) {
 }
 
 func TestLaunchRetainsRecordWhenWorkspaceCleanupFails(t *testing.T) {
-	b := fakeRunner(t, tookJob+"\r\n"+`mkdir custom-work & echo data>custom-work\locked.txt`+"\r\n"+
+	b := fakeRunner(t, tookJob+"\r\n"+
 		":wait\r\n"+`if not exist test-ready (ping -n 2 127.0.0.1 >nul & goto wait)`+"\r\n"+`exit /b 0`)
 	h, err := b.Launch(context.Background(), backend.LaunchRequest{
 		Name: "job-locked", EncodedJITConfig: "aml0", WorkFolder: "custom-work",
@@ -155,10 +155,17 @@ func TestLaunchRetainsRecordWhenWorkspaceCleanupFails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		if err := b.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	path := filepath.Join(b.runnerRoot(), "custom-work", "locked.txt")
-	deadline := time.Now().Add(5 * time.Second)
-	for !exists(path) && time.Now().Before(deadline) {
-		time.Sleep(25 * time.Millisecond)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("data"), 0o600); err != nil {
+		t.Fatal(err)
 	}
 	name, err := windows.UTF16PtrFromString(path)
 	if err != nil {
