@@ -134,6 +134,52 @@ func TestLaunchRunsJobAndCleansWorkspace(t *testing.T) {
 	}
 }
 
+func TestLaunchRetainsRecordWhenWorkspaceCleanupFails(t *testing.T) {
+	b := fakeRunner(t, tookJob+"\r\n"+`mkdir custom-work & echo data>custom-work\locked.txt`+"\r\n"+
+		`ping -n 4 127.0.0.1 >nul & exit /b 0`)
+	h, err := b.Launch(context.Background(), backend.LaunchRequest{
+		Name: "job-locked", EncodedJITConfig: "aml0", WorkFolder: "custom-work",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(b.runnerRoot(), "custom-work", "locked.txt")
+	deadline := time.Now().Add(5 * time.Second)
+	for !exists(path) && time.Now().Before(deadline) {
+		time.Sleep(25 * time.Millisecond)
+	}
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, err := windows.CreateFile(name, windows.GENERIC_READ, 0, nil, windows.OPEN_EXISTING, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if file != 0 {
+			_ = windows.CloseHandle(file)
+		}
+	}()
+	if code, err := h.Wait(waitCtx(t)); err != nil || code != 0 {
+		t.Fatalf("Wait = %d, %v", code, err)
+	}
+	recordPath := filepath.Join(b.opt.StateDir, "job-locked.runner.json")
+	if !exists(recordPath) {
+		t.Fatal("cleanup failure must retain the runner record")
+	}
+	if err := windows.CloseHandle(file); err != nil {
+		t.Fatal(err)
+	}
+	file = 0
+	if err := b.CleanupOrphans(); err != nil {
+		t.Fatal(err)
+	}
+	if exists(recordPath) || exists(filepath.Join(b.runnerRoot(), "custom-work")) {
+		t.Fatal("retry must remove the record and custom workspace")
+	}
+}
+
 func TestLaunchClearsStateFromAnInterruptedRunner(t *testing.T) {
 	// The runner refuses to start over hidden credentials it left behind.
 	b := fakeRunner(t, `if exist .runner exit /b 0`+"\r\n"+tookJob+"\r\n"+`exit /b 0`)

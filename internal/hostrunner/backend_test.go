@@ -117,6 +117,62 @@ func TestRemoveOwnedRunnerPreservesRecordWhenIdentityLookupFails(t *testing.T) {
 	}
 }
 
+func TestRemoveRunnerPreservesRecordUntilResetSucceeds(t *testing.T) {
+	for _, owned := range []bool{false, true} {
+		t.Run(fmt.Sprintf("owned=%t", owned), func(t *testing.T) {
+			dir := t.TempDir()
+			b := &Backend{opt: Options{RunnerDir: filepath.Join(dir, "runner"), StateDir: filepath.Join(dir, "state"), RunnerVersion: "1"}}
+			if err := os.MkdirAll(b.opt.StateDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			lockedPath := filepath.Join(b.runnerRoot(), ".credentials")
+			if err := os.MkdirAll(lockedPath, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(lockedPath, "child"), []byte("not empty"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			record := runnerRecord{Name: "runner", Root: b.runnerRoot(), WorkFolder: "custom-work"}
+			if owned {
+				record.Ownership = backend.RunnerOwnership{Instance: "i", Target: "acme/site", Pool: "p", ScaleSetID: 1, RunnerID: 7}
+			}
+			recordPath := filepath.Join(b.opt.StateDir, runnerRecordName(record.Name, record.Ownership))
+			if err := writeRunnerRecord(recordPath, record); err != nil {
+				t.Fatal(err)
+			}
+			if err := b.removeRunner(context.Background(), recordPath, record); err == nil {
+				t.Fatal("expected install reset failure")
+			}
+			if _, err := os.Stat(recordPath); err != nil {
+				t.Fatalf("retry record lost: %v", err)
+			}
+			if err := os.Remove(filepath.Join(lockedPath, "child")); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Join(b.runnerRoot(), record.WorkFolder), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := b.removeRunner(context.Background(), recordPath, record); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(recordPath); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("record not removed after successful reset: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(b.runnerRoot(), record.WorkFolder)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("custom work folder not removed: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidWorkFolderRejectsRunnerGeneratedHelper(t *testing.T) {
+	for _, name := range []string{"run-helper.cmd", "RUN-HELPER.CMD"} {
+		if ValidWorkFolder(name) {
+			t.Errorf("runner-generated file %q accepted as a work folder", name)
+		}
+	}
+}
+
 func TestMatchesRunnerIdentity(t *testing.T) {
 	actual := processIdentity{startTime: 100, imageName: "cmd.exe"}
 	if !matchesRunnerIdentity(runnerRecord{StartTime: 100, ImageName: "cmd.exe"}, actual) {

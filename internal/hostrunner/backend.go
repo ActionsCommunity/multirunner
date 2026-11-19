@@ -397,11 +397,12 @@ func (b *Backend) Launch(ctx context.Context, req backend.LaunchRequest) (backen
 	cleanup := func() {
 		defer release()
 		errs := []error{group.close(), logFile.Close()}
-		errs = append(errs, b.resetInstall(root, workFolder, req.Name))
+		resetErr := b.resetInstall(root, workFolder, req.Name)
+		errs = append(errs, resetErr)
 		// Scale-set ownership records are the durable retry ledger. Keep them
 		// until the scale-set launcher has converged GitHub registration cleanup
 		// and explicitly calls RemoveOwnedRunner.
-		if req.Ownership.IsZero() {
+		if req.Ownership.IsZero() && resetErr == nil {
 			if err := os.Remove(recordPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 				errs = append(errs, err)
 			}
@@ -722,14 +723,15 @@ func (b *Backend) removeRunner(ctx context.Context, recordPath string, record ru
 	} else if record.Started {
 		return fmt.Errorf("host runner record %s has no process identity", filepath.Base(recordPath))
 	}
-	var errs []error
 	if record.Root == b.runnerRoot() && portableBaseName(record.WorkFolder) {
-		errs = append(errs, b.resetInstall(record.Root, record.WorkFolder, record.Name))
+		if err := b.resetInstall(record.Root, record.WorkFolder, record.Name); err != nil {
+			return err
+		}
 	}
 	if err := os.Remove(recordPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		errs = append(errs, err)
+		return err
 	}
-	return errors.Join(errs...)
+	return nil
 }
 
 func matchesRunnerIdentity(record runnerRecord, actual processIdentity) bool {
@@ -813,7 +815,7 @@ func ValidWorkFolder(name string) bool {
 	switch strings.ToLower(name) {
 	case "_diag", "bin", "externals",
 		"config.cmd", "config.sh", "env.cmd", "env.sh",
-		"run.cmd", "run.sh", "run-helper.cmd.template", "run-helper.sh.template",
+		"run.cmd", "run.sh", "run-helper.cmd", "run-helper.cmd.template", "run-helper.sh.template",
 		"safe_sleep.sh", "svc.sh", installedMarker:
 		return false
 	default:

@@ -21,6 +21,7 @@ import (
 	"github.com/GerardSmit/multirunner/internal/buildinfo"
 	"github.com/GerardSmit/multirunner/internal/config"
 	"github.com/GerardSmit/multirunner/internal/ghapp"
+	"github.com/GerardSmit/multirunner/internal/github"
 	"github.com/GerardSmit/multirunner/internal/winvm"
 )
 
@@ -176,6 +177,49 @@ func TestRunAutoscaleReturnsWebhookBindError(t *testing.T) {
 	err = runAutoscale(ctx, cfg, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err == nil || !strings.Contains(err.Error(), "listen on") {
 		t.Fatalf("runAutoscale error = %v, want webhook bind failure", err)
+	}
+}
+
+type blockingPollProvider struct {
+	called chan struct{}
+}
+
+func (*blockingPollProvider) ClientForSlot(int) *github.Client { return nil }
+func (*blockingPollProvider) ClientFor(string) *github.Client  { return nil }
+func (*blockingPollProvider) Scope() config.Scope              { return config.ScopeRepo }
+func (p *blockingPollProvider) QueuedJobs(ctx context.Context) ([]github.QueuedJob, error) {
+	close(p.called)
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func TestRunAutoscaleWebhookFailureCancelsInitialPoll(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p := &blockingPollProvider{called: make(chan struct{})}
+	cfg := &config.Config{
+		GitHub:  config.GitHub{Scope: config.ScopeRepo},
+		Webhook: config.Webhook{Listen: listener.Addr().String(), Path: "/webhook", PollIntervalSec: 1},
+	}
+	result := make(chan error, 1)
+	go func() { result <- runAutoscale(ctx, cfg, p, nil, slog.New(slog.NewTextHandler(io.Discard, nil))) }()
+	select {
+	case err := <-result:
+		if err == nil || !strings.Contains(err.Error(), "listen on") {
+			t.Fatalf("runAutoscale error = %v, want webhook bind failure", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("webhook failure did not cancel initial poll")
+	}
+	select {
+	case <-p.called:
+	default:
+		t.Fatal("initial poll was not exercised")
 	}
 }
 
