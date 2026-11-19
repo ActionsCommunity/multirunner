@@ -110,10 +110,15 @@ func TestIdentifyMatchesGetProcessTimes(t *testing.T) {
 }
 
 func TestLaunchRunsJobAndCleansWorkspace(t *testing.T) {
-	b := fakeRunner(t, `if not "%1"=="--jitconfig" exit /b 9`+"\r\n"+tookJob+"\r\n"+
+	b := fakeRunner(t, ":wait\r\n"+`if not exist test-ready (ping -n 2 127.0.0.1 >nul & goto wait)`+"\r\n"+
+		`if not "%1"=="--jitconfig" exit /b 9`+"\r\n"+tookJob+"\r\n"+
 		`mkdir _work\repo & echo %MR_TEST%> _work\repo\out.txt`+"\r\n"+
 		`mkdir _diag & echo worker> _diag\Worker_1.log & exit /b 3`)
 	h := launch(t, b, "job-1", map[string]string{"MR_TEST": "hello"})
+	ready := filepath.Join(b.runnerRoot(), "test-ready")
+	if err := os.WriteFile(ready, []byte("ready"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	code, err := h.Wait(waitCtx(t))
 	if err != nil || code != 3 {
 		t.Fatalf("Wait = %d, %v; want 3, nil", code, err)
@@ -129,14 +134,21 @@ func TestLaunchRunsJobAndCleansWorkspace(t *testing.T) {
 		t.Fatal("record removed, log kept")
 	}
 	// The install is free again for the next job.
-	if code, err := launch(t, b, "job-2", nil).Wait(waitCtx(t)); err != nil || code != 3 {
+	if err := os.Remove(ready); err != nil {
+		t.Fatal(err)
+	}
+	h = launch(t, b, "job-2", nil)
+	if err := os.WriteFile(ready, []byte("ready"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, err := h.Wait(waitCtx(t)); err != nil || code != 3 {
 		t.Fatalf("job-2 Wait = %d, %v", code, err)
 	}
 }
 
 func TestLaunchRetainsRecordWhenWorkspaceCleanupFails(t *testing.T) {
 	b := fakeRunner(t, tookJob+"\r\n"+`mkdir custom-work & echo data>custom-work\locked.txt`+"\r\n"+
-		`ping -n 4 127.0.0.1 >nul & exit /b 0`)
+		":wait\r\n"+`if not exist test-ready (ping -n 2 127.0.0.1 >nul & goto wait)`+"\r\n"+`exit /b 0`)
 	h, err := b.Launch(context.Background(), backend.LaunchRequest{
 		Name: "job-locked", EncodedJITConfig: "aml0", WorkFolder: "custom-work",
 	})
@@ -161,6 +173,9 @@ func TestLaunchRetainsRecordWhenWorkspaceCleanupFails(t *testing.T) {
 			_ = windows.CloseHandle(file)
 		}
 	}()
+	if err := os.WriteFile(filepath.Join(b.runnerRoot(), "test-ready"), []byte("ready"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if code, err := h.Wait(waitCtx(t)); err != nil || code != 0 {
 		t.Fatalf("Wait = %d, %v", code, err)
 	}
