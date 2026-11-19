@@ -376,14 +376,14 @@ func TestVersionedGoldenToolSelectors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantCanonical := "buildtools:17,buildtools:18,dotnet:10,dotnet:8,dotnet:9"
+	wantCanonical := "buildtools:17,buildtools:18,dotnet:10,dotnet:11"
 	for _, major := range plan.Node {
 		wantCanonical += ",node:" + major
 	}
 	if got := strings.Join(plan.Canonical, ","); got != wantCanonical {
 		t.Fatalf("canonical selectors = %q, want %q", got, wantCanonical)
 	}
-	if got, want := strings.Join(plan.DotNet, ","), "8.0,9.0,10.0"; got != want {
+	if got, want := strings.Join(plan.DotNet, ","), "10.0,11.0"; got != want {
 		t.Fatalf(".NET install order = %q, want %q", got, want)
 	}
 	if len(plan.Node) != len(imageVersionManifest.Node.Releases) {

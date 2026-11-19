@@ -118,7 +118,7 @@ func demandTestScaler(t *testing.T, scope config.Scope, size int) (*Scaler, *poo
 				}
 			},
 		)})
-	scaler := New([]*pool.Launcher{launcher}, client, scope, 0, logger)
+	scaler := New(t.Context(), []*pool.Launcher{launcher}, client, scope, 0, logger)
 	return scaler, launcher, be, jobs
 }
 

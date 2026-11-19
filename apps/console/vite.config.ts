@@ -160,6 +160,7 @@ export default defineConfig(({ command, mode }) => {
         }
       : undefined,
     test: {
+      ...(process.platform === 'win32' ? { pool: 'threads', maxWorkers: 2 } : {}),
       coverage: {
         provider: 'v8',
         reporter: ['text', 'json-summary'],

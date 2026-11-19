@@ -63,7 +63,10 @@ type metadataRequest struct {
 var _ webhook.QueuedObserver = (*Scaler)(nil)
 
 // New builds a Scaler. pollSec <= 0 disables API polling (webhook-only).
-func New(launchers []*pool.Launcher, gh github.ClientProvider, scope config.Scope, pollSec int, logger *slog.Logger) *Scaler {
+func New(ctx context.Context, launchers []*pool.Launcher, gh github.ClientProvider, scope config.Scope, pollSec int, logger *slog.Logger) *Scaler {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	states := make([]*state, len(launchers))
 	workers := 0
 	for i, l := range launchers {
@@ -76,7 +79,7 @@ func New(launchers []*pool.Launcher, gh github.ClientProvider, scope config.Scop
 	every := time.Duration(pollSec) * time.Second
 	scaler := &Scaler{
 		states: states, gh: gh, scope: scope, pollEvery: every,
-		logger: logger.With("component", "autoscale"), baseCtx: context.Background(),
+		logger: logger.With("component", "autoscale"), baseCtx: ctx,
 		metadataWorkers: workers,
 		metadataQueue:   make(chan metadataRequest, workers*metadataQueuePerWorker),
 		pending:         make(map[string]github.QueuedJob),
@@ -93,9 +96,27 @@ func New(launchers []*pool.Launcher, gh github.ClientProvider, scope config.Scop
 	return scaler
 }
 
+// EnsureImages prepares every pool before a webhook can accept work.
+func (s *Scaler) EnsureImages(ctx context.Context) error {
+	for _, st := range s.states {
+		if err := st.l.EnsureImage(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // Run ensures images are present, starts the poller (if enabled), and blocks
 // until ctx is cancelled.
 func (s *Scaler) Run(ctx context.Context) error {
+	if err := s.EnsureImages(ctx); err != nil {
+		return err
+	}
+	return s.RunPrepared(ctx)
+}
+
+// RunPrepared starts polling after EnsureImages has completed.
+func (s *Scaler) RunPrepared(ctx context.Context) error {
 	s.setContext(ctx)
 	defer func() {
 		s.demandMu.Lock()
@@ -103,11 +124,6 @@ func (s *Scaler) Run(ctx context.Context) error {
 		clear(s.retryAfter)
 		s.demandMu.Unlock()
 	}()
-	for _, st := range s.states {
-		if err := st.l.EnsureImage(ctx); err != nil {
-			return err
-		}
-	}
 	s.startMetadataWorkers(ctx)
 	s.demandWG.Add(1)
 	go func() {
@@ -136,6 +152,10 @@ func (s *Scaler) Run(ctx context.Context) error {
 // Launches use the scaler's long-lived context (NOT the caller's), so a webhook
 // handler returning does not cancel the runner.
 func (s *Scaler) OnQueued(event webhook.WorkflowJobEvent) {
+	if s.context().Err() != nil {
+		s.logger.Debug("ignoring queued job after autoscaler shutdown", "repo", event.Repository, "run_id", event.WorkflowJob.RunID)
+		return
+	}
 	client := s.gh.ClientFor(event.Repository)
 	if client == nil {
 		s.logger.Warn("ignoring queued job for unmanaged repository", "repo", event.Repository)

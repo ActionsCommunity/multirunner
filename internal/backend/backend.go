@@ -242,7 +242,8 @@ type RunnerHandle interface {
 	Logs(ctx context.Context) (io.ReadCloser, error)
 	// Kill forcibly terminates the runner (used during shutdown).
 	Kill(ctx context.Context) error
-	// ID returns the backend-specific identifier (container ID) for logging.
+	// ID returns the exact backend resource identifier. Lifecycle coordinators
+	// may pass it back to OwnedRunnerStore.RemoveOwnedRunner.
 	ID() string
 }
 

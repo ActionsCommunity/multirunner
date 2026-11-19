@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -109,6 +110,33 @@ func TestHandlePing(t *testing.T) {
 	body := "{}"
 	if code := do(t, s, "ping", sign(secret, []byte(body)), body); code != http.StatusOK {
 		t.Errorf("ping = %d", code)
+	}
+}
+
+func TestStartReturnsBindError(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	s := New(listener.Addr().String(), "/webhook", "test-secret", nil,
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	err = s.Start(ctx)
+	if err == nil || !strings.Contains(err.Error(), "listen on") {
+		t.Fatalf("Start error = %v, want bind failure", err)
+	}
+}
+
+func TestStartStopsWhenContextIsCanceled(t *testing.T) {
+	s := New("127.0.0.1:0", "/webhook", "test-secret", nil,
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := s.Start(ctx); err != nil {
+		t.Fatalf("Start canceled = %v", err)
 	}
 }
 

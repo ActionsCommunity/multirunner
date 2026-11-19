@@ -7,9 +7,11 @@ package vmview
 import (
 	"context"
 	"embed"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
 	"time"
 )
@@ -21,9 +23,42 @@ var novncFS embed.FS
 // VNC websocket port; the landing page auto-connects the browser to it (using
 // the hostname the browser used, so it works locally and remotely).
 func Serve(ctx context.Context, httpAddr string, wsPort int, logger *slog.Logger) error {
-	sub, err := fs.Sub(novncFS, "novnc")
+	h, err := handler(wsPort)
 	if err != nil {
 		return err
+	}
+	srv := &http.Server{Addr: httpAddr, Handler: h}
+	listener, err := net.Listen("tcp", httpAddr)
+	if err != nil {
+		return fmt.Errorf("listen on %s: %w", httpAddr, err)
+	}
+	errCh := make(chan error, 1)
+	go func() {
+		logger.Info("vm viewer listening", "url", "http://"+listener.Addr().String())
+		errCh <- srv.Serve(listener)
+	}()
+	select {
+	case err := <-errCh:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return fmt.Errorf("serve VM viewer: %w", err)
+	case <-ctx.Done():
+		shutCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+		defer cancel()
+		shutdownErr := srv.Shutdown(shutCtx)
+		serveErr := <-errCh
+		if errors.Is(serveErr, http.ErrServerClosed) {
+			serveErr = nil
+		}
+		return errors.Join(shutdownErr, serveErr)
+	}
+}
+
+func handler(wsPort int) (http.Handler, error) {
+	sub, err := fs.Sub(novncFS, "novnc")
+	if err != nil {
+		return nil, err
 	}
 	mux := http.NewServeMux()
 	mux.Handle("/novnc/", http.StripPrefix("/novnc/", http.FileServer(http.FS(sub))))
@@ -35,18 +70,7 @@ func Serve(ctx context.Context, httpAddr string, wsPort int, logger *slog.Logger
 		w.Header().Set("Content-Type", "text/html")
 		fmt.Fprintf(w, landingHTML, wsPort)
 	})
-
-	srv := &http.Server{Addr: httpAddr, Handler: mux}
-	go func() {
-		logger.Info("vm viewer listening", "url", "http://"+httpAddr)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Error("vm viewer stopped", "err", err)
-		}
-	}()
-	<-ctx.Done()
-	shutCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
-	defer cancel()
-	return srv.Shutdown(shutCtx)
+	return mux, nil
 }
 
 // landingHTML redirects to the noVNC lite client, pointing it at the QEMU
