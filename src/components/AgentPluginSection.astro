@@ -1,0 +1,183 @@
+---
+const skills = [
+  {
+    name: "multirunner-setup",
+    purpose: "Set up a new host with a verified binary, runtime, configuration, credentials, service, and canary.",
+  },
+  {
+    name: "multirunner-host",
+    purpose: "Tune or upgrade an existing host and its container pools through an approved lifecycle.",
+  },
+  {
+    name: "multirunner-diagnose",
+    purpose: "Run bounded read-only checks across the service, runtime, cache, routing, and runners.",
+  },
+  {
+    name: "multirunner-github",
+    purpose: "Configure GitHub targets, credentials, labels, scale sets, and workflow_job webhooks.",
+  },
+  {
+    name: "multirunner-qemu",
+    purpose: "Bake, inspect, monitor, and safely debug Windows QEMU runner pools.",
+  },
+];
+---
+
+<section class="section agent-section" id="agent-plugin">
+  <div class="page-shell agent-layout">
+    <div class="agent-intro">
+      <h2>Operate multirunner with the agent you already use.</h2>
+      <p class="lead">
+        One self-contained plugin packages shared skills for GitHub Copilot CLI,
+        Claude Code, and Codex. Each focused router loads only the operator
+        references needed for the task.
+      </p>
+      <div class="agent-clients" aria-label="Supported agent clients">
+        <span>Copilot CLI</span>
+        <span>Claude Code</span>
+        <span>Codex</span>
+      </div>
+      <p class="install-label">Install for Copilot CLI</p>
+      <pre><code>copilot plugin install ActionsCommunity/multirunner
+copilot plugin list</code></pre>
+      <p class="safety-note">
+        Skills preserve existing configuration and ask before elevation, package
+        installation, service changes, GitHub writes, workflow dispatch, or removal.
+        Secret values and JIT configuration stay out of chat and logs.
+      </p>
+    </div>
+
+    <div class="skill-directory">
+      <p class="directory-label">Five focused skills</p>
+      <ol>
+        {skills.map((skill, index) => (
+          <li>
+            <span class="skill-index">{String(index + 1).padStart(2, "0")}</span>
+            <div>
+              <h3><code>{skill.name}</code></h3>
+              <p>{skill.purpose}</p>
+            </div>
+          </li>
+        ))}
+      </ol>
+      <a href="https://github.com/actionscommunity/multirunner/tree/main/skills">
+        Browse the skill source
+      </a>
+    </div>
+  </div>
+</section>
+
+<style>
+  .agent-section {
+    color: var(--paper);
+    background: var(--ink);
+  }
+
+  .agent-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 0.9fr) minmax(340px, 1.1fr);
+    gap: clamp(2.5rem, 7vw, 7rem);
+    align-items: start;
+  }
+
+  .agent-intro,
+  .skill-directory {
+    min-width: 0;
+  }
+
+  .agent-intro h2,
+  .skill-directory h3,
+  .skill-directory code {
+    color: var(--paper);
+  }
+
+  .skill-directory code {
+    padding: 0;
+    background: transparent;
+  }
+
+  .agent-intro .lead {
+    margin: var(--space-4) 0;
+    color: color-mix(in srgb, var(--paper) 80%, var(--steel));
+  }
+
+  .agent-clients {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-bottom: var(--space-5);
+  }
+
+  .agent-clients span {
+    padding: 0.3rem 0.6rem;
+    color: var(--paper);
+    border: 1px solid var(--steel);
+    font: 600 0.72rem/1.4 var(--font-mono);
+  }
+
+  .install-label,
+  .directory-label {
+    margin: 0 0 0.45rem;
+    color: color-mix(in srgb, var(--orange) 42%, var(--paper));
+    font: 600 0.72rem/1.2 var(--font-mono);
+  }
+
+  .agent-intro pre {
+    color: var(--ink);
+    background: var(--paper);
+    border-color: var(--paper);
+    box-shadow: 6px 6px 0 var(--orange);
+  }
+
+  .safety-note {
+    margin: var(--space-4) 0 0;
+    color: color-mix(in srgb, var(--paper) 65%, var(--steel));
+    font-size: 0.88rem;
+  }
+
+  .skill-directory ol {
+    margin: 0 0 var(--space-4);
+    padding: 0;
+    list-style: none;
+    border-top: 2px solid var(--paper);
+  }
+
+  .skill-directory li {
+    display: grid;
+    grid-template-columns: 2rem minmax(0, 1fr);
+    gap: var(--space-3);
+    padding: var(--space-3) 0;
+    border-bottom: 1px solid var(--steel);
+  }
+
+  .skill-index {
+    padding-top: 0.25rem;
+    color: color-mix(in srgb, var(--orange) 42%, var(--paper));
+    font: 600 0.72rem/1.2 var(--font-mono);
+  }
+
+  .skill-directory h3 {
+    margin-bottom: 0.35rem;
+    font-size: 1rem;
+  }
+
+  .skill-directory p {
+    margin: 0;
+    color: color-mix(in srgb, var(--paper) 76%, var(--steel));
+  }
+
+  .skill-directory > a {
+    color: var(--paper);
+    font-weight: 700;
+  }
+
+  .skill-directory > a:hover {
+    color: color-mix(in srgb, var(--orange) 42%, var(--paper));
+  }
+
+  @media (max-width: 860px) {
+    .agent-layout {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>
