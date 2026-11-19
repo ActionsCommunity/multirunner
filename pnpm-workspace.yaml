@@ -1,0 +1,6 @@
+minimumReleaseAge: 4320
+strictDepBuilds: true
+allowBuilds:
+  esbuild: true
+  fsevents: true
+  sharp: false

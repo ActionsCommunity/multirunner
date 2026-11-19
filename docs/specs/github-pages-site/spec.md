@@ -44,11 +44,13 @@ The landing page uses the repository pitch, install command, quick-start
 configuration, supported backends, and operating model. Dedicated sections explain
 the `github.com/actions/scaleset` integration and the plugin shared by Copilot CLI,
 Claude Code, and Codex. A separate command reference reflects the Cobra command
-tree and documented flags. Links to deeper configuration, releases, skills, and
-source remain on GitHub rather than duplicating all repository documentation.
+tree using help generated from the built binary. An operations page covers
+provisioning, configuration, backends, images, and troubleshooting, with links
+to the deeper repository documentation.
 
-Deployment uses `withastro/action` to build and upload the Pages artifact, followed
-by `actions/deploy-pages`. Action references are pinned to immutable commit SHAs.
+Deployment runs the same locked build and tests as PR CI, then uses
+`actions/upload-pages-artifact` and `actions/deploy-pages`. Action references are
+pinned to immutable commit SHAs.
 The workflow runs only for the `main` branch and uses the least permissions needed
 by each job.
 
@@ -92,12 +94,12 @@ text over the generated hero so technical wording never depends on model glyphs.
 ## Impact Scan
 
 - **Go application**: No runtime or public CLI behavior changes.
-- **Repository tooling**: Adds Node 24 and npm for site builds while retaining the
+- **Repository tooling**: Adds Node 24 and pnpm for site builds while retaining the
   existing Go CI matrix.
 - **CI/CD**: Adds a site job to the test workflow and a separate Pages deployment.
-- **Public surface**: Adds two static routes and project metadata for search and
+- **Public surface**: Adds three static routes and project metadata for search and
   social previews.
-- **Security**: Adds npm and action supply-chain inputs, constrained by lockfile
+- **Security**: Adds package and action supply-chain inputs, constrained by lockfile
   verification, strict lifecycle-script allowlisting, SHA pins, and scoped tokens.
 - **Operations**: Pages and repository homepage settings remain control-plane
   actions performed only after explicit approval.
@@ -115,13 +117,13 @@ text over the generated hero so technical wording never depends on model glyphs.
 
 ## Quality Gates
 
-- `npm ci --no-audit --no-fund`
-- `npm test`
+- `pnpm install --frozen-lockfile`
+- `pnpm test`
 - `go vet ./...`
 - `go build ./...`
 - `go test -short ./...`
 - `actionlint` for both changed workflows
-- `npm audit --omit=dev --audit-level=high`
+- `pnpm audit --prod --audit-level=high`
 - Playwright desktop, mobile, keyboard, console, network, and nested-route smoke
 - Template-copy, sentinel, base-path, secret, anti-slop, documentation, and link checks
 

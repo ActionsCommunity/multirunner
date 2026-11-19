@@ -6,13 +6,17 @@ github:
   owner: my-org
   repo: my-repo
 
+auth:
+  pat: "\${GITHUB_PAT}"
+
 pools:
   - name: linux-pool
     os: linux
     size: 4
     scale_set: multirunner-linux
-    runner_group: Default
-    labels: [self-hosted, linux, x64]`;
+    labels: [self-hosted, linux, x64]
+    docker:
+      host: "unix:///var/run/docker.sock"`;
 ---
 
 <section class="section scale-set-section" id="scale-sets">
@@ -20,9 +24,9 @@ pools:
     <div class="scale-set-copy">
       <h2>Let GitHub drive runner capacity.</h2>
       <p class="lead">
-        multirunner is built on the
+        In scale-set mode, multirunner uses
         <a href="https://github.com/actions/scaleset"><code>actions/scaleset</code></a>
-        technology. It holds a long-poll session open while GitHub supplies the
+        to hold a long-poll session open while GitHub supplies the
         desired runner count and encoded JIT configuration.
       </p>
       <p>
@@ -31,17 +35,18 @@ pools:
         Podman, containerd, and QEMU continue through the same execution backends.
       </p>
       <ul class="scale-set-benefits">
-        <li><strong>Fast assignments:</strong> receive work in seconds without tuning a poll interval.</li>
+        <li><strong>Long polling:</strong> receive updates without tuning a periodic queue poll.</li>
         <li><strong>NAT-safe:</strong> keep an outbound long-poll session with no inbound endpoint.</li>
-        <li><strong>Real capacity:</strong> tell GitHub when the host is saturated instead of dropping requests.</li>
+        <li><strong>Configured capacity:</strong> advertise the pool’s maximum runner count to GitHub.</li>
       </ul>
     </div>
     <div class="scale-set-config">
       <p class="config-label">config.yaml</p>
-      <pre><code>{scaleSetConfig}</code></pre>
+      <pre data-config-example="scaleset"><code>{scaleSetConfig}</code></pre>
       <p class="config-note">
         One scale set maps to one target and one label set. Pool <code>size</code>
-        is the maximum capacity advertised to GitHub.
+        is the maximum capacity advertised to GitHub. Target this example with
+        <code>runs-on: multirunner-linux</code>.
       </p>
     </div>
   </div>

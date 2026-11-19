@@ -380,3 +380,10 @@ h3 {
     transition-duration: 0.01ms !important;
   }
 }
+.manual { padding-block: 3rem 5rem; }
+.manual h2 { margin-block: 2rem 0.6rem; font-size: 1.65rem; }
+.manual h3 { margin-block: 1.2rem 0.4rem; }
+.manual p, .manual li { max-width: 76ch; overflow-wrap: anywhere; }
+.manual :not(pre) > code { white-space: normal; }
+.manual nav { display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; margin-block: 1rem; }
+.manual pre { overflow-x: auto; }

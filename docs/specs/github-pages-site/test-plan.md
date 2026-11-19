@@ -10,7 +10,7 @@
 ## Coverage Strategy
 
 Node's built-in test runner inspects source, workflow, image, and built output
-invariants. `npm test` builds the site before assertions, which covers Astro
+invariants. `pnpm test` builds the site before assertions, which covers Astro
 rendering and generated routes. The existing Go suite confirms the new root
 toolchain does not affect multirunner. Browser verification covers real HTTP
 loading, internal navigation, nested-route refresh, image loading, and layout
@@ -20,19 +20,19 @@ overflow at the preview viewport.
 
 | ID | Behavior to verify | Source | Level | Test file or command | Status |
 |----|--------------------|--------|-------|----------------------|--------|
-| T1 | Astro builds the landing and command pages | AC-1, AC-3 | integration | `npm test` | automated |
+| T1 | Astro builds the landing, commands, and operations pages | AC-1, AC-3 | integration | `pnpm test` | automated |
 | T2 | Config targets `actionscommunity.github.io` with base `/multirunner/` | AC-4 | unit | `test/site.test.mjs` | automated |
 | T3 | Pages workflow targets main with pinned official actions, required permissions, and lockfile verification | AC-5 | unit | `test/site.test.mjs` | automated |
 | T4 | Site source uses a working current-main build command and contains no template copy or sentinels | AC-1, AC-2 | unit | `test/site.test.mjs` | automated |
-| T5 | Built root-relative URLs retain the `/multirunner/` prefix | AC-4 | integration | `test/site.test.mjs` | automated |
-| T6 | Built command reference stays in parity with public and generated Cobra commands and required flags | AC-3 | integration | `test/site.test.mjs` | automated |
+| T5 | Built local URLs retain the prefix and resolve to existing routes, anchors, and image assets | AC-4 | integration | `test/site.test.mjs` | automated |
+| T6 | Built CLI reference reproduces public binary help; both rendered YAML examples pass the binary's offline validation | AC-3 | integration | `test/site.test.mjs` | automated |
 | T7 | Production images exist at exact dimensions and no placeholder SVG remains | AC-6 | unit | `test/site.test.mjs` | automated |
 | T8 | Landing and nested routes load over HTTP, including direct command-route refresh | AC-4 | end-to-end | browser canvas and HTTP preview checks | automated |
 | T9 | Site images load and desktop pages have no horizontal overflow | AC-1 | end-to-end | browser canvas runtime inspection | automated |
 | T10 | Template generator, repository digest, and image-manifest helpers remain valid | AC-4, AC-6 | integration | `npm --prefix C:\Users\jong\.agents\skills\create-gh-pages-site test` | automated |
 | T11 | Existing multirunner behavior remains green | Non-regression | integration | `go test ./...` with invocation-scoped Git safety config | automated |
-| T12 | Site dependencies have no known high-severity vulnerabilities | Security | integration | `npm audit --omit=dev --audit-level=high` | automated |
-| T13 | Pull requests and deployment run complete site tests with read-only permissions, strict install scripts, and a timeout | AC-5 | integration | `test/site.test.mjs` | automated |
+| T12 | Site dependencies have no known high-severity vulnerabilities | Security | integration | `pnpm audit --prod --audit-level=high` | manual |
+| T13 | Pull requests and deployment run complete site tests with read-only permissions and a timeout; frozen installs enforce the release-age and build-script policies | AC-5 | integration | `test/site.test.mjs` and CI frozen install | automated |
 | T14 | Every built page provides skip navigation and explicit keyboard focus styling | Accessibility | integration | `test/site.test.mjs` | automated |
 | T15 | Landing page includes the scale-set technology, plugin install, supported clients, and all five skills | AC-8, AC-9 | integration | `test/site.test.mjs` | automated |
 | T16 | Runner Yard contract, built tokens, design sidecar, and image palette stay synchronized | AC-1, AC-6, AC-7 | integration | `test/site.test.mjs` | automated |

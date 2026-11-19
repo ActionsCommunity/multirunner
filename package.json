@@ -3,14 +3,14 @@
   "type": "module",
   "version": "0.1.0",
   "private": true,
+  "packageManager": "pnpm@12.10.1",
   "engines": {
-    "node": ">=24.0.0",
-    "npm": ">=11.10.0"
+    "node": ">=24.0.0"
   },
   "scripts": {
-    "dev": "astro dev",
-    "build": "astro build",
-    "test": "npm run build && node --test test/site.test.mjs",
+    "dev": "node scripts/site-cli.mjs && astro dev",
+    "build": "node scripts/site-cli.mjs && astro build",
+    "test": "pnpm run build && node --test test/site.test.mjs",
     "preview": "astro preview",
     "astro": "astro"
   },
@@ -18,10 +18,7 @@
     "@fontsource-variable/archivo": "^5.3.0",
     "@fontsource-variable/ibm-plex-sans": "^5.3.0",
     "@fontsource/ibm-plex-mono": "^5.3.0",
-    "astro": "^7.2.9"
-  },
-  "allowScripts": {
-    "esbuild@0.28.2": true,
-    "fsevents@2.3.3": true
+    "astro": "^7.2.9",
+    "sharp": "0.35.4"
   }
 }

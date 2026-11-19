@@ -19,7 +19,7 @@ const repoUrl = "https://github.com/actionscommunity/multirunner";
 const siteOrigin = Astro.site ?? Astro.url.origin;
 const canonicalUrl = new URL(Astro.url.pathname, siteOrigin).href;
 const socialImageUrl = new URL(`${base}images/og.png`, siteOrigin).href;
-const isCommands = Astro.url.pathname.includes("/commands");
+const isCurrent = (path: string) => Astro.url.pathname === `${base}${path}` ? "page" : undefined;
 ---
 
 <!doctype html>
@@ -43,14 +43,15 @@ const isCommands = Astro.url.pathname.includes("/commands");
     <a class="skip-link" href="#main-content">Skip to main content</a>
     <header class="site-header">
       <nav class="nav-shell" aria-label="Primary navigation">
-        <a class="brand" href={base} aria-current={isCommands ? undefined : "page"}>
+        <a class="brand" href={base} aria-current={isCurrent("")}>
           <img src={`${base}images/favicon.png`} alt="" width="40" height="40" />
           <span>multirunner</span>
         </a>
         <div class="nav-links">
           <a class="nav-wide" href={`${base}#features`}>How it works</a>
           <a class="nav-mobile-optional" href={`${base}#get-started`}>Get started</a>
-          <a href={`${base}commands/`} aria-current={isCommands ? "page" : undefined}>CLI reference</a>
+          <a href={`${base}commands/`} aria-current={isCurrent("commands/")}>CLI reference</a>
+          <a href={`${base}operations/`} aria-current={isCurrent("operations/")}>Operations</a>
           <a class="source-link" href={repoUrl}>GitHub</a>
         </div>
       </nav>

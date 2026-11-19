@@ -94,7 +94,7 @@
       "1280": "Desktop hierarchy, copy-safe hero, and full navigation."
     },
     "gates": [
-      "npm test",
+      "pnpm test",
       "Astro build",
       "Impeccable detector",
       "Accessibility audit",
