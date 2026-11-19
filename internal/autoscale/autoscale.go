@@ -31,25 +31,41 @@ type state struct {
 }
 
 // New builds a Scaler. pollSec <= 0 disables API polling (webhook-only).
-func New(launchers []*pool.Launcher, gh github.ClientProvider, scope config.Scope, pollSec int, logger *slog.Logger) *Scaler {
+func New(ctx context.Context, launchers []*pool.Launcher, gh github.ClientProvider, scope config.Scope, pollSec int, logger *slog.Logger) *Scaler {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	states := make([]*state, len(launchers))
 	for i, l := range launchers {
 		states[i] = &state{l: l, sem: make(chan struct{}, l.Max())}
 	}
 	every := time.Duration(pollSec) * time.Second
 	return &Scaler{states: states, gh: gh, scope: scope, pollEvery: every,
-		logger: logger.With("component", "autoscale"), baseCtx: context.Background()}
+		logger: logger.With("component", "autoscale"), baseCtx: ctx}
 }
 
-// Run ensures images are present, starts the poller (if enabled), and blocks
-// until ctx is cancelled.
-func (s *Scaler) Run(ctx context.Context) error {
+// EnsureImages prepares every pool before a webhook can accept work.
+func (s *Scaler) EnsureImages(ctx context.Context) error {
 	s.baseCtx = ctx // launched runners use this long-lived context, not a request ctx
 	for _, st := range s.states {
 		if err := st.l.EnsureImage(ctx); err != nil {
 			return err
 		}
 	}
+	return nil
+}
+
+// Run ensures images are present, starts the poller (if enabled), and blocks
+// until ctx is cancelled.
+func (s *Scaler) Run(ctx context.Context) error {
+	if err := s.EnsureImages(ctx); err != nil {
+		return err
+	}
+	return s.RunPrepared(ctx)
+}
+
+// RunPrepared starts polling after EnsureImages has completed.
+func (s *Scaler) RunPrepared(ctx context.Context) error {
 	s.logger.Info("autoscaler running", "pools", len(s.states), "poll", s.pollEvery.String())
 	if s.pollEvery > 0 {
 		s.reconcile() // initial top-up
@@ -65,6 +81,10 @@ func (s *Scaler) Run(ctx context.Context) error {
 // Launches use the scaler's long-lived context (NOT the caller's), so a webhook
 // handler returning does not cancel the runner.
 func (s *Scaler) OnQueued(repo string, runID int64, labels []string) {
+	if s.baseCtx.Err() != nil {
+		s.logger.Debug("ignoring queued job after autoscaler shutdown", "repo", repo, "run_id", runID)
+		return
+	}
 	client := s.gh.ClientFor(repo)
 	if client == nil {
 		s.logger.Warn("ignoring queued job for unmanaged repository", "repo", repo)
@@ -85,9 +105,6 @@ func (s *Scaler) OnQueued(repo string, runID int64, labels []string) {
 		return
 	}
 	ctx := s.baseCtx
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	go func() {
 		resolved, err := client.ResolveQueuedJob(ctx, repo, runID, labels)
 		if err != nil {

@@ -4,10 +4,11 @@
 
 A GitHub Actions self-hosted runner executes **one job at a time**. To run jobs in
 parallel you normally stand up several runners by hand and babysit them.
-multirunner does it for you: it keeps a pool of **fresh, throwaway runners**
-ready, hands each one a single job, then tears it down and replaces it with a
-clean one. It also bundles a **local Actions cache** and a **local git mirror**
-so your jobs stop re-downloading the same gigabytes from GitHub on every run.
+multirunner does it for you: it keeps a pool of **fresh, single-job runner
+registrations** ready, hands each one a job, then replaces the registration and
+resets the backend state. It also bundles a **local Actions cache** and a
+**local git mirror** so your jobs stop re-downloading the same gigabytes from
+GitHub on every run.
 
 One small binary. One config file. No Kubernetes, no control plane.
 
@@ -15,10 +16,12 @@ One small binary. One config file. No Kubernetes, no control plane.
 
 ## Why
 
-- **Real parallelism** — N isolated runners on one host, each on its own fresh
-  registration. Queue 10 jobs, run 10 at once.
-- **Clean every time** — each job gets a pristine, ephemeral environment (a
-  container or a VM). No state leaks between jobs.
+- **Real parallelism** — N runner slots on one host, each with a fresh
+  registration. Container and VM slots are isolated; direct-host pools are
+  explicitly not.
+- **Clean every time** — container and VM jobs get a pristine environment; a
+  direct-host pool resets runner credentials, workspace, and diagnostics
+  between trusted jobs.
 - **Fast** — a self-hosted Actions cache keeps `actions/cache` on your host, and
   a git mirror makes `actions/checkout` fetch only the new commits instead of
   full-cloning every time.
@@ -32,6 +35,7 @@ One small binary. One config file. No Kubernetes, no control plane.
 | **Linux runners** | Docker **or** Podman (docker-compatible API). |
 | **Windows runners (containers)** | Native Windows containers via **containerd + runhcs** — no Docker Desktop. |
 | **Windows runners in QEMU VMs** | Run Windows from a baked golden image on Linux, Windows, or macOS. |
+| **Windows runners on the host** | Run trusted, allowlisted jobs directly as the current Windows user when they need local drives, shells, or signed-in tools. |
 | **Mix Linux + Windows** | Multiple pools, different OSes, one orchestrator. |
 | **Self-hosted Actions cache** | Built-in v2 cache server — `actions/cache` stays on your host. |
 | **Git mirror cache** | Local bare mirror; `actions/checkout` fetches only the delta. |
@@ -45,6 +49,8 @@ including real toolchains (`actions/checkout`, `actions/setup-dotnet`,
 `dotnet build`) and `actions/cache` save/restore against the local server.
 Windows container images receive build and smoke checks in CI. Integration jobs
 for containerd and QEMU are included for suitable self-hosted infrastructure.
+The Windows host backend has regression coverage for process containment,
+crash recovery, workspace cleanup, and secret filtering.
 
 ---
 
@@ -54,8 +60,8 @@ In `pool` and `autoscale` modes, multirunner:
 
 1. Calls GitHub's `generate-jitconfig` (repo / repos / org / enterprise scope) for a
    single-use registration.
-2. Launches a clean runner, either a container or a VM, that runs the **stock GitHub
-   runner** with that JIT config.
+2. Launches the **stock GitHub runner** with that JIT config in a container, a
+   VM, or (for an explicitly selected Windows host pool) directly on the host.
 3. The runner takes exactly one job, then deregisters itself (ephemeral).
 4. multirunner notices it exited and immediately starts a fresh one.
 
@@ -451,6 +457,68 @@ Highlights:
   exhausted rearms. A real key/KMS skips time-based evaluation handling, not
   tool-fingerprint checks.
 
+### Windows host runners (no isolation)
+
+`backend: host` runs the runner **directly on this machine, as the user
+multirunner runs as**. There's no container or VM. It's for jobs that must use
+the host itself: its PowerShell, its drives and files, and tools already signed
+in there (for example a deploy that reads local state or a local database).
+
+```yaml
+provisioning: autoscale
+pools:
+  - name: nightly-sync
+    os: windows
+    backend: host
+    labels: [self-hosted, host-sync]
+    # Required: a host job has your full access, so bind the pool to exact
+    # workflows (or opt out with host.allow_unrestricted: true).
+    repository: acme/site
+    workflows: [.github/workflows/sync.yml]
+    workflow_event: schedule
+    workflow_actor: octocat
+    workflow_ref: main              # the run's head_branch, not refs/heads/main
+    # host:
+    #   runner_dir: D:\multirunner\nightly-sync\runner   # default %LOCALAPPDATA%\multirunner\host\<pool>\runner
+    #   state_dir:  D:\multirunner\nightly-sync\state    # records + per-job logs
+    #   runner_version: "2.337.0"                       # with runner_sha256
+```
+
+How it behaves:
+- **Download.** On first start it downloads the pinned `actions/runner` release,
+  verifies its SHA256 and extracts it once per pool.
+- **One job at a time, clean every time.** Pools are `size: 1`. Each job is an
+  ephemeral JIT runner (`run.cmd --jitconfig`) from that install. Before and
+  after every job the install is reset: the runner's `.runner`/`.credentials`
+  files and the work folder are removed (`host.keep_workspace: true` keeps the
+  work folder for debugging), and `_diag` moves to `<state_dir>/<runner>.diag`
+  next to `<runner>.log`. The newest 20 of each are kept.
+- **A runner that never takes a job is a failure.** `run.cmd` exits 0 even when
+  the listener fails to start, so a run whose log never shows `Running job:`
+  counts as a failed launch (backoff, `max_consecutive_failures`).
+- **Kill stops everything.** The runner starts suspended, is placed in a
+  Windows Job Object, and only then resumes, so a kill or shutdown stops every
+  process the job started. Shutdown waits for that cleanup.
+- **Crash recovery.** On startup, a leftover runner from a previous run is
+  stopped if its PID still has the recorded start time (it's never killed on a
+  PID alone), and the install is reset.
+- **Environment.** Jobs inherit the environment and signed-in tools of
+  multirunner's user, except multirunner's own secrets: variables from `.env`,
+  variables referenced as `${VAR}` in the config, any variable holding a
+  resolved secret value, and inherited `MULTIRUNNER_*`. When the git mirror is
+  enabled, multirunner deliberately adds `MULTIRUNNER_GIT_MIRROR` for the job.
+- **Not as SYSTEM.** A host pool refuses to start under `NT AUTHORITY\SYSTEM`
+  (the default `multirunner service install` identity) unless
+  `host.allow_local_system: true`. Run multirunner as the user whose tools the
+  jobs need.
+
+Use it only for trusted, allowlisted workflows in a private repository. The
+allowlist accepts one `workflow_event` per pool, so a workflow that runs on both
+`schedule` and `workflow_dispatch` needs two host pools. Each pool gets its
+own directories by default; explicit `runner_dir`/`state_dir` must not alias or
+overlap any other host runner/state path. A custom `work_folder` must also avoid
+runner-install names such as `bin`, `_diag`, and `run.cmd`.
+
 ---
 
 ## Self-hosted Actions cache
@@ -687,6 +755,7 @@ internal/config    config schema + loader
 internal/github    JIT client (repo/org/enterprise, PAT/App)
 internal/backend   container backends (Docker/Podman, containerd Windows)
 internal/winvm     QEMU Windows-VM backend + golden bake
+internal/hostrunner Windows host backend (no isolation, Job Object per runner)
 internal/pool      per-OS ephemeral pool + reprovision loop
 internal/scaleset  runner scale-set sessions + lifecycle management
 internal/cache     self-hosted v2 cache server
@@ -696,6 +765,30 @@ images/            runner + cacheserver Dockerfiles
 
 ## Tests
 
+Core Go validation:
+
 ```sh
+go vet ./...
 go test ./...
+go test ./testdata/conformance/... -count=1
 ```
+
+Language/toolchain conformance (the same fixtures used by CI):
+
+```sh
+pnpm --dir testdata/conformance/node install --frozen-lockfile
+pnpm --dir testdata/conformance/node test
+
+cd testdata/conformance/python
+uv run --locked python -m unittest discover -s tests
+cd ../../..
+
+dotnet restore testdata/conformance/dotnet/Conformance.slnx --locked-mode
+dotnet build testdata/conformance/dotnet/Conformance.slnx --configuration Release --no-restore
+dotnet test testdata/conformance/dotnet/Conformance.slnx --configuration Release --no-build --no-restore
+```
+
+`go test ./...` does not include packages below `testdata`, so the separate Go
+conformance command is required. Real Docker, QEMU, Windows-container, and
+privileged GitHub runner tests remain environment-gated in
+`.github/workflows/test.yml` and `.github/workflows/e2e-linux.yml`.
