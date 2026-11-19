@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/GerardSmit/multirunner/internal/backend"
+	"github.com/GerardSmit/multirunner/internal/backgroundexec"
 )
 
 // Options configures the QEMU Windows-VM backend.
@@ -152,7 +153,7 @@ func (b *Backend) Launch(ctx context.Context, req backend.LaunchRequest) (backen
 		return removeRunnerRecord(b.opt.WorkDir, recordPath, record)
 	}
 
-	if out, err := exec.CommandContext(ctx, b.opt.ImgBin, OverlayCreateArgs(b.opt.Golden, overlay)...).CombinedOutput(); err != nil {
+	if out, err := backgroundexec.CommandContext(ctx, b.opt.ImgBin, OverlayCreateArgs(b.opt.Golden, overlay)...).CombinedOutput(); err != nil {
 		return nil, errors.Join(
 			fmt.Errorf("create overlay: %w: %s", err, out),
 			cleanupFailedLaunch(),
@@ -186,7 +187,7 @@ func (b *Backend) Launch(ctx context.Context, req backend.LaunchRequest) (backen
 		Name: req.Name, QMPAddr: qmpAddr, PIDFile: pidPath,
 		MemMB: b.opt.MemMB, CPUs: b.opt.CPUs, Accel: b.accel, Firmware: fw,
 	})
-	cmd := exec.Command(b.opt.QEMUBin, args...)
+	cmd := backgroundexec.Command(b.opt.QEMUBin, args...)
 	if err := cmd.Start(); err != nil {
 		return nil, errors.Join(
 			fmt.Errorf("start qemu: %w", err),
