@@ -129,6 +129,7 @@ func TestRemoveRunnerPreservesRecordUntilResetSucceeds(t *testing.T) {
 			if err := os.MkdirAll(lockedPath, 0o700); err != nil {
 				t.Fatal(err)
 			}
+			t.Cleanup(func() { _ = os.Chmod(lockedPath, 0o700) })
 			if err := os.WriteFile(filepath.Join(lockedPath, "child"), []byte("not empty"), 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -145,6 +146,9 @@ func TestRemoveRunnerPreservesRecordUntilResetSucceeds(t *testing.T) {
 			}
 			if _, err := os.Stat(recordPath); err != nil {
 				t.Fatalf("retry record lost: %v", err)
+			}
+			if err := os.Chmod(lockedPath, 0o700); err != nil {
+				t.Fatal(err)
 			}
 			if err := os.Remove(filepath.Join(lockedPath, "child")); err != nil {
 				t.Fatal(err)
