@@ -14,7 +14,7 @@
 #   docker build -f images/linux/flavors/node.Dockerfile \
 #     --build-arg PARENT=multirunner/runner-linux-native-build:dev -t multirunner/runner-linux-node:dev .
 ARG PARENT=gerardsmit/multirunner-runner-linux:native-build
-FROM docker:29.9.0-cli@sha256:1a4c7cb63513f349bdad01fcc6e0f3f2f67d37b9da86f14dc0d4a0942eecda00 AS docker-cli
+FROM docker:29.10.0-cli@sha256:34507eb5069d8be82c95dd3b6987d4250fd5fee49b82e2509b7d7a7030740d6d AS docker-cli
 
 FROM ${PARENT}
 
