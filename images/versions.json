@@ -4,7 +4,7 @@
     "linux_base": {
       "repository": "mcr.microsoft.com/dotnet/runtime-deps",
       "tag": "10.0-noble",
-      "digest": "sha256:fabe6d8f15c430642a1f92ba0b8d58ff81370cd34c39a182164ad13ba136d38f"
+      "digest": "sha256:e6702e45635272155c2aa35568bcbdb975595c0afa73e2656a973d0a87703282"
     },
     "windows_base": {
       "repository": "mcr.microsoft.com/windows/servercore",
